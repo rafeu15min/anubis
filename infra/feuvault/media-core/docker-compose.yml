@@ -1,0 +1,38 @@
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    # API só no link direto PC <-> FeuVault (fora da rede da casa)
+    ports:
+      - "10.10.10.2:8080:8080"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Sao_Paulo
+      - WEBUI_PORT=8080
+    volumes:
+      - /home/rafeu/media-core/config/qbittorrent:/config
+      # mesmo /data do Sonarr/Radarr (hardlinks entre download e biblioteca)
+      - /mnt/raid0/anubis:/data
+    restart: unless-stopped
+    networks:
+      - proxy-network
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    # API só no link direto PC <-> FeuVault (fora da rede da casa)
+    ports:
+      - "10.10.10.2:8096:8096"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Sao_Paulo
+    volumes:
+      - /home/rafeu/media-core/config/jellyfin:/config
+      - /mnt/raid0/anubis/media:/media:ro
+    restart: unless-stopped
+    networks:
+      - proxy-network
+networks:
+  proxy-network:
+    external: true

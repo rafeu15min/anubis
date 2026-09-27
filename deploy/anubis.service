@@ -1,0 +1,37 @@
+# /etc/systemd/system/anubis.service
+[Unit]
+Description=Anubis - orquestrador da stack de mídia do FeuVault
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rafeu
+Group=rafeu
+ExecStart=/usr/local/bin/anubis --config /home/rafeu/.config/anubis/anubis.toml serve
+Restart=always
+RestartSec=5
+
+# limites de recursos (cgroups): o alvo é < 15 MB ociosa e < 2% de CPU
+MemoryMax=64M
+CPUQuota=20%
+
+# confinamento: o Anubis só lê o disco (as exclusões passam pelas APIs do
+# Sonarr/Radarr/qBittorrent), então tudo é somente leitura
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

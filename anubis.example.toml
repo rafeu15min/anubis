@@ -1,0 +1,48 @@
+# Anubis — exemplo de configuração. Copie para ~/.config/anubis/anubis.toml
+# (chmod 600: tem chaves de API) e preencha. Editar com `vim` via ssh.
+
+[server]
+# API HTTP; no FeuVault, só no link direto com o PC (10.10.10.0/30)
+listen = "10.10.10.2:7070"
+# rotas POST exigem "Authorization: Bearer <token>"; gere com: openssl rand -hex 24
+token = "troque-me"
+
+[storage]
+# qualquer caminho dentro do sistema de arquivos vigiado
+path = "/mnt/raid0"
+# acima de start_percent de uso, apaga os vídeos mais antigos até stop_percent
+start_percent = 85.0
+stop_percent = 75.0
+# nunca apaga o que entrou na biblioteca há menos de N dias
+min_age_days = 7
+# checagem periódica (além do gatilho de download concluído)
+interval_minutes = 30
+# true: só registra no log o que apagaria
+dry_run = true
+
+# Como cada container enxerga o disco → caminho real no host
+[[paths]]  # Sonarr, Radarr e qBittorrent
+from = "/data"
+to = "/mnt/raid0/anubis"
+
+[[paths]]  # Jellyfin
+from = "/media"
+to = "/mnt/raid0/anubis/media"
+
+[sonarr]
+url = "http://10.10.10.2:8989"
+api_key = ""  # Sonarr → Settings → General → API Key
+
+[radarr]
+url = "http://10.10.10.2:7878"
+api_key = ""
+
+[qbittorrent]
+url = "http://10.10.10.2:8080"
+username = "admin"
+# arquivo com a senha da WebUI (uma linha, chmod 600)
+password_file = "/home/rafeu/.config/anubis/qbittorrent.pass"
+
+[jellyfin]
+url = "http://10.10.10.2:8096"
+api_key = ""  # Painel → Chaves de API

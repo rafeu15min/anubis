@@ -1,0 +1,4 @@
+/target
+# configuração real tem chaves de API
+anubis.toml
+*.pass

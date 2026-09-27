@@ -21,13 +21,9 @@ interval_minutes = 30
 dry_run = true
 
 # Como cada container enxerga o disco → caminho real no host
-[[paths]]  # Sonarr, Radarr e qBittorrent
+[[paths]]  # Sonarr, Radarr e qBittorrent (o Jellyfin tem o dele abaixo)
 from = "/data"
 to = "/mnt/raid0/anubis"
-
-[[paths]]  # Jellyfin
-from = "/media"
-to = "/mnt/raid0/anubis/media"
 
 [sonarr]
 url = "http://10.10.10.2:8989"
@@ -46,3 +42,6 @@ password_file = "/home/rafeu/.config/anubis/qbittorrent.pass"
 [jellyfin]
 url = "http://10.10.10.2:8096"
 api_key = ""  # Painel → Chaves de API
+# como o Jellyfin enxerga a biblioteca, e onde ela está no host
+media_path = "/media"
+host_media_path = "/mnt/raid0/anubis/media"

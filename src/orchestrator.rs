@@ -84,6 +84,7 @@ impl Orchestrator {
             return Ok(report);
         }
 
+        let mut gone = Vec::new(); // caminhos (do Jellyfin) apagados com sucesso
         for d in &report.plan.deletions {
             // primeiro a biblioteca: se o torrent falhar depois, o próximo
             // ciclo ainda o encontra; o contrário deixaria dado órfão
@@ -102,12 +103,20 @@ impl Orchestrator {
                 Err(e) => Err(e),
             };
             match res {
-                Ok(()) => report.done.push(d.media.title.clone()),
+                Ok(()) => {
+                    report.done.push(d.media.title.clone());
+                    gone.extend(self.cfg.jellyfin_path(&d.media.path));
+                }
                 Err(e) => {
                     warn!("falhou ao apagar {}: {e:#}", d.media.title);
                     report.errors.push(format!("{}: {e:#}", d.media.title));
                 }
             }
+        }
+        if let Err(e) = self.jellyfin.notify_deleted(&gone).await {
+            // não desfaz nada: a próxima varredura do Jellyfin tira os itens
+            warn!("Jellyfin não foi avisado das exclusões: {e:#}");
+            report.errors.push(format!("aviso ao Jellyfin: {e:#}"));
         }
         report.used_percent_after = disk::usage(&self.cfg.storage.path).ok().map(|u| u.used_percent());
         info!("limpeza: {} apagados, {} erros, uso agora {:.1}%", report.done.len(), report.errors.len(), report.used_percent_after.unwrap_or(f64::NAN));
@@ -165,7 +174,7 @@ impl Orchestrator {
             torrents.push(Torrent { hash: t.hash, name: t.name, files });
         }
 
-        let watching = Watching { paths: self.jellyfin.watching().await?.iter().map(|p| self.cfg.host_path(p)).collect() };
+        let watching = Watching { paths: self.jellyfin.watching().await?.iter().map(|p| self.cfg.host_path_from_jellyfin(p)).collect() };
         Ok((library, torrents, watching))
     }
 

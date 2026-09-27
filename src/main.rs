@@ -30,7 +30,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "anubis=info".into()))
         .with_target(false)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())) // cores só no terminal, não no journald
+        // logs no stderr: o stdout do `plan` fica só com o JSON
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())) // cores só no terminal, não no journald
         .without_time() // o journald já carimba a hora
         .init();
 

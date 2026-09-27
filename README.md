@@ -14,9 +14,14 @@ assistindo ou deixou pela metade no Jellyfin.
 Download e biblioteca são hardlinks do mesmo dado: apagar só o vídeo da
 biblioteca não libera espaço enquanto o torrent continua semeando. Por isso o
 Anubis identifica o torrent pelo inode, apaga o vídeo pelo Sonarr/Radarr
-(que também desmarca o item, para não ser baixado de novo, e avisa o Jellyfin)
-e remove o torrent do qBittorrent junto com os dados. Só conta como espaço
-liberado o que perde todos os nomes no disco.
+(que também desmarca o item, para não ser baixado de novo), remove o torrent
+do qBittorrent junto com os dados e avisa o Jellyfin do arquivo apagado
+(o Sonarr/Radarr não avisam quando a exclusão vem pela API deles). Só conta
+como espaço liberado o que perde todos os nomes no disco; um dado com algum
+nome fora do Sonarr/Radarr/qBittorrent é pulado.
+
+O Jellyfin aplica o aviso depois do próprio `LibraryMonitorDelay` (60 s por
+padrão).
 
 A checagem roda a cada 30 minutos e também na hora em que um download termina
 (o qBittorrent chama `POST /hooks/torrent-finished`). Com `dry_run = true` ele
@@ -70,6 +75,14 @@ src/api.rs           rotas HTTP
 deploy/              unidade systemd
 infra/feuvault/      composes das stacks de mídia (fonte de verdade)
 ```
+
+## Testado de ponta a ponta (2026-09-27)
+
+Com um filme de domínio público baixado pelo Radarr: import por hardlink
+(2 nomes, 0 bytes a mais), proteção de item tocando e de item pela metade,
+recusa de apagar dado com nome desconhecido, e exclusão real (Radarr sem
+arquivo e desmonitorado, torrent removido, espaço devolvido, item fora do
+Jellyfin).
 
 ## Próximos passos
 

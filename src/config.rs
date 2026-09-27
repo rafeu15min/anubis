@@ -75,6 +75,10 @@ pub struct QBittorrent {
 pub struct Jellyfin {
     pub url: String,
     pub api_key: String,
+    /// como o Jellyfin enxerga a biblioteca (ex.: "/media")...
+    pub media_path: String,
+    /// ...e onde ela está no host (ex.: "/mnt/raid0/anubis/media")
+    pub host_media_path: String,
 }
 
 impl Config {
@@ -106,6 +110,24 @@ impl Config {
     pub fn host_path(&self, container_path: &str) -> PathBuf {
         map_path(&self.paths, container_path)
     }
+
+    fn jellyfin_map(&self) -> PathMap {
+        PathMap { from: self.jellyfin.media_path.clone(), to: self.jellyfin.host_media_path.clone() }
+    }
+
+    /// Caminho do Jellyfin → caminho no host.
+    pub fn host_path_from_jellyfin(&self, p: &str) -> PathBuf {
+        map_path(&[self.jellyfin_map()], p)
+    }
+
+    /// Caminho no host → caminho do Jellyfin (`None` se fora da biblioteca dele).
+    pub fn jellyfin_path(&self, host: &std::path::Path) -> Option<String> {
+        let m = self.jellyfin_map();
+        let rev = PathMap { from: m.to, to: m.from };
+        let host = host.to_str()?;
+        let mapped = map_path(std::slice::from_ref(&rev), host);
+        (mapped.as_os_str() != host).then(|| mapped.to_string_lossy().into_owned())
+    }
 }
 
 pub fn map_path(maps: &[PathMap], p: &str) -> PathBuf {
@@ -136,6 +158,38 @@ mod tests {
         assert_eq!(map_path(&m, "/data/media/series/X/e1.mkv"), PathBuf::from("/mnt/raid0/anubis/media/series/X/e1.mkv"));
         assert_eq!(map_path(&m, "/media/movies/F (2020)/f.mkv"), PathBuf::from("/mnt/raid0/anubis/media/movies/F (2020)/f.mkv"));
         assert_eq!(map_path(&m, "/data"), PathBuf::from("/mnt/raid0/anubis"));
+    }
+
+    #[test]
+    fn maps_host_paths_back_to_jellyfin() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:0"
+            [storage]
+            path = "/"
+            start_percent = 85.0
+            stop_percent = 75.0
+            min_age_days = 7
+            interval_minutes = 30
+            dry_run = true
+            [radarr]
+            url = "http://x"
+            api_key = "k"
+            [qbittorrent]
+            url = "http://x"
+            username = "admin"
+            password_file = "/dev/null"
+            [jellyfin]
+            url = "http://x"
+            api_key = "k"
+            media_path = "/media"
+            host_media_path = "/mnt/raid0/anubis/media"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let host = std::path::Path::new("/mnt/raid0/anubis/media/movies/F (1968)/f.mp4");
+        assert_eq!(cfg.jellyfin_path(host).as_deref(), Some("/media/movies/F (1968)/f.mp4"));
+        assert_eq!(cfg.host_path_from_jellyfin("/media/movies/F (1968)/f.mp4"), host);
+        assert_eq!(cfg.jellyfin_path(std::path::Path::new("/mnt/raid0/anubis/blackhole/x.mp4")), None);
     }
 
     #[test]

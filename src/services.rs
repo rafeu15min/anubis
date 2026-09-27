@@ -1,7 +1,5 @@
 //! Clientes das APIs que o Anubis orquestra: Sonarr, Radarr, qBittorrent e
-//! Jellyfin. Só o necessário para a limpeza de armazenamento. O Jellyfin não
-//! precisa ser avisado das exclusões: a conexão "Jellyfin" do Sonarr/Radarr
-//! já faz isso quando eles apagam um arquivo.
+//! Jellyfin. Só o necessário para a limpeza de armazenamento.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -247,5 +245,17 @@ impl Jellyfin {
             paths.extend(items.items.into_iter().filter_map(|i| i.path));
         }
         Ok(paths)
+    }
+
+    /// Avisa o Jellyfin de arquivos apagados: atualização pontual, sem varrer
+    /// a biblioteca. (O Radarr/Sonarr não avisam quando a exclusão vem pela
+    /// API deles — confirmado no teste de 2026-09-27.)
+    pub async fn notify_deleted(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let updates: Vec<Value> = paths.iter().map(|p| json!({ "Path": p, "UpdateType": "Deleted" })).collect();
+        send::<Value>(self.req(Method::POST, "Library/Media/Updated").json(&json!({ "Updates": updates })), "Jellyfin atualizar").await?;
+        Ok(())
     }
 }

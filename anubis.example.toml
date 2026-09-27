@@ -53,3 +53,14 @@ media_path = "/media"
 host_media_path = "/mnt/raid0/anubis/media"
 # endereço do Jellyfin nos links abertos no navegador
 public_url = "http://jellyfin.feuvault.lan"
+
+# "Assistir agora": o Anubis baixa com o próprio motor (librqbit) e toca
+# enquanto baixa. Sem esta seção, só a busca e os pedidos funcionam.
+[stream]
+# dentro do mesmo /data do Radarr e do qBittorrent (o import vira hardlink)
+download_dir = "/mnt/raid0/anubis/blackhole/completed"
+
+# links de download apontam para nomes internos do Docker; o host usa o IP
+[[stream.url_rewrites]]
+from = "http://prowlarr:9696"
+to = "http://10.10.10.2:9696"

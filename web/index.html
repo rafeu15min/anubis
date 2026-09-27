@@ -34,6 +34,15 @@
   .progress i { display: block; height: 100%; background: var(--info); transition: width .6s; }
   .tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
   .msg { color: var(--muted); padding: 24px 0; }
+  button.primary { background: var(--accent); color: #111; font-weight: 600; }
+  button.primary:hover { background: color-mix(in srgb, var(--accent) 85%, white); }
+  dialog { max-width: min(720px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 18px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 6px; }
+  .rel { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  .rel b { font-weight: 500; word-break: break-word; }
+  .rel small { color: var(--muted); display: block; }
+  .rel .why { color: #ffb36b; }
   .err { color: #ff8a8a; }
   @media (max-width: 480px) { .card { grid-template-columns: 72px 1fr; } .card img, .noposter { width: 72px; } }
 </style>
@@ -52,6 +61,12 @@
   </section>
   <div id="results"><p class="msg">Digite o nome de um filme ou série. Os pedidos vão para o Radarr/Sonarr, com as regras de qualidade de sempre.</p></div>
 </main>
+<dialog id="pick">
+  <h3 id="picktitle"></h3>
+  <p class="meta" id="pickmsg"></p>
+  <div id="rels"></div>
+  <div class="row" style="justify-content:flex-end"><button id="pickclose">Fechar</button></div>
+</dialog>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -86,14 +101,18 @@ function card(it, st) {
   const poster = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
   const year = it.year ? ` (${it.year})` : '';
   const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ');
-  const action = it.requested || tracked[k] ? '' : `<button data-req="${k}">Pedir</button>`;
+  // filmes: assistir agora (padrão) ou só baixar; séries: pedir
+  const watch = it.kind === 'movie' ? `<button class="primary" data-watch="${k}">Assistir</button>` : '';
+  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${it.kind === 'movie' ? 'Só baixar' : 'Pedir'}</button>`;
+  const action = watch + req;
   return `<article class="card" data-key="${k}">
     ${poster}
     <div>
       <h3>${esc(it.title)}<span class="meta">${year}</span></h3>
       <div class="row">${tags}</div>
       <p class="ov">${esc(it.overview)}</p>
-      <div class="row status">${action}${statusHtml(st)}</div>
+      <div class="row">${action}</div>
+      <div class="row status">${statusHtml(st)}</div>
     </div>
   </article>`;
 }
@@ -130,6 +149,36 @@ async function request(k) {
   save();
   render(tracked[k], st);
 }
+
+// "assistir agora": o Anubis escolhe a versão, começa a baixar e abre o player
+const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
+async function watch(k, guid) {
+  const it = lastResults[k] || tracked[k];
+  if (!it) return;
+  const btns = document.querySelectorAll(`[data-watch="${k}"]`);
+  btns.forEach((b) => { b.disabled = true; b.textContent = 'Procurando versão…'; });
+  try {
+    const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: it.kind, id: it.id, guid }) });
+    const d = await r.json();
+    if (r.ok) { location.href = d.player; return; }
+    if (r.status === 409 && d.no_approved) {
+      $('#rels').innerHTML = d.candidates.length ? d.candidates.map((c) => `<div class="rel">
+          <div><b>${esc(c.title)}</b><small>${size(c.size)} · ${c.seeders} fontes${c.playable === 0 ? ' · H.265: talvez não toque no navegador' : ''}</small>
+          <small class="why">${esc(c.reasons.join(' · '))}</small></div>
+          <button data-watch="${k}" data-guid="${esc(c.guid)}">Assistir esta</button></div>`).join('')
+        : '';
+      const some = d.candidates.length > 0;
+      $('#picktitle').textContent = some ? 'Nenhuma versão passa no seu perfil de qualidade' : 'Nenhuma versão disponível';
+      $('#pickmsg').textContent = some
+        ? 'O Radarr recusou todas as versões encontradas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
+        : 'Os indexadores não têm nenhuma versão deste filme com fontes (pessoas compartilhando) agora.';
+      $('#pick').showModal();
+    } else alert(`Não deu para assistir: ${d.error}`);
+  } finally {
+    btns.forEach((b) => { b.disabled = false; b.textContent = 'Assistir'; });
+  }
+}
+$('#pickclose').onclick = () => $('#pick').close();
 
 // atualiza o cartão do item onde ele aparecer (pedidos e resultados)
 function render(it, st) {
@@ -180,6 +229,11 @@ $('#q').addEventListener('input', (e) => {
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-req]');
   if (b) request(b.dataset.req);
+  const w = e.target.closest('[data-watch]');
+  if (w) {
+    if (w.dataset.guid) { w.disabled = true; w.textContent = 'Abrindo…'; }
+    watch(w.dataset.watch, w.dataset.guid);
+  }
 });
 
 prune();

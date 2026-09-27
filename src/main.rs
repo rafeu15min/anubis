@@ -17,6 +17,7 @@ mod orchestrator;
 mod planner;
 mod search;
 mod services;
+mod stream;
 
 use anyhow::{Context, Result, bail};
 use orchestrator::Orchestrator;
@@ -54,7 +55,9 @@ async fn main() -> Result<()> {
     }
     let config = config.or_else(|| std::env::var_os("ANUBIS_CONFIG").map(PathBuf::from)).unwrap_or_else(default_config);
     let cfg = config::Config::load(&config)?;
-    let orch = Arc::new(Orchestrator::new(cfg)?);
+    let serving = command.as_deref().unwrap_or("serve") == "serve";
+    let streamer = if serving && cfg.stream.is_some() { Some(stream::Streamer::new().await?) } else { None };
+    let orch = Arc::new(Orchestrator::new(cfg, streamer)?);
 
     match command.as_deref().unwrap_or("serve") {
         "plan" => {

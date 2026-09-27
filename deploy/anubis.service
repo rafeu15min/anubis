@@ -12,15 +12,17 @@ ExecStart=/usr/local/bin/anubis --config /home/rafeu/.config/anubis/anubis.toml 
 Restart=always
 RestartSec=5
 
-# limites de recursos (cgroups): o alvo é < 15 MB ociosa e < 2% de CPU
-MemoryMax=64M
-CPUQuota=20%
+# limites de recursos (cgroups): ~13 MB ocioso; baixando a 11 MiB/s, ~20 MB
+# e ~4% de CPU. A folga cobre vários players abertos e a verificação de peças.
+MemoryMax=256M
+CPUQuota=50%
 
-# confinamento: o Anubis só lê o disco (as exclusões passam pelas APIs do
-# Sonarr/Radarr/qBittorrent), então tudo é somente leitura
+# confinamento: o disco é somente leitura (as exclusões passam pelas APIs do
+# Sonarr/Radarr/qBittorrent), menos a pasta onde o "assistir agora" baixa
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/mnt/raid0/anubis/blackhole
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true

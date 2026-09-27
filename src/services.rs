@@ -135,6 +135,24 @@ impl Arr {
         Ok(())
     }
 
+    /// Versões encontradas nos indexadores, já com a decisão do Radarr/Sonarr
+    /// (`rejected` + motivos). Demora alguns segundos: é uma busca de verdade.
+    pub async fn releases(&self, filter: &str) -> Result<Vec<Value>> {
+        let req = self.req(Method::GET, &format!("release?{filter}")).timeout(Duration::from_secs(120));
+        send(req, &format!("{} versões", self.name)).await
+    }
+
+    /// Liga/desliga o monitoramento de um filme.
+    pub async fn set_movie_monitored(&self, movie_id: i64, monitored: bool) -> Result<()> {
+        let body = json!({ "movieIds": [movie_id], "monitored": monitored });
+        send::<Value>(self.req(Method::PUT, "movie/editor").json(&body), &format!("{} monitorar", self.name)).await?;
+        Ok(())
+    }
+
+    pub async fn movie(&self, id: i64) -> Result<Value> {
+        self.get(&format!("movie/{id}")).await
+    }
+
     /// Itens na fila de download (`queue/details?movieId=` / `?seriesId=`).
     pub async fn queue(&self, filter: &str) -> Result<Vec<Value>> {
         self.get(&format!("queue/details?{filter}")).await
@@ -168,6 +186,13 @@ fn url_encode(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------- qBittorrent
+
+/// De onde vem um torrent: link magnet ou o arquivo .torrent.
+#[derive(Debug, Clone)]
+pub enum TorrentSource {
+    Magnet(String),
+    File(bytes::Bytes),
+}
 
 pub struct QBittorrent {
     base: String,
@@ -244,6 +269,35 @@ impl QBittorrent {
 
     pub async fn files(&self, hash: &str) -> Result<Vec<TorrentFileInfo>> {
         send(self.req(Method::GET, &format!("torrents/files?hash={hash}")), "qBittorrent arquivos").await
+    }
+
+    /// Entrega um torrent já baixado para o qBittorrent semear, na mesma pasta
+    /// (`NoSubfolder`: os arquivos ficam direto em `save_path`, como o Anubis gravou).
+    pub async fn add_seeding(&self, source: &TorrentSource, save_path: &str, category: &str) -> Result<()> {
+        let form = || {
+            let f = reqwest::multipart::Form::new()
+                .text("savepath", save_path.to_owned())
+                .text("category", category.to_owned())
+                .text("contentLayout", "NoSubfolder")
+                .text("autoTMM", "false");
+            match source {
+                TorrentSource::Magnet(m) => f.text("urls", m.clone()),
+                TorrentSource::File(b) => f.part("torrents", reqwest::multipart::Part::bytes(b.to_vec()).file_name("anubis.torrent")),
+            }
+        };
+        let res = self.req(Method::POST, "torrents/add").multipart(form()).send().await.context("qBittorrent: sem resposta")?;
+        let res = if res.status() == reqwest::StatusCode::FORBIDDEN {
+            self.login().await?;
+            self.req(Method::POST, "torrents/add").multipart(form()).send().await?
+        } else {
+            res
+        };
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !status.is_success() || body.trim() == "Fails." {
+            bail!("qBittorrent recusou o torrent (HTTP {status}: {body})");
+        }
+        Ok(())
     }
 
     /// Remove os torrents E os dados deles.

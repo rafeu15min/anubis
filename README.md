@@ -34,6 +34,17 @@ animes) e manda buscar. A página acompanha o pedido — procurando, baixando
 (progresso lido direto do qBittorrent), entrando na biblioteca, disponível — e
 abre o item no Jellyfin quando ele fica pronto.
 
+**Assistir agora (padrão para filmes).** "Assistir" escolhe a versão entre as
+que o Radarr aprova (preferindo H.264/AV1, que o navegador toca direto), baixa
+com o motor próprio do Anubis (librqbit) e abre o player da página enquanto
+baixa. Sem ninguém assistindo, o download vai em ordem; com o player aberto, as
+peças da posição dele vêm primeiro — pular para o meio do filme reprioriza o
+download. A barra do player mostra em branco o que já está no disco e em
+vermelho o que já foi assistido. Ao terminar, o filme entra no Radarr por
+hardlink e, quando ninguém assiste há 5 minutos, o torrent passa ao qBittorrent
+para semear. Se nenhuma versão passa no perfil de qualidade, a página lista as
+recusadas com o motivo e deixa escolher uma mesmo assim.
+
 ## API
 
 Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
@@ -44,6 +55,10 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
 | `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
 | `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
+| `POST /watch` | assistir agora: `{"kind":"movie","id":N,"guid"?:…}` |
+| `GET /watch/{kind}/{id}` | player |
+| `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |
+| `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
 | `GET /health` | versão e estado |
 | `GET /storage` | uso do disco, regras e o último ciclo executado |
 | `GET /storage/plan` | o que seria apagado agora (não apaga nada) |
@@ -85,8 +100,12 @@ src/orchestrator.rs  inventário (APIs + disco) → plano → execução
 src/services.rs      clientes de Sonarr, Radarr, qBittorrent e Jellyfin
 src/disk.rs          uso do sistema de arquivos e inodes
 src/search.rs        busca, pedido e acompanhamento
+src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
 src/api.rs           rotas HTTP
 web/index.html       página de busca (embutida no binário)
+web/player.html      player
+vendor/              librqbit-dualstack-sockets com fallback para IPv4 (o
+                     FeuVault roda com ipv6.disable=1)
 deploy/              unidade systemd
 infra/feuvault/      composes das stacks de mídia (fonte de verdade)
 ```

@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::disk;
 use crate::planner::{self, Media, MediaRef, Plan, Rules, Torrent, TorrentFile, Watching};
 use crate::services::{Arr, Jellyfin, QBittorrent};
+use crate::stream::Streamer;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -18,6 +19,8 @@ pub struct Orchestrator {
     pub(crate) radarr: Option<Arr>,
     pub(crate) qbit: QBittorrent,
     pub(crate) jellyfin: Jellyfin,
+    /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
+    pub(crate) streamer: Option<Streamer>,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -36,7 +39,7 @@ pub struct Report {
 }
 
 impl Orchestrator {
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub fn new(cfg: Config, streamer: Option<Streamer>) -> Result<Self> {
         let password = std::fs::read_to_string(&cfg.qbittorrent.password_file)
             .with_context(|| format!("lendo {}", cfg.qbittorrent.password_file.display()))?;
         Ok(Self {
@@ -44,6 +47,7 @@ impl Orchestrator {
             radarr: cfg.radarr.as_ref().map(|a| Arr::new("Radarr", &a.url, &a.api_key)).transpose()?,
             qbit: QBittorrent::new(&cfg.qbittorrent.url, &cfg.qbittorrent.username, password.trim())?,
             jellyfin: Jellyfin::new(&cfg.jellyfin.url, &cfg.jellyfin.api_key)?,
+            streamer,
             cfg,
             running: Mutex::new(()),
             last: Mutex::new(None),

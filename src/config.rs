@@ -19,6 +19,7 @@ pub struct Config {
     pub radarr: Option<Arr>,
     pub qbittorrent: QBittorrent,
     pub jellyfin: Jellyfin,
+    pub stream: Option<Stream>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +82,20 @@ pub struct QBittorrent {
     pub password_file: PathBuf,
 }
 
+/// "Assistir agora": o Anubis baixa com o próprio motor (librqbit) e toca
+/// enquanto baixa.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stream {
+    /// onde baixar (caminho do host), dentro do mesmo /data do Sonarr/Radarr
+    /// e do qBittorrent para o import virar hardlink
+    pub download_dir: PathBuf,
+    /// endereços internos do Docker nos links de download → endereço alcançável
+    /// pelo host (ex.: "http://prowlarr:9696" → "http://10.10.10.2:9696")
+    #[serde(default)]
+    pub url_rewrites: Vec<PathMap>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jellyfin {
@@ -131,6 +146,14 @@ impl Config {
     /// Caminho do Jellyfin → caminho no host.
     pub fn host_path_from_jellyfin(&self, p: &str) -> PathBuf {
         map_path(&[self.jellyfin_map()], p)
+    }
+
+    /// Caminho no host → como o Sonarr/Radarr/qBittorrent o enxergam.
+    pub fn container_path(&self, host: &std::path::Path) -> Option<String> {
+        let rev: Vec<PathMap> = self.paths.iter().map(|m| PathMap { from: m.to.clone(), to: m.from.clone() }).collect();
+        let host = host.to_str()?;
+        let mapped = map_path(&rev, host);
+        (mapped.as_os_str() != host).then(|| mapped.to_string_lossy().into_owned())
     }
 
     /// Caminho de um container (Sonarr/Radarr) → caminho do Jellyfin.

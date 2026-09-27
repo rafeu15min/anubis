@@ -7,7 +7,9 @@
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
-//! GET  /watch/{kind}/{id}/info  — andamento do download e trechos já baixados
+//! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
+//! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
+//! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! GET  /health                  — vivo?
 //! GET  /storage                 — uso do disco, regras e o último ciclo
 //! GET  /storage/plan            — o que seria apagado agora (não apaga)
@@ -51,6 +53,8 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}", get(|| async { Html(include_str!("../web/player.html")) }))
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
+        .route("/watch/{kind}/{id}/stream.mp4", get(converted))
+        .route("/series/{tvdb}/episodes", get(episodes))
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }))
         .route("/storage", get(storage))
         .route("/storage/plan", get(plan))
@@ -157,6 +161,7 @@ fn kind_str(k: Kind) -> &'static str {
     match k {
         Kind::Movie => "movie",
         Kind::Series => "series",
+        Kind::Episode => "episode",
     }
 }
 
@@ -171,14 +176,12 @@ async fn watch_info(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64
         Err(r) => return r,
     };
     let mut info = s.orch.streamer.as_ref().map(|st| st.info(&job)).unwrap_or_default();
-    info["title"] = json!(job.title);
-    info["release"] = json!(job.release);
-    info["file"] = json!(job.file_name);
+    info["title"] = json!(job.info.title);
+    info["release"] = json!(job.info.release);
+    info["file"] = json!(job.info.file_name);
     // link do Jellyfin quando já está na biblioteca
-    if job.phase().0 == Phase::Done
-        && let Ok(st) = s.orch.status(kind, id).await
-    {
-        info["jellyfin_url"] = json!(st.jellyfin_url);
+    if job.phase().0 == Phase::Done {
+        info["jellyfin_url"] = json!(s.orch.watch_jellyfin_url(&job).await);
     }
     Json(info).into_response()
 }
@@ -217,7 +220,7 @@ async fn video(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, h
         Ok(j) => j,
         Err(r) => return r,
     };
-    let len = job.file_len;
+    let len = job.info.file_len;
     let Some((start, end)) = byte_range(&headers, len) else {
         return (StatusCode::RANGE_NOT_SATISFIABLE, [("content-range", format!("bytes */{len}"))]).into_response();
     };
@@ -231,13 +234,59 @@ async fn video(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, h
     let mut res = Response::new(body);
     *res.status_mut() = if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
     let h = res.headers_mut();
-    h.insert("content-type", content_type(&job.file_name).parse().unwrap());
+    h.insert("content-type", content_type(&job.info.file_name).parse().unwrap());
     h.insert("accept-ranges", "bytes".parse().unwrap());
     h.insert("content-length", (end - start + 1).to_string().parse().unwrap());
     if partial {
         h.insert("content-range", format!("bytes {start}-{end}/{len}").parse().unwrap());
     }
     res
+}
+
+#[derive(serde::Deserialize)]
+struct StartAt {
+    #[serde(default)]
+    t: f64,
+}
+
+/// O vídeo convertido na hora, a partir de `t` segundos (o player pula
+/// recomeçando daqui: vídeo convertido não tem "faixa de bytes").
+async fn converted(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, Query(q): Query<StartAt>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    let Some(streamer) = s.orch.streamer.as_ref() else { return error(StatusCode::NOT_FOUND, "assistir agora desligado") };
+    let (child, out) = match streamer.transcode(&job, q.t.max(0.0)) {
+        Ok(x) => x,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    // o ffmpeg vive enquanto o navegador lê; fechou a conexão, ele é encerrado
+    let body = Body::from_stream(WithChild { inner: ReaderStream::with_capacity(out, 256 * 1024), _child: child });
+    let mut res = Response::new(body);
+    res.headers_mut().insert("content-type", "video/mp4".parse().unwrap());
+    res.headers_mut().insert("cache-control", "no-store".parse().unwrap());
+    res
+}
+
+/// Stream que mantém o processo (ffmpeg) vivo enquanto é lido.
+struct WithChild {
+    inner: ReaderStream<tokio::process::ChildStdout>,
+    _child: tokio::process::Child,
+}
+
+impl futures_core::Stream for WithChild {
+    type Item = std::io::Result<bytes::Bytes>;
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+async fn episodes(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
+    match s.orch.episodes(tvdb).await {
+        Ok(e) => Json(e).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Response {

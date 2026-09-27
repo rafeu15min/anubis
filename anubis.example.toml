@@ -59,6 +59,18 @@ public_url = "http://jellyfin.feuvault.lan"
 [stream]
 # dentro do mesmo /data do Radarr e do qBittorrent (o import vira hardlink)
 download_dir = "/mnt/raid0/anubis/blackhole/completed"
+# estado que sobrevive a reinícios (o systemd cria com StateDirectory=anubis)
+state_dir = "/var/lib/anubis"
+
+# conversão na hora do que o navegador não toca (H.265, áudio AC3/DTS, MKV)
+[stream.transcode]
+# usa o ffmpeg do container do Jellyfin (docker exec), sem instalar nada no host
+container = "jellyfin"
+ffmpeg = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+ffprobe = "/usr/lib/jellyfin-ffmpeg/ffprobe"
+encoder = "x264"        # "x264" (CPU) ou "vaapi" (GPU, via device)
+device = "/dev/dri/renderD128"
+max_height = 720        # altura máxima do vídeo convertido
 
 # links de download apontam para nomes internos do Docker; o host usa o IP
 [[stream.url_rewrites]]

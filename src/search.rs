@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 pub enum Kind {
     Movie,
     Series,
+    /// episódio de série (id = id do episódio no Sonarr); só no "assistir agora"
+    Episode,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +59,28 @@ pub enum State {
 }
 
 #[derive(Debug, Serialize)]
+pub struct EpisodeRow {
+    /// id do episódio no Sonarr
+    pub id: i64,
+    pub number: i64,
+    pub title: Option<String>,
+    pub air_date: Option<String>,
+    pub has_file: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Season {
+    pub number: i64,
+    pub episodes: Vec<EpisodeRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Episodes {
+    pub title: String,
+    pub seasons: Vec<Season>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Status {
     pub state: State,
     /// 0..1 do que está na fila
@@ -93,7 +117,7 @@ impl Orchestrator {
     fn arr(&self, kind: Kind) -> Result<&Arr> {
         match kind {
             Kind::Movie => self.radarr.as_ref().context("Radarr não configurado"),
-            Kind::Series => self.sonarr.as_ref().context("Sonarr não configurado"),
+            Kind::Series | Kind::Episode => self.sonarr.as_ref().context("Sonarr não configurado"),
         }
     }
 
@@ -117,6 +141,9 @@ impl Orchestrator {
     /// Pede o item: adiciona ao Radarr/Sonarr e manda buscar. Se já estava lá,
     /// só manda buscar de novo o que falta.
     pub async fn request(&self, kind: Kind, id: i64) -> Result<Status> {
+        if kind == Kind::Episode {
+            bail!("episódios são pedidos pelo \"assistir agora\"");
+        }
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
 
@@ -124,7 +151,7 @@ impl Orchestrator {
             let lib_id = existing["id"].as_i64().context("item sem id")?;
             let cmd = match kind {
                 Kind::Movie => json!({ "name": "MoviesSearch", "movieIds": [lib_id] }),
-                Kind::Series => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
+                Kind::Series | Kind::Episode => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
             };
             arr.command(cmd).await?;
             return self.status(kind, id).await;
@@ -145,7 +172,7 @@ impl Orchestrator {
                 item["minimumAvailability"] = json!("released");
                 item["addOptions"] = json!({ "searchForMovie": true });
             }
-            Kind::Series => {
+            Kind::Series | Kind::Episode => {
                 item["seasonFolder"] = json!(true);
                 item["seriesType"] = json!(if anime { "anime" } else { "standard" });
                 item["addOptions"] = json!({ "monitor": "all", "searchForMissingEpisodes": true });
@@ -156,6 +183,9 @@ impl Orchestrator {
     }
 
     pub async fn status(&self, kind: Kind, id: i64) -> Result<Status> {
+        if kind == Kind::Episode {
+            bail!("o estado de episódios vem do player");
+        }
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
         let Some(item) = arr.find(what, id_param, id).await? else {
@@ -165,7 +195,7 @@ impl Orchestrator {
 
         let (have_any, episodes) = match kind {
             Kind::Movie => (item["hasFile"].as_bool().unwrap_or(false), None),
-            Kind::Series => {
+            Kind::Series | Kind::Episode => {
                 let st = &item["statistics"];
                 let files = st["episodeFileCount"].as_i64().unwrap_or(0);
                 (files > 0, Some((files, st["episodeCount"].as_i64().unwrap_or(0))))
@@ -214,8 +244,65 @@ impl Orchestrator {
         Ok(Status { state, progress, eta, episodes, jellyfin_url })
     }
 
+    /// A série no Sonarr, adicionando se preciso — sem monitorar e sem buscar:
+    /// quem baixa os episódios é o "assistir agora", um de cada vez.
+    pub(crate) async fn ensure_series(&self, tvdb: i64) -> Result<Value> {
+        let sonarr = self.arr(Kind::Series)?;
+        if let Some(s) = sonarr.find("series", "tvdbId", tvdb).await? {
+            return Ok(s);
+        }
+        let cfg = self.cfg.sonarr.as_ref().context("Sonarr não configurado")?;
+        let mut item = sonarr.lookup("series", &format!("tvdb:{tvdb}")).await?.into_iter().next().context("série não encontrada")?;
+        let anime = found(Kind::Series, &item).is_some_and(|f| f.anime);
+        let root = if anime { cfg.anime_root_folder.as_ref().or(cfg.root_folder.as_ref()) } else { cfg.root_folder.as_ref() };
+        item["qualityProfileId"] = json!(sonarr.quality_profile_id(&cfg.quality_profile).await?);
+        item["rootFolderPath"] = json!(root.context("configure root_folder em [sonarr]")?);
+        item["monitored"] = json!(false);
+        item["seasonFolder"] = json!(true);
+        item["seriesType"] = json!(if anime { "anime" } else { "standard" });
+        item["addOptions"] = json!({ "monitor": "none", "searchForMissingEpisodes": false });
+        sonarr.add("series", item).await
+    }
+
+    /// Temporadas e episódios de uma série (para escolher o que assistir).
+    pub async fn episodes(&self, tvdb: i64) -> Result<Episodes> {
+        let series = self.ensure_series(tvdb).await?;
+        let series_id = series["id"].as_i64().context("série sem id")?;
+        // série recém-adicionada: o Sonarr preenche os episódios logo depois
+        let sonarr = self.arr(Kind::Series)?;
+        let mut raw = sonarr.episodes_raw(series_id).await?;
+        for _ in 0..15 {
+            if !raw.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            raw = sonarr.episodes_raw(series_id).await?;
+        }
+        let mut seasons: std::collections::BTreeMap<i64, Vec<EpisodeRow>> = Default::default();
+        for e in raw {
+            let season = e["seasonNumber"].as_i64().unwrap_or(0);
+            seasons.entry(season).or_default().push(EpisodeRow {
+                id: e["id"].as_i64().unwrap_or(0),
+                number: e["episodeNumber"].as_i64().unwrap_or(0),
+                title: e["title"].as_str().map(str::to_owned),
+                air_date: e["airDate"].as_str().map(str::to_owned),
+                has_file: e["hasFile"].as_bool().unwrap_or(false),
+            });
+        }
+        let mut seasons: Vec<Season> = seasons
+            .into_iter()
+            .map(|(number, mut episodes)| {
+                episodes.sort_by_key(|e| e.number);
+                Season { number, episodes }
+            })
+            .collect();
+        // especiais (temporada 0) por último
+        seasons.sort_by_key(|s| (s.number == 0, s.number));
+        Ok(Episodes { title: series["title"].as_str().unwrap_or_default().to_owned(), seasons })
+    }
+
     /// Link do item no Jellyfin, se ele já o conhece.
-    async fn jellyfin_url(&self, kind: Kind, item: &Value) -> Option<String> {
+    pub(crate) async fn jellyfin_url(&self, kind: Kind, item: &Value) -> Option<String> {
         let public = self.cfg.jellyfin.public_url.as_deref().unwrap_or(&self.cfg.jellyfin.url).trim_end_matches('/');
         let folder = self.cfg.jellyfin_path_from_container(item["path"].as_str()?)?;
         let jf_kind = if kind == Kind::Movie { "Movie" } else { "Series" };

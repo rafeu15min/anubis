@@ -20,7 +20,7 @@ pub struct Orchestrator {
     pub(crate) qbit: QBittorrent,
     pub(crate) jellyfin: Jellyfin,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
-    pub(crate) streamer: Option<Streamer>,
+    pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -39,7 +39,7 @@ pub struct Report {
 }
 
 impl Orchestrator {
-    pub fn new(cfg: Config, streamer: Option<Streamer>) -> Result<Self> {
+    pub fn new(cfg: Config, streamer: Option<std::sync::Arc<Streamer>>) -> Result<Self> {
         let password = std::fs::read_to_string(&cfg.qbittorrent.password_file)
             .with_context(|| format!("lendo {}", cfg.qbittorrent.password_file.display()))?;
         Ok(Self {

@@ -40,6 +40,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "futures-core",
  "librqbit",
  "reqwest",
  "rustix",

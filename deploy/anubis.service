@@ -23,8 +23,12 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/mnt/raid0/anubis/blackhole
+# estado do "assistir agora" (sessão do librqbit, pedidos): /var/lib/anubis
+StateDirectory=anubis
 PrivateTmp=true
-PrivateDevices=true
+# dispositivos: só a GPU, para converter vídeo com VAAPI
+DevicePolicy=closed
+DeviceAllow=/dev/dri/renderD128 rw
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

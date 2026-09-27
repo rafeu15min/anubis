@@ -94,6 +94,45 @@ pub struct Stream {
     /// pelo host (ex.: "http://prowlarr:9696" → "http://10.10.10.2:9696")
     #[serde(default)]
     pub url_rewrites: Vec<PathMap>,
+    /// estado que sobrevive a reinícios: sessão do librqbit e pedidos em
+    /// andamento (o systemd cria /var/lib/anubis com StateDirectory=)
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
+    #[serde(default)]
+    pub transcode: Transcode,
+}
+
+fn default_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/anubis")
+}
+
+/// Conversão na hora para o que o navegador não toca (H.265, áudio AC3/DTS…).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Transcode {
+    pub ffmpeg: String,
+    pub ffprobe: String,
+    /// rodar o ffmpeg dentro deste container (ex.: "jellyfin", que traz o
+    /// jellyfin-ffmpeg) com `docker exec`, em vez de um ffmpeg do host
+    pub container: Option<String>,
+    /// "x264" (CPU) ou "vaapi" (GPU Intel/AMD, via `device`)
+    pub encoder: String,
+    pub device: String,
+    /// altura máxima do vídeo convertido (o original menor fica como está)
+    pub max_height: u32,
+}
+
+impl Default for Transcode {
+    fn default() -> Self {
+        Self {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+            container: None,
+            encoder: "x264".into(),
+            device: "/dev/dri/renderD128".into(),
+            max_height: 720,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

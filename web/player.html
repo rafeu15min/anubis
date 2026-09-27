@@ -36,6 +36,8 @@
   input[type=range] { width: 100px; accent-color: var(--text); }
   .panel { position: fixed; top: 68px; right: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 10px 14px; border-radius: 10px; background: rgba(20,20,20,.75); font-size: 13px; transition: opacity .25s; }
   .panel a { color: #7fd0ff; }
+  button.next { position: fixed; right: 20px; bottom: 120px; width: auto; height: auto; padding: 10px 16px; border-radius: 8px; background: rgba(20,20,20,.85); font: inherit; border: 1px solid rgba(255,255,255,.25); transition: opacity .25s; }
+  .hidden button.next { opacity: 0; pointer-events: none; }
   .center { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
   .spin { width: 56px; height: 56px; border: 4px solid rgba(255,255,255,.2); border-top-color: var(--played); border-radius: 50%; animation: r 1s linear infinite; display: none; }
   .waiting .spin { display: block; }
@@ -54,6 +56,7 @@
 </div>
 
 <div class="panel" id="panel">Preparando…</div>
+<button class="next" id="next" hidden></button>
 
 <div class="center"><div class="spin"></div><div class="msg" id="msg"></div></div>
 
@@ -96,34 +99,61 @@ const fmt = (s) => {
   return (h ? `${h}:${String(m).padStart(2, '0')}` : m) + ':' + String(x).padStart(2, '0');
 };
 
-// ---- vídeo
-v.src = `${base}/video`;
-try { const p = parseFloat(localStorage.getItem(RESUME)); if (p > 5) v.currentTime = p; } catch {}
-v.addEventListener('loadedmetadata', () => { v.play().catch(() => {}); });
+// ---- tempo: direto, o <video> sabe tudo; convertido (ffmpeg), o vídeo
+// começa em `offset` e a duração vem do ffprobe
+let converted = false, offset = 0, duration = 0;
+const now = () => offset + (v.currentTime || 0);
+const total = () => (converted ? duration : v.duration || duration || 0);
+function seek(t) {
+  t = Math.max(0, Math.min(total() - 1, t));
+  if (!converted) { v.currentTime = t; return; }
+  offset = t;
+  v.src = `${base}/stream.mp4?t=${t.toFixed(1)}`;
+  v.play().catch(() => {});
+}
+
+function start(media) {
+  converted = !!media && media.mode !== 'direct';
+  duration = (media && media.duration) || 0;
+  let pos = 0;
+  try { const p = parseFloat(localStorage.getItem(RESUME)); if (p > 5) pos = p; } catch {}
+  if (converted) {
+    offset = pos;
+    v.src = `${base}/stream.mp4?t=${pos.toFixed(1)}`;
+  } else {
+    v.src = `${base}/video`;
+    if (pos) v.addEventListener('loadedmetadata', () => { v.currentTime = pos; }, { once: true });
+  }
+  v.play().catch(() => {});
+}
+
 v.addEventListener('waiting', () => document.body.classList.add('waiting'));
 v.addEventListener('playing', () => document.body.classList.remove('waiting'));
 v.addEventListener('canplay', () => document.body.classList.remove('waiting'));
 v.addEventListener('play', () => $('playicon').setAttribute('d', PAUSE));
 v.addEventListener('pause', () => $('playicon').setAttribute('d', PLAY));
 v.addEventListener('error', () => {
+  if (!v.src) return;
   document.body.classList.remove('waiting');
   const m = $('msg');
-  m.innerHTML = 'Este arquivo não toca no navegador (provavelmente H.265 ou um áudio sem suporte). '
-    + 'O download continua; quando terminar, ele abre no Jellyfin, que converte na hora.';
+  m.innerHTML = 'Este arquivo não tocou no navegador. O download continua; quando terminar, ele abre no Jellyfin.';
   m.classList.add('on');
 });
 let saved = 0;
 v.addEventListener('timeupdate', () => {
   paint();
-  if (Math.abs(v.currentTime - saved) > 5) { saved = v.currentTime; try { localStorage.setItem(RESUME, String(saved)); } catch {} }
+  if (Math.abs(now() - saved) > 5) { saved = now(); try { localStorage.setItem(RESUME, String(saved)); } catch {} }
 });
-v.addEventListener('ended', () => { try { localStorage.removeItem(RESUME); } catch {} });
+v.addEventListener('ended', () => {
+  try { localStorage.removeItem(RESUME); } catch {}
+  if (next) goNext();
+});
 
 // ---- barra: branca = já no disco, vermelha = assistido
 const bar = $('bar');
 let have = [];
-function paint(t = v.currentTime) {
-  const d = v.duration || 0;
+function paint(t = now()) {
+  const d = total();
   const f = d ? t / d : 0;
   $('played').style.width = `${f * 100}%`;
   $('knob').style.left = `${f * 100}%`;
@@ -135,18 +165,18 @@ function paintHave() {
 }
 const frac = (e) => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
 let dragging = false;
-bar.addEventListener('pointerdown', (e) => { dragging = true; bar.classList.add('drag'); bar.setPointerCapture(e.pointerId); paint(frac(e) * (v.duration || 0)); });
+bar.addEventListener('pointerdown', (e) => { dragging = true; bar.classList.add('drag'); bar.setPointerCapture(e.pointerId); paint(frac(e) * total()); });
 bar.addEventListener('pointermove', (e) => {
   const f = frac(e);
   $('tip').style.left = `${f * 100}%`;
-  $('tip').textContent = fmt(f * (v.duration || 0));
-  if (dragging) paint(f * (v.duration || 0));
+  $('tip').textContent = fmt(f * total());
+  if (dragging) paint(f * total());
 });
-bar.addEventListener('pointerup', (e) => { dragging = false; bar.classList.remove('drag'); if (v.duration) v.currentTime = frac(e) * v.duration; });
+bar.addEventListener('pointerup', (e) => { dragging = false; bar.classList.remove('drag'); if (total()) seek(frac(e) * total()); });
 
 // ---- controles
 const toggle = () => (v.paused ? v.play() : v.pause());
-const skip = (s) => { v.currentTime = Math.max(0, Math.min((v.duration || 0) - 1, v.currentTime + s)); poke(); };
+const skip = (s) => { seek(now() + s); poke(); };
 $('play').onclick = toggle;
 $('rew').onclick = () => skip(-10);
 $('fwd').onclick = () => skip(30);
@@ -183,8 +213,23 @@ document.addEventListener('pointermove', poke);
 v.addEventListener('pause', poke);
 poke();
 
-// ---- andamento do download
+// ---- próximo episódio
+let next = null;
+async function goNext() {
+  const [id] = next;
+  $('next').disabled = true;
+  $('next').textContent = 'Preparando o próximo…';
+  const r = await fetch('/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'episode', id }) });
+  const d = await r.json();
+  if (r.ok) location.href = '/' + d.player;
+  else location.href = '/';  // sem versão aprovada: a busca mostra as opções
+}
+$('next').onclick = goNext;
+
+// ---- andamento do download (e o formato, para começar a tocar)
 const PHASE = { downloading: 'Baixando', importing: 'Entrando na biblioteca…', done: 'Na biblioteca', failed: 'Falhou' };
+const MODE = { remux: ' · adaptando o formato', transcode: ' · convertendo o vídeo' };
+let started = false, waitedMedia = 0;
 async function info() {
   try {
     const r = await fetch(`${base}/info`);
@@ -193,12 +238,17 @@ async function info() {
     $('title').textContent = d.title; document.title = `${d.title} · Anubis`;
     $('release').textContent = d.release;
     have = d.have || []; paintHave();
+    // começa quando o formato é conhecido (ou depois de ~20 s sem ffprobe)
+    if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); }
+    if (d.media && d.media.duration) duration = d.media.duration;
+    if (d.next && !next) { next = d.next; $('next').textContent = `Próximo: ${d.next[1]} ▶`; $('next').hidden = false; }
     let t = PHASE[d.phase] || d.phase;
     if (d.phase === 'downloading') {
       t += ` ${Math.round(d.progress * 100)}%`;
-      if (d.speed_mbps != null) t += ` · ${d.speed_mbps.toFixed(1)} MB/s`;  // MiB/s
+      if (d.speed_mbps != null) t += ` · ${d.speed_mbps.toFixed(1)} MB/s`;
       if (d.peers != null) t += ` · ${d.peers} fontes`;
     }
+    if (d.media && MODE[d.media.mode]) t += MODE[d.media.mode];
     if (d.error) t += ` — ${d.error}`;
     $('panel').innerHTML = t + (d.jellyfin_url ? ` · <a href="${d.jellyfin_url}">Abrir no Jellyfin</a>` : '');
     const m = $('msg');

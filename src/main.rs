@@ -54,10 +54,22 @@ async fn main() -> Result<()> {
         }
     }
     let config = config.or_else(|| std::env::var_os("ANUBIS_CONFIG").map(PathBuf::from)).unwrap_or_else(default_config);
-    let cfg = config::Config::load(&config)?;
+    let mut cfg = config::Config::load(&config)?;
     let serving = command.as_deref().unwrap_or("serve") == "serve";
-    let streamer = if serving && cfg.stream.is_some() { Some(stream::Streamer::new().await?) } else { None };
+    let self_url = format!("http://{}", cfg.server.listen);
+    let streamer = match cfg.stream.as_mut() {
+        Some(s) if serving => {
+            let transcode = std::mem::take(&mut s.transcode);
+            Some(Arc::new(stream::Streamer::new(s.state_dir.clone(), transcode, self_url).await?))
+        }
+        _ => None,
+    };
     let orch = Arc::new(Orchestrator::new(cfg, streamer)?);
+    if orch.streamer.is_some()
+        && let Err(e) = orch.restore_streams().await
+    {
+        tracing::warn!("pedidos gravados não retomados: {e:#}");
+    }
 
     match command.as_deref().unwrap_or("serve") {
         "plan" => {

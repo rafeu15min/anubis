@@ -43,6 +43,11 @@
   .rel b { font-weight: 500; word-break: break-word; }
   .rel small { color: var(--muted); display: block; }
   .rel .why { color: #ffb36b; }
+  details { border-top: 1px solid var(--line); padding: 8px 0; }
+  summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+  .ep { display: grid; grid-template-columns: 3.2em 1fr auto; gap: 10px; align-items: center; padding: 6px 0; }
+  .ep .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ep small { color: var(--muted); display: block; }
   .err { color: #ff8a8a; }
   @media (max-width: 480px) { .card { grid-template-columns: 72px 1fr; } .card img, .noposter { width: 72px; } }
 </style>
@@ -66,6 +71,11 @@
   <p class="meta" id="pickmsg"></p>
   <div id="rels"></div>
   <div class="row" style="justify-content:flex-end"><button id="pickclose">Fechar</button></div>
+</dialog>
+<dialog id="eps">
+  <h3 id="epstitle"></h3>
+  <div id="epslist"><p class="msg">Carregando…</p></div>
+  <div class="row" style="justify-content:flex-end"><button id="epsclose">Fechar</button></div>
 </dialog>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
@@ -101,9 +111,12 @@ function card(it, st) {
   const poster = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
   const year = it.year ? ` (${it.year})` : '';
   const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ');
-  // filmes: assistir agora (padrão) ou só baixar; séries: pedir
-  const watch = it.kind === 'movie' ? `<button class="primary" data-watch="${k}">Assistir</button>` : '';
-  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${it.kind === 'movie' ? 'Só baixar' : 'Pedir'}</button>`;
+  // filmes: assistir agora (padrão) ou só baixar; séries: episódios (assistir
+  // um de cada vez) ou pedir a série inteira
+  const watch = it.kind === 'movie'
+    ? `<button class="primary" data-watch="${k}">Assistir</button>`
+    : `<button class="primary" data-eps="${it.id}" data-title="${esc(it.title)}">Episódios</button>`;
+  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${it.kind === 'movie' ? 'Só baixar' : 'Baixar a série'}</button>`;
   const action = watch + req;
   return `<article class="card" data-key="${k}">
     ${poster}
@@ -153,12 +166,11 @@ async function request(k) {
 // "assistir agora": o Anubis escolhe a versão, começa a baixar e abre o player
 const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
 async function watch(k, guid) {
-  const it = lastResults[k] || tracked[k];
-  if (!it) return;
+  const [kind, id] = [k.split(':')[0], +k.split(':')[1]];
   const btns = document.querySelectorAll(`[data-watch="${k}"]`);
   btns.forEach((b) => { b.disabled = true; b.textContent = 'Procurando versão…'; });
   try {
-    const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: it.kind, id: it.id, guid }) });
+    const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, id, guid }) });
     const d = await r.json();
     if (r.ok) { location.href = d.player; return; }
     if (r.status === 409 && d.no_approved) {
@@ -179,6 +191,30 @@ async function watch(k, guid) {
   }
 }
 $('#pickclose').onclick = () => $('#pick').close();
+
+// temporadas e episódios de uma série
+async function episodes(tvdb, title) {
+  $('#epstitle').textContent = title;
+  $('#epslist').innerHTML = '<p class="msg">Carregando episódios…</p>';
+  $('#eps').showModal();
+  try {
+    const r = await fetch(`series/${tvdb}/episodes`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    const today = new Date().toISOString().slice(0, 10);
+    $('#epslist').innerHTML = d.seasons.map((s, i) => `<details ${i === 0 ? 'open' : ''}>
+        <summary>${s.number === 0 ? 'Especiais' : `Temporada ${s.number}`} <span class="meta">· ${s.episodes.length} episódios</span></summary>
+        ${s.episodes.map((e) => {
+          const future = e.air_date && e.air_date > today;
+          const btn = future ? `<span class="meta">estreia ${esc(e.air_date)}</span>` : `<button data-watch="episode:${e.id}">Assistir</button>`;
+          return `<div class="ep"><span class="n">${e.number}</span>
+            <div>${esc(e.title || 'Episódio ' + e.number)}${e.has_file ? ' <span class="tag">na biblioteca</span>' : ''}<small>${esc(e.air_date || '')}</small></div>${btn}</div>`;
+        }).join('')}</details>`).join('') || '<p class="msg">Nenhum episódio.</p>';
+  } catch (e) {
+    $('#epslist').innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
+  }
+}
+$('#epsclose').onclick = () => $('#eps').close();
 
 // atualiza o cartão do item onde ele aparecer (pedidos e resultados)
 function render(it, st) {
@@ -229,6 +265,8 @@ $('#q').addEventListener('input', (e) => {
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-req]');
   if (b) request(b.dataset.req);
+  const ep = e.target.closest('[data-eps]');
+  if (ep) episodes(ep.dataset.eps, ep.dataset.title);
   const w = e.target.closest('[data-watch]');
   if (w) {
     if (w.dataset.guid) { w.disabled = true; w.textContent = 'Abrindo…'; }

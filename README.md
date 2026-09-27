@@ -34,7 +34,7 @@ animes) e manda buscar. A página acompanha o pedido — procurando, baixando
 (progresso lido direto do qBittorrent), entrando na biblioteca, disponível — e
 abre o item no Jellyfin quando ele fica pronto.
 
-**Assistir agora (padrão para filmes).** "Assistir" escolhe a versão entre as
+**Assistir agora (padrão para filmes e episódios).** "Assistir" escolhe a versão entre as
 que o Radarr aprova (preferindo H.264/AV1, que o navegador toca direto), baixa
 com o motor próprio do Anubis (librqbit) e abre o player da página enquanto
 baixa. Sem ninguém assistindo, o download vai em ordem; com o player aberto, as
@@ -44,6 +44,13 @@ vermelho o que já foi assistido. Ao terminar, o filme entra no Radarr por
 hardlink e, quando ninguém assiste há 5 minutos, o torrent passa ao qBittorrent
 para semear. Se nenhuma versão passa no perfil de qualidade, a página lista as
 recusadas com o motivo e deixa escolher uma mesmo assim.
+
+Séries: "Episódios" lista as temporadas; cada episódio tem "Assistir" (usa a
+versão do episódio ou, sem ela, o pacote da temporada baixando só aquele
+arquivo) e o player oferece o próximo. O que o navegador não toca (H.265,
+áudio AC3/DTS, MKV) é convertido na hora pelo ffmpeg do container do Jellyfin
+(`docker exec`, com um vigia que o encerra quando o player fecha). Pedidos em
+andamento sobrevivem a reinícios (`/var/lib/anubis`).
 
 ## API
 

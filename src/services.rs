@@ -99,6 +99,24 @@ impl Arr {
     pub async fn episodes(&self, series_id: i64) -> Result<Vec<Episode>> {
         self.get(&format!("episode?seriesId={series_id}")).await
     }
+    pub async fn episodes_raw(&self, series_id: i64) -> Result<Vec<Value>> {
+        self.get(&format!("episode?seriesId={series_id}")).await
+    }
+    pub async fn episode(&self, id: i64) -> Result<Value> {
+        self.get(&format!("episode/{id}")).await
+    }
+    pub async fn episode_file(&self, id: i64) -> Result<Value> {
+        self.get(&format!("episodefile/{id}")).await
+    }
+    pub async fn series_by_id(&self, id: i64) -> Result<Value> {
+        self.get(&format!("series/{id}")).await
+    }
+    /// Liga o monitoramento de episódios (depois do import pelo "assistir agora").
+    pub async fn monitor_episodes(&self, ids: &[i64]) -> Result<()> {
+        let body = json!({ "episodeIds": ids, "monitored": true });
+        send::<Value>(self.req(Method::PUT, "episode/monitor").json(&body), &format!("{} monitorar", self.name)).await?;
+        Ok(())
+    }
     pub async fn movies(&self) -> Result<Vec<Movie>> {
         self.get("movie").await
     }
@@ -272,8 +290,10 @@ impl QBittorrent {
     }
 
     /// Entrega um torrent já baixado para o qBittorrent semear, na mesma pasta
-    /// (`NoSubfolder`: os arquivos ficam direto em `save_path`, como o Anubis gravou).
-    pub async fn add_seeding(&self, source: &TorrentSource, save_path: &str, category: &str) -> Result<()> {
+    /// (`NoSubfolder`: os arquivos ficam direto em `save_path`, como o Anubis
+    /// gravou). `only_file`: de um pacote, só este arquivo existe — os outros
+    /// ficam com prioridade 0 para o qBittorrent não baixá-los.
+    pub async fn add_seeding(&self, source: &TorrentSource, save_path: &str, category: &str, hash: Option<&str>, only_file: Option<usize>) -> Result<()> {
         let form = || {
             let f = reqwest::multipart::Form::new()
                 .text("savepath", save_path.to_owned())
@@ -296,6 +316,22 @@ impl QBittorrent {
         let body = res.text().await.unwrap_or_default();
         if !status.is_success() || body.trim() == "Fails." {
             bail!("qBittorrent recusou o torrent (HTTP {status}: {body})");
+        }
+        if let (Some(keep), Some(hash)) = (only_file, hash) {
+            // magnet: a lista de arquivos só aparece depois dos metadados
+            for _ in 0..60 {
+                let files = self.files(hash).await.unwrap_or_default();
+                if !files.is_empty() {
+                    let others: Vec<String> = (0..files.len()).filter(|i| *i != keep).map(|i| i.to_string()).collect();
+                    if !others.is_empty() {
+                        let form = [("hash", hash.to_owned()), ("id", others.join("|")), ("priority", "0".to_owned())];
+                        send::<Value>(self.req(Method::POST, "torrents/filePrio").form(&form), "qBittorrent prioridade").await?;
+                    }
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            bail!("o qBittorrent não obteve a lista de arquivos do pacote");
         }
         Ok(())
     }

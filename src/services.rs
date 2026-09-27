@@ -1,5 +1,5 @@
 //! Clientes das APIs que o Anubis orquestra: Sonarr, Radarr, qBittorrent e
-//! Jellyfin. Só o necessário para a limpeza de armazenamento.
+//! Jellyfin — o necessário para a limpeza de armazenamento e para a busca.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -103,6 +103,43 @@ impl Arr {
         self.get("movie").await
     }
 
+    /// Busca de metadados (TMDB/TVDB) pelo próprio Radarr/Sonarr.
+    pub async fn lookup(&self, what: &str, term: &str) -> Result<Vec<Value>> {
+        let term: String = url_encode(term);
+        self.get(&format!("{what}/lookup?term={term}")).await
+    }
+
+    /// Item já na biblioteca, pelo id externo (`movie?tmdbId=` / `series?tvdbId=`).
+    pub async fn find(&self, what: &str, id_param: &str, id: i64) -> Result<Option<Value>> {
+        let found: Vec<Value> = self.get(&format!("{what}?{id_param}={id}")).await?;
+        Ok(found.into_iter().next())
+    }
+
+    pub async fn quality_profile_id(&self, name: &str) -> Result<i64> {
+        let profiles: Vec<Value> = self.get("qualityprofile").await?;
+        profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some(name))
+            .and_then(|p| p["id"].as_i64())
+            .with_context(|| format!("{}: perfil de qualidade \"{name}\" não existe", self.name))
+    }
+
+    /// Adiciona à biblioteca (monitorado) e já manda buscar.
+    pub async fn add(&self, what: &str, item: Value) -> Result<Value> {
+        send(self.req(Method::POST, what).json(&item), &format!("{} adicionar", self.name)).await
+    }
+
+    /// Dispara uma busca (ex.: `{"name":"MoviesSearch","movieIds":[1]}`).
+    pub async fn command(&self, body: Value) -> Result<()> {
+        send::<Value>(self.req(Method::POST, "command").json(&body), &format!("{} comando", self.name)).await?;
+        Ok(())
+    }
+
+    /// Itens na fila de download (`queue/details?movieId=` / `?seriesId=`).
+    pub async fn queue(&self, filter: &str) -> Result<Vec<Value>> {
+        self.get(&format!("queue/details?{filter}")).await
+    }
+
     /// Desmarca os episódios (senão o Sonarr baixaria de novo) e apaga o arquivo.
     pub async fn delete_episode_file(&self, file_id: i64, episode_ids: &[i64]) -> Result<()> {
         let what = format!("{} desmonitorar episódios", self.name);
@@ -120,6 +157,16 @@ impl Arr {
     }
 }
 
+/// Codifica um termo de busca para a query string.
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------- qBittorrent
 
 pub struct QBittorrent {
@@ -135,6 +182,11 @@ pub struct TorrentInfo {
     pub name: String,
     pub save_path: String,
     pub progress: f64,
+    #[serde(default)]
+    pub size: f64,
+    /// segundos até terminar (8640000 = "infinito" no qBittorrent)
+    #[serde(default)]
+    pub eta: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +224,22 @@ impl QBittorrent {
 
     pub async fn torrents(&self) -> Result<Vec<TorrentInfo>> {
         send(self.req(Method::GET, "torrents/info"), "qBittorrent torrents").await
+    }
+
+    /// Torrents pelos hashes, entrando de novo se a sessão expirou (403) —
+    /// sem logar a cada consulta de progresso.
+    pub async fn by_hashes(&self, hashes: &[String]) -> Result<Vec<TorrentInfo>> {
+        let path = format!("torrents/info?hashes={}", hashes.join("|").to_lowercase());
+        let res = self.req(Method::GET, &path).send().await.context("qBittorrent: sem resposta")?;
+        if res.status() == reqwest::StatusCode::FORBIDDEN {
+            self.login().await?;
+            return send(self.req(Method::GET, &path), "qBittorrent torrents").await;
+        }
+        let status = res.status();
+        if !status.is_success() {
+            bail!("qBittorrent torrents: HTTP {status}");
+        }
+        Ok(res.json().await?)
     }
 
     pub async fn files(&self, hash: &str) -> Result<Vec<TorrentFileInfo>> {
@@ -245,6 +313,29 @@ impl Jellyfin {
             paths.extend(items.items.into_iter().filter_map(|i| i.path));
         }
         Ok(paths)
+    }
+
+    /// Id do item (filme ou série) cuja pasta é `folder` (caminho do Jellyfin).
+    pub async fn find_item(&self, kind: &str, title: &str, folder: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct It {
+            id: String,
+            path: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Its {
+            items: Vec<It>,
+        }
+        let path = format!("Items?Recursive=true&IncludeItemTypes={kind}&Fields=Path&SearchTerm={}", url_encode(title));
+        let found: Its = send(self.req(Method::GET, &path), "Jellyfin buscar item").await?;
+        let folder = folder.trim_end_matches('/');
+        Ok(found
+            .items
+            .into_iter()
+            .find(|i| i.path.as_deref().is_some_and(|p| p == folder || p.starts_with(&format!("{folder}/"))))
+            .map(|i| i.id))
     }
 
     /// Avisa o Jellyfin de arquivos apagados: atualização pontual, sem varrer

@@ -1,7 +1,8 @@
 //! Anubis — orquestrador da stack de mídia do FeuVault.
 //!
-//! Cuida do armazenamento: com o disco cheio, apaga os vídeos mais antigos
-//! (Sonarr/Radarr + o torrent que semeia o mesmo dado) até voltar à meta.
+//! Cuida do armazenamento (com o disco cheio, apaga os vídeos mais antigos:
+//! Sonarr/Radarr + o torrent que semeia o mesmo dado) e oferece uma busca
+//! unificada de filmes e séries, com página própria em `/`.
 //!
 //! Uso:
 //!   anubis [--config ARQ] serve   daemon: API HTTP + agendador (padrão)
@@ -14,6 +15,7 @@ mod config;
 mod disk;
 mod orchestrator;
 mod planner;
+mod search;
 mod services;
 
 use anyhow::{Context, Result, bail};

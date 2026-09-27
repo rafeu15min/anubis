@@ -59,6 +59,17 @@ pub struct PathMap {
 pub struct Arr {
     pub url: String,
     pub api_key: String,
+    /// perfil de qualidade dos pedidos feitos pela busca
+    #[serde(default = "default_profile")]
+    pub quality_profile: String,
+    /// pasta raiz dos pedidos (como o Sonarr/Radarr a enxerga)
+    pub root_folder: Option<String>,
+    /// Sonarr: pasta raiz dos animes (séries com o gênero "Anime")
+    pub anime_root_folder: Option<String>,
+}
+
+fn default_profile() -> String {
+    "Any".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +90,8 @@ pub struct Jellyfin {
     pub media_path: String,
     /// ...e onde ela está no host (ex.: "/mnt/raid0/anubis/media")
     pub host_media_path: String,
+    /// endereço do Jellyfin para os links abertos no navegador
+    pub public_url: Option<String>,
 }
 
 impl Config {
@@ -118,6 +131,11 @@ impl Config {
     /// Caminho do Jellyfin → caminho no host.
     pub fn host_path_from_jellyfin(&self, p: &str) -> PathBuf {
         map_path(&[self.jellyfin_map()], p)
+    }
+
+    /// Caminho de um container (Sonarr/Radarr) → caminho do Jellyfin.
+    pub fn jellyfin_path_from_container(&self, p: &str) -> Option<String> {
+        self.jellyfin_path(&self.host_path(p))
     }
 
     /// Caminho no host → caminho do Jellyfin (`None` se fora da biblioteca dele).

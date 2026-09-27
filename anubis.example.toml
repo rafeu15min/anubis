@@ -28,10 +28,16 @@ to = "/mnt/raid0/anubis"
 [sonarr]
 url = "http://10.10.10.2:8989"
 api_key = ""  # Sonarr → Settings → General → API Key
+# pedidos feitos pela busca (caminhos como o Sonarr os enxerga)
+quality_profile = "Any"
+root_folder = "/data/media/series"
+anime_root_folder = "/data/media/animes"
 
 [radarr]
 url = "http://10.10.10.2:7878"
 api_key = ""
+quality_profile = "Any"
+root_folder = "/data/media/movies"
 
 [qbittorrent]
 url = "http://10.10.10.2:8080"
@@ -45,3 +51,5 @@ api_key = ""  # Painel → Chaves de API
 # como o Jellyfin enxerga a biblioteca, e onde ela está no host
 media_path = "/media"
 host_media_path = "/mnt/raid0/anubis/media"
+# endereço do Jellyfin nos links abertos no navegador
+public_url = "http://jellyfin.feuvault.lan"

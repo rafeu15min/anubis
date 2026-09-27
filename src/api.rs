@@ -1,16 +1,24 @@
 //! API HTTP do Anubis (no link direto 10.10.10.x).
 //!
+//! GET  /                        — página de busca
+//! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
+//! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
+//! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
 //! GET  /health                  — vivo?
 //! GET  /storage                 — uso do disco, regras e o último ciclo
 //! GET  /storage/plan            — o que seria apagado agora (não apaga)
 //! POST /storage/run             — roda um ciclo agora (respeita dry_run)
 //! POST /hooks/torrent-finished  — gatilho do qBittorrent ao concluir um download
 //!
-//! As rotas POST exigem `Authorization: Bearer <token>` quando há token na config.
+//! `/storage/run` e o gancho exigem `Authorization: Bearer <token>` quando há
+//! token na config. A busca e os pedidos ficam abertos na rede local: pedir um
+//! filme não apaga nada, e as regras de qualidade continuam as do Radarr/Sonarr.
 
 use crate::disk;
 use crate::orchestrator::{Orchestrator, Report};
-use axum::extract::State;
+use crate::search::Kind;
+use axum::extract::{Path, Query, State};
+use axum::response::Html;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -28,6 +36,10 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/search", get(search))
+        .route("/request", post(request))
+        .route("/status/{kind}/{id}", get(status))
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }))
         .route("/storage", get(storage))
         .route("/storage/plan", get(plan))
@@ -80,6 +92,39 @@ async fn run(State(s): State<AppState>, headers: HeaderMap) -> Response {
         return error(StatusCode::UNAUTHORIZED, "token inválido");
     }
     report(s.orch.cycle(true).await)
+}
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -> Response {
+    let term = q.q.trim();
+    if term.len() < 2 {
+        return error(StatusCode::BAD_REQUEST, "digite ao menos 2 letras");
+    }
+    Json(s.orch.search(term).await).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RequestBody {
+    kind: Kind,
+    id: i64,
+}
+
+async fn request(State(s): State<AppState>, Json(b): Json<RequestBody>) -> Response {
+    match s.orch.request(b.kind, b.id).await {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn status(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.status(kind, id).await {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Response {

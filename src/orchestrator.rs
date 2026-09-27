@@ -14,10 +14,10 @@ use tracing::{info, warn};
 
 pub struct Orchestrator {
     pub cfg: Config,
-    sonarr: Option<Arr>,
-    radarr: Option<Arr>,
-    qbit: QBittorrent,
-    jellyfin: Jellyfin,
+    pub(crate) sonarr: Option<Arr>,
+    pub(crate) radarr: Option<Arr>,
+    pub(crate) qbit: QBittorrent,
+    pub(crate) jellyfin: Jellyfin,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,

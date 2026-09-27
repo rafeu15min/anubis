@@ -27,19 +27,32 @@ A checagem roda a cada 30 minutos e também na hora em que um download termina
 (o qBittorrent chama `POST /hooks/torrent-finished`). Com `dry_run = true` ele
 só registra no log o que apagaria.
 
+**Busca unificada.** Página em `/` que pesquisa filmes (Radarr/TMDB) e séries
+(Sonarr/TVDB) ao mesmo tempo. "Pedir" adiciona o item ao Radarr/Sonarr com o
+perfil de qualidade configurado (séries com o gênero Anime vão para a pasta de
+animes) e manda buscar. A página acompanha o pedido — procurando, baixando
+(progresso lido direto do qBittorrent), entrando na biblioteca, disponível — e
+abre o item no Jellyfin quando ele fica pronto.
+
 ## API
 
 Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 
 | Rota | O que faz |
 |---|---|
+| `GET /` | página de busca |
+| `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
+| `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
+| `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
 | `GET /health` | versão e estado |
 | `GET /storage` | uso do disco, regras e o último ciclo executado |
 | `GET /storage/plan` | o que seria apagado agora (não apaga nada) |
 | `POST /storage/run` | roda um ciclo agora (respeita `dry_run`) |
 | `POST /hooks/torrent-finished` | gatilho do qBittorrent ao concluir um download |
 
-As rotas POST exigem `Authorization: Bearer <token>`.
+`POST /storage/run` e o gancho do qBittorrent exigem
+`Authorization: Bearer <token>`. A busca e os pedidos ficam abertos na rede
+local: pedir não apaga nada e as regras de qualidade são as do Radarr/Sonarr.
 
 ## Uso
 
@@ -71,7 +84,9 @@ src/planner.rs       decide o que apagar (função pura, testada)
 src/orchestrator.rs  inventário (APIs + disco) → plano → execução
 src/services.rs      clientes de Sonarr, Radarr, qBittorrent e Jellyfin
 src/disk.rs          uso do sistema de arquivos e inodes
+src/search.rs        busca, pedido e acompanhamento
 src/api.rs           rotas HTTP
+web/index.html       página de busca (embutida no binário)
 deploy/              unidade systemd
 infra/feuvault/      composes das stacks de mídia (fonte de verdade)
 ```
@@ -86,8 +101,6 @@ Jellyfin).
 
 ## Próximos passos
 
-- API de busca unificada (Prowlarr → Sonarr/Radarr/qBittorrent, progresso e
-  link do Jellyfin ao terminar), usada pela página na Homepage e pelos apps
-  Android/TV na rede local.
+- Acesso pelos apps Android/TV na rede local (por IP).
 - Testes de carga (muitos gatilhos simultâneos) e medição das metas de
   consumo sob carga.

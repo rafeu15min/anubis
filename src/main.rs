@@ -18,6 +18,7 @@ mod planner;
 mod search;
 mod services;
 mod stream;
+mod subs;
 
 use anyhow::{Context, Result, bail};
 use orchestrator::Orchestrator;

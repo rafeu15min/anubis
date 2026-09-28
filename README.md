@@ -52,6 +52,12 @@ arquivo) e o player oferece o próximo. O que o navegador não toca (H.265,
 (`docker exec`, com um vigia que o encerra quando o player fecha). Pedidos em
 andamento sobrevivem a reinícios (`/var/lib/anubis`).
 
+Legendas: o botão CC do player lista as legendas ao lado do vídeo (as que o
+Bazarr baixa em PT-BR, as que vêm no torrent) e, com o arquivo completo, as
+embutidas no MKV; tudo vira WebVTT (SRT em Windows-1252 incluso), acompanha os
+pulos no modo convertido e o idioma escolhido fica lembrado. O Bazarr pula
+legenda quando o áudio já é português.
+
 ## API
 
 Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.

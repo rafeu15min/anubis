@@ -56,6 +56,24 @@ services:
     restart: unless-stopped
     networks:
       - proxy-network
+  # Bazarr: legendas (PT-BR) para o que o Sonarr/Radarr importam
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Sao_Paulo
+    volumes:
+      - /home/rafeu/infra-rust/config/bazarr:/config
+      # mesmo /data do Sonarr/Radarr: os caminhos batem sem tradução
+      - /mnt/raid0/anubis:/data
+    # API só no link direto PC <-> FeuVault (fora da rede da casa)
+    ports:
+      - "10.10.10.2:6767:6767"
+    restart: unless-stopped
+    networks:
+      - proxy-network
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr

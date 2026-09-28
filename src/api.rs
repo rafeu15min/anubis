@@ -54,6 +54,9 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
         .route("/watch/{kind}/{id}/stream.mp4", get(converted))
+        .route("/watch/{kind}/{id}/subs", get(subs_list))
+        .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
+        .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }))
         .route("/storage", get(storage))
@@ -279,6 +282,46 @@ impl futures_core::Stream for WithChild {
     type Item = std::io::Result<bytes::Bytes>;
     fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
         std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+async fn subs_list(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    let list = s.orch.streamer.as_ref().map(|st| st.subtitles(&job)).unwrap_or_default();
+    Json(list).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct Shift {
+    #[serde(default)]
+    shift: f64,
+}
+
+async fn sub_vtt(State(s): State<AppState>, Path((kind, id, n)): Path<(Kind, i64, String)>, Query(q): Query<Shift>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    let Some(n) = n.trim_end_matches(".vtt").parse().ok() else { return error(StatusCode::NOT_FOUND, "legenda inválida") };
+    let Some(streamer) = s.orch.streamer.as_ref() else { return error(StatusCode::NOT_FOUND, "assistir agora desligado") };
+    match streamer.subtitle_vtt(&job, n, q.shift).await {
+        Ok(vtt) => ([("content-type", "text/vtt; charset=utf-8")], vtt).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn sub_raw(State(s): State<AppState>, Path((kind, id, n)): Path<(Kind, i64, usize)>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    let Some(streamer) = s.orch.streamer.as_ref() else { return error(StatusCode::NOT_FOUND, "assistir agora desligado") };
+    match streamer.subtitle_raw(&job, n).await {
+        Ok(b) => ([("content-type", "text/plain; charset=utf-8")], b).into_response(),
+        Err(e) => error(StatusCode::NOT_FOUND, format!("{e:#}")),
     }
 }
 

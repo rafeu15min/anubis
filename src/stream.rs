@@ -96,6 +96,9 @@ pub struct MediaInfo {
     pub video: Option<String>,
     pub audio: Option<String>,
     pub mode: Mode,
+    /// faixas de legenda em texto embutidas: (posição entre as legendas, idioma, título)
+    #[serde(skip)]
+    pub subs: Vec<(usize, String, String)>,
 }
 
 pub struct Job {
@@ -142,6 +145,8 @@ pub struct Streamer {
     transcode: Transcode,
     /// endereço da própria API (o ffmpeg lê o vídeo por ela)
     self_url: String,
+    /// legendas já convertidas (extrair uma embutida lê o vídeo inteiro)
+    sub_cache: StdMutex<HashMap<(Kind, i64, usize), Arc<String>>>,
 }
 
 /// Uma versão encontrada, como a página mostra.
@@ -274,7 +279,7 @@ impl Streamer {
             ..Default::default()
         };
         let session = Session::new_with_opts(std::env::temp_dir(), opts).await.context("iniciando o librqbit")?;
-        Ok(Self { api: Api::new(session, None), jobs: Mutex::new(HashMap::new()), state_dir, transcode, self_url })
+        Ok(Self { api: Api::new(session, None), jobs: Mutex::new(HashMap::new()), state_dir, transcode, self_url, sub_cache: StdMutex::new(HashMap::new()) })
     }
 
     pub async fn job(&self, kind: Kind, id: i64) -> Option<Arc<Job>> {
@@ -407,7 +412,7 @@ impl Streamer {
                         Err(_) => "tempo esgotado".into(),
                     };
                     warn!("{}: sem ffprobe ({why}), tocando direto", job.info.title);
-                    MediaInfo { duration: None, video: None, audio: None, mode: Mode::Direct }
+                    MediaInfo { duration: None, video: None, audio: None, mode: Mode::Direct, subs: vec![] }
                 }
             };
             info!("{}: {:?} (vídeo {:?}, áudio {:?})", job.info.title, media.mode, media.video, media.audio);
@@ -460,6 +465,74 @@ impl Streamer {
     }
 }
 
+impl Streamer {
+    /// Legendas disponíveis: arquivos ao lado do vídeo e, com o arquivo
+    /// completo, as embutidas (extraí-las lê o vídeo inteiro).
+    pub fn subtitles(&self, job: &Job) -> Vec<crate::subs::Sub> {
+        use crate::subs::{Sub, SubSource, external, language};
+        let mut out = external(&job.info.host_file);
+        let complete = job.handle().is_none() || job.phase().0 != Phase::Downloading;
+        if complete && let Some(m) = job.media() {
+            for (i, lang, title) in m.subs {
+                // o título costuma dizer mais que a tag ("Portuguese (Brazil) [SDH]")
+                let t = title.to_lowercase();
+                let tag = if t.contains("brazil") || t.contains("brasil") { "pt-BR".to_owned() } else { lang.clone() };
+                let (mut label, code) = language(&tag);
+                if t.contains("sdh") && !label.contains("SDH") {
+                    label.push_str(" (SDH)");
+                } else if t.contains("forced") || t.contains("forçad") {
+                    label.push_str(" (forçada)");
+                } else if !title.is_empty() && !t.contains("portug") && !t.contains("english") {
+                    label = format!("{label} — {title}");
+                }
+                out.push(Sub { label: format!("{label} (embutida)"), lang: code, source: SubSource::Embedded(i) });
+            }
+        }
+        out
+    }
+
+    /// A legenda `n` em WebVTT, adiantada em `shift` segundos.
+    pub async fn subtitle_vtt(&self, job: &Job, n: usize, shift: f64) -> Result<String> {
+        use crate::subs::{SubSource, decode, shift_vtt, srt_to_vtt};
+        let key = (job.info.kind, job.info.id, n);
+        if let Some(v) = self.sub_cache.lock().unwrap().get(&key).cloned() {
+            return Ok(shift_vtt(&v, shift));
+        }
+        let sub = self.subtitles(job).into_iter().nth(n).context("legenda não encontrada")?;
+        let vtt = match &sub.source {
+            SubSource::File(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("srt")) => srt_to_vtt(&decode(&tokio::fs::read(p).await?)),
+            SubSource::File(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("vtt")) => decode(&tokio::fs::read(p).await?),
+            other => {
+                // ASS/SSA e embutidas: o ffmpeg converte (lendo pela API, que
+                // o container alcança)
+                let (input, map) = match other {
+                    SubSource::File(_) => (format!("{}/subs/{n}/raw", self.video_url(job).trim_end_matches("/video")), "0:s:0".to_owned()),
+                    SubSource::Embedded(i) => (self.input(job), format!("0:s:{i}")),
+                };
+                let args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", &input, "-map", &map, "-f", "webvtt", "pipe:1"].map(String::from).to_vec();
+                let out = tokio::time::timeout(Duration::from_secs(300), self.tool(&self.transcode.ffmpeg, &args, false).kill_on_drop(true).output())
+                    .await
+                    .context("a conversão da legenda demorou demais")??;
+                if !out.status.success() {
+                    bail!("ffmpeg: {}", String::from_utf8_lossy(&out.stderr).trim());
+                }
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            }
+        };
+        let vtt = Arc::new(vtt);
+        self.sub_cache.lock().unwrap().insert(key, vtt.clone());
+        Ok(shift_vtt(&vtt, shift))
+    }
+
+    /// Arquivo de legenda cru (para o ffmpeg do container ler ASS/SSA).
+    pub async fn subtitle_raw(&self, job: &Job, n: usize) -> Result<Vec<u8>> {
+        match self.subtitles(job).into_iter().nth(n).map(|s| s.source) {
+            Some(crate::subs::SubSource::File(p)) => Ok(tokio::fs::read(p).await?),
+            _ => bail!("legenda não encontrada"),
+        }
+    }
+}
+
 /// Decide, pelo que o ffprobe viu, como o navegador vai tocar.
 fn classify(probe: &Value, file_name: &str) -> MediaInfo {
     let streams = probe["streams"].as_array().cloned().unwrap_or_default();
@@ -477,7 +550,14 @@ fn classify(probe: &Value, file_name: &str) -> MediaInfo {
     } else {
         Mode::Remux
     };
-    MediaInfo { duration, video, audio, mode }
+    let subs = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "subtitle")
+        .enumerate()
+        .filter(|(_, s)| s["codec_name"].as_str().is_some_and(|c| crate::subs::TEXT_CODECS.contains(&c)))
+        .map(|(i, s)| (i, s["tags"]["language"].as_str().unwrap_or_default().to_owned(), s["tags"]["title"].as_str().unwrap_or_default().to_owned()))
+        .collect();
+    MediaInfo { duration, video, audio, mode, subs }
 }
 
 impl Orchestrator {

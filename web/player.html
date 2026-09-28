@@ -36,6 +36,12 @@
   input[type=range] { width: 100px; accent-color: var(--text); }
   .panel { position: fixed; top: 68px; right: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 10px 14px; border-radius: 10px; background: rgba(20,20,20,.75); font-size: 13px; transition: opacity .25s; }
   .panel a { color: #7fd0ff; }
+  #cc.on { color: var(--played); }
+  .ccmenu { position: fixed; right: 20px; bottom: 90px; min-width: 220px; max-height: 50vh; overflow: auto; padding: 6px; border-radius: 10px; background: rgba(20,20,20,.92); z-index: 5; }
+  .ccmenu button { display: block; width: 100%; height: auto; min-height: 40px; padding: 8px 12px; border-radius: 6px; text-align: left; font: inherit; }
+  .ccmenu button.sel { color: var(--played); font-weight: 600; }
+  .ccmenu small { display: block; padding: 6px 12px; color: var(--muted); }
+  video::cue { background: rgba(0,0,0,.65); color: #fff; font-size: clamp(16px, 2.6vw, 30px); line-height: 1.3; }
   button.next { position: fixed; right: 20px; bottom: 120px; width: auto; height: auto; padding: 10px 16px; border-radius: 8px; background: rgba(20,20,20,.85); font: inherit; border: 1px solid rgba(255,255,255,.25); transition: opacity .25s; }
   .hidden button.next { opacity: 0; pointer-events: none; }
   .center { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
@@ -56,6 +62,7 @@
 </div>
 
 <div class="panel" id="panel">Preparando…</div>
+<div class="ccmenu" id="ccmenu" hidden></div>
 <button class="next" id="next" hidden></button>
 
 <div class="center"><div class="spin"></div><div class="msg" id="msg"></div></div>
@@ -77,6 +84,7 @@
     <button id="play" class="big" title="Play/pausa (espaço)"><svg viewBox="0 0 24 24"><path id="playicon" d="M8 5v14l11-7z"/></svg></button>
     <button id="fwd" title="Avançar 30 s (→)"><svg viewBox="0 0 24 24"><path d="M12.01 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="16" font-size="6.5" text-anchor="middle" font-family="sans-serif">30</text></svg></button>
     <span class="spacer"></span>
+    <button id="cc" title="Legendas (C)"><svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1z"/></svg></button>
     <button id="mute" title="Som (M)"><svg viewBox="0 0 24 24"><path id="volicon" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg></button>
     <input id="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
     <button id="pip" class="desk" title="Imagem na imagem"><svg viewBox="0 0 24 24"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg></button>
@@ -110,6 +118,7 @@ function seek(t) {
   offset = t;
   v.src = `${base}/stream.mp4?t=${t.toFixed(1)}`;
   v.play().catch(() => {});
+  if (typeof applySub === 'function') applySub();
 }
 
 function start(media) {
@@ -199,6 +208,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'arrowdown') { e.preventDefault(); v.volume = Math.max(0, v.volume - 0.1); }
   else if (k === 'f') full();
   else if (k === 'm') v.muted = !v.muted;
+  else if (k === 'c') pickSub(subSel >= 0 ? -1 : (subs.findIndex((s) => s.lang === (wantLang || 'pt-BR')) >= 0 ? subs.findIndex((s) => s.lang === (wantLang || 'pt-BR')) : subs.length ? 0 : -1));
   poke();
 });
 
@@ -212,6 +222,58 @@ function poke() {
 document.addEventListener('pointermove', poke);
 v.addEventListener('pause', poke);
 poke();
+
+// ---- legendas: arquivos do Bazarr/torrent e faixas embutidas, em WebVTT
+const SUBKEY = 'anubis.legenda';  // idioma escolhido da última vez ('' = desligada)
+let subs = [], subSel = -1;
+let wantLang = null;
+try { wantLang = localStorage.getItem(SUBKEY); } catch {}
+function applySub() {
+  v.querySelectorAll('track').forEach((t) => t.remove());
+  $('cc').classList.toggle('on', subSel >= 0);
+  if (subSel < 0) return;
+  const t = document.createElement('track');
+  t.kind = 'subtitles';
+  t.srclang = subs[subSel].lang;
+  t.label = subs[subSel].label;
+  // vídeo convertido começa em `offset`: a legenda é adiantada junto
+  t.src = `${base}/subs/${subSel}?shift=${converted ? offset.toFixed(1) : 0}`;
+  t.default = true;
+  v.appendChild(t);
+  t.addEventListener('load', () => { t.track.mode = 'showing'; });
+  t.track.mode = 'showing';
+}
+function pickSub(i) {
+  subSel = i;
+  try { localStorage.setItem(SUBKEY, i >= 0 ? subs[i].lang : ''); } catch {}
+  applySub();
+  renderCC();
+}
+function renderCC() {
+  const m = $('ccmenu');
+  m.innerHTML = `<button class="${subSel < 0 ? 'sel' : ''}" data-sub="-1">Desligada</button>`
+    + subs.map((s, i) => `<button class="${i === subSel ? 'sel' : ''}" data-sub="${i}">${s.label}</button>`).join('')
+    + (subs.length ? '' : '<small>Nenhuma legenda ainda. O Bazarr procura sozinho; as embutidas aparecem quando o download termina.</small>');
+}
+async function loadSubs() {
+  try {
+    const r = await fetch(`${base}/subs`);
+    if (!r.ok) return;
+    const list = await r.json();
+    if (JSON.stringify(list) === JSON.stringify(subs)) return;
+    const cur = subSel >= 0 ? subs[subSel].label : null;
+    subs = list;
+    subSel = cur ? subs.findIndex((s) => s.label === cur) : -1;
+    // primeira vez: liga no idioma escolhido antes
+    if (subSel < 0 && wantLang) { subSel = subs.findIndex((s) => s.lang === wantLang); if (subSel >= 0) applySub(); }
+    renderCC();
+  } catch {}
+}
+$('cc').onclick = (e) => { e.stopPropagation(); renderCC(); $('ccmenu').hidden = !$('ccmenu').hidden; };
+$('ccmenu').onclick = (e) => { const b = e.target.closest('[data-sub]'); if (b) { pickSub(+b.dataset.sub); $('ccmenu').hidden = true; } };
+document.addEventListener('click', (e) => { if (!e.target.closest('#ccmenu, #cc')) $('ccmenu').hidden = true; });
+loadSubs();
+setInterval(loadSubs, 15000);
 
 // ---- próximo episódio
 let next = null;

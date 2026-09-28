@@ -22,6 +22,8 @@ pub struct Orchestrator {
     pub(crate) bazarr: Option<Bazarr>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
     pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
+    /// "juntar dublagem" em andamento ou que falharam, por tmdbId
+    pub(crate) muxes: Mutex<HashMap<i64, std::sync::Arc<crate::mux::MuxJob>>>,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -50,6 +52,7 @@ impl Orchestrator {
             jellyfin: Jellyfin::new(&cfg.jellyfin.url, &cfg.jellyfin.api_key)?,
             bazarr: cfg.bazarr.as_ref().map(|b| Bazarr::new(&b.url, &b.api_key)).transpose()?,
             streamer,
+            muxes: Mutex::new(HashMap::new()),
             cfg,
             running: Mutex::new(()),
             last: Mutex::new(None),

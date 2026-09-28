@@ -14,6 +14,7 @@ mod api;
 mod config;
 mod disk;
 mod orchestrator;
+mod mux;
 mod planner;
 mod prefs;
 mod search;
@@ -71,6 +72,11 @@ async fn main() -> Result<()> {
         && let Err(e) = orch.restore_streams().await
     {
         tracing::warn!("pedidos gravados não retomados: {e:#}");
+    }
+    if orch.streamer.is_some()
+        && let Err(e) = orch.restore_muxes().await
+    {
+        tracing::warn!("dublagens em andamento não retomadas: {e:#}");
     }
 
     match command.as_deref().unwrap_or("serve") {

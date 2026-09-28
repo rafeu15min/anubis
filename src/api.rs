@@ -10,6 +10,9 @@
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
+//! GET  /mux/{tmdb}/options      — versões para juntar: vídeo e dublagem PT-BR
+//! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
+//! GET  /mux/{tmdb}  ·  DELETE   — andamento · desistir (apaga os downloads)
 //! GET  /preferencias            — página de preferências
 //! GET  /prefs  ·  PUT /prefs     — idioma do áudio (filmes/séries) e legendas
 //! GET  /health                  — vivo?
@@ -62,6 +65,9 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
+        .route("/mux", post(start_mux))
+        .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
+        .route("/mux/{tmdb}/options", get(mux_options))
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }))
         .route("/storage", get(storage))
         .route("/storage/plan", get(plan))
@@ -347,6 +353,41 @@ async fn episodes(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response 
     match s.orch.episodes(tvdb).await {
         Ok(e) => Json(e).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn mux_options(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
+    match s.orch.mux_options(tmdb).await {
+        Ok(o) => Json(o).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MuxBody {
+    id: i64,
+    video: String,
+    audio: String,
+}
+
+async fn start_mux(State(s): State<AppState>, Json(b): Json<MuxBody>) -> Response {
+    match s.orch.start_mux(b.id, &b.video, &b.audio).await {
+        Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "status": "baixando" }))).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn mux_status(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
+    match s.orch.mux_status(tmdb).await {
+        Some(v) => Json(v).into_response(),
+        None => error(StatusCode::NOT_FOUND, "nada sendo juntado aqui"),
+    }
+}
+
+async fn cancel_mux(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
+    match s.orch.cancel_mux(tmdb).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => error(StatusCode::CONFLICT, format!("{e:#}")),
     }
 }
 

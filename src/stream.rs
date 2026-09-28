@@ -139,10 +139,10 @@ impl Job {
 }
 
 pub struct Streamer {
-    api: Api,
+    pub(crate) api: Api,
     jobs: Mutex<HashMap<(Kind, i64), Arc<Job>>>,
-    state_dir: PathBuf,
-    transcode: Transcode,
+    pub(crate) state_dir: PathBuf,
+    pub(crate) transcode: Transcode,
     /// endereço da própria API (o ffmpeg lê o vídeo por ela)
     self_url: String,
     /// legendas já convertidas (extrair uma embutida lê o vídeo inteiro)
@@ -162,8 +162,11 @@ pub struct Candidate {
     pub playable: u8,
     /// pacote da temporada inteira
     pub pack: bool,
+    /// idiomas do áudio, como o Radarr/Sonarr entenderam o nome
+    pub languages: Vec<String>,
+    pub quality: String,
     #[serde(skip)]
-    raw: Value,
+    pub(crate) raw: Value,
 }
 
 pub enum Started {
@@ -184,7 +187,7 @@ fn playable(title: &str) -> u8 {
     }
 }
 
-fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
+pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = releases
         .into_iter()
         .filter(|r| r["protocol"] == "torrent" && r["seeders"].as_i64().unwrap_or(0) > 0)
@@ -197,6 +200,8 @@ fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
             reasons: r["rejections"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
             playable: playable(r["title"].as_str().unwrap_or_default()),
             pack: r["fullSeason"].as_bool().unwrap_or(false),
+            languages: r["languages"].as_array().map(|a| a.iter().filter_map(|l| l["name"].as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+            quality: r["quality"]["quality"]["name"].as_str().unwrap_or_default().to_owned(),
             raw: r,
         })
         .collect();
@@ -233,7 +238,7 @@ fn is_this_episode(release: &Value, s: i64, e: i64) -> bool {
 }
 
 /// O vídeo a tocar: o maior, ou (episódio) o do episódio pedido.
-fn video_file(files: &librqbit::FileInfos, episode: Option<(i64, i64)>) -> Option<(usize, u64, PathBuf)> {
+pub(crate) fn video_file(files: &librqbit::FileInfos, episode: Option<(i64, i64)>) -> Option<(usize, u64, PathBuf)> {
     let videos: Vec<(usize, &librqbit::file_info::FileInfo)> = files
         .iter()
         .enumerate()
@@ -252,7 +257,7 @@ fn video_file(files: &librqbit::FileInfos, episode: Option<(i64, i64)>) -> Optio
 }
 
 /// Nome de pasta seguro a partir do título da versão.
-fn folder_name(title: &str) -> String {
+pub(crate) fn folder_name(title: &str) -> String {
     let s: String = title.chars().map(|c| if c == '/' || c.is_control() { ' ' } else { c }).collect();
     s.trim().chars().take(150).collect()
 }
@@ -297,7 +302,7 @@ impl Streamer {
         }
     }
 
-    fn find_handle(&self, info_hash: &str) -> Option<Arc<ManagedTorrent>> {
+    pub(crate) fn find_handle(&self, info_hash: &str) -> Option<Arc<ManagedTorrent>> {
         self.api.session().with_torrents(|it| it.map(|(_, h)| h).find(|h| h.info_hash().as_string() == info_hash).cloned())
     }
 
@@ -605,7 +610,7 @@ impl Orchestrator {
         Ok(h)
     }
 
-    async fn add_torrent(&self, source: &TorrentSource, folder: &Path) -> Result<Arc<ManagedTorrent>> {
+    pub(crate) async fn add_torrent(&self, source: &TorrentSource, folder: &Path) -> Result<Arc<ManagedTorrent>> {
         let add = match source {
             TorrentSource::Magnet(m) => AddTorrent::from_url(m.clone()),
             TorrentSource::File(b) => AddTorrent::from_bytes(b.clone()),
@@ -729,22 +734,26 @@ impl Orchestrator {
         Ok(Started::Ready)
     }
 
+    /// O filme no Radarr, adicionando se preciso — sem busca e sem monitorar:
+    /// quem baixa é o Anubis.
+    pub(crate) async fn ensure_movie(&self, tmdb: i64) -> Result<Value> {
+        let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
+        if let Some(m) = radarr.find("movie", "tmdbId", tmdb).await? {
+            return Ok(m);
+        }
+        let rcfg = self.cfg.radarr.as_ref().context("Radarr não configurado")?;
+        let mut item = radarr.lookup("movie", &format!("tmdb:{tmdb}")).await?.into_iter().next().context("filme não encontrado")?;
+        item["qualityProfileId"] = json!(radarr.quality_profile_id(&rcfg.quality_profile).await?);
+        item["rootFolderPath"] = json!(rcfg.root_folder.as_deref().context("configure root_folder em [radarr]")?);
+        item["monitored"] = json!(false);
+        item["minimumAvailability"] = json!("released");
+        item["addOptions"] = json!({ "searchForMovie": false });
+        radarr.add("movie", item).await
+    }
+
     async fn movie_target(&self, tmdb: i64) -> Result<Target> {
         let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
-        // entra no Radarr sem busca e sem monitorar: quem baixa é o Anubis
-        let movie = match radarr.find("movie", "tmdbId", tmdb).await? {
-            Some(m) => m,
-            None => {
-                let rcfg = self.cfg.radarr.as_ref().context("Radarr não configurado")?;
-                let mut item = radarr.lookup("movie", &format!("tmdb:{tmdb}")).await?.into_iter().next().context("filme não encontrado")?;
-                item["qualityProfileId"] = json!(radarr.quality_profile_id(&rcfg.quality_profile).await?);
-                item["rootFolderPath"] = json!(rcfg.root_folder.as_deref().context("configure root_folder em [radarr]")?);
-                item["monitored"] = json!(false);
-                item["minimumAvailability"] = json!("released");
-                item["addOptions"] = json!({ "searchForMovie": false });
-                radarr.add("movie", item).await?
-            }
-        };
+        let movie = self.ensure_movie(tmdb).await?;
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
         let title = movie["title"].as_str().unwrap_or_default().to_owned();
         if movie["hasFile"].as_bool() == Some(true) {
@@ -801,7 +810,7 @@ impl Orchestrator {
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar
     /// para um magnet — é o que o Prowlarr faz com vários indexadores).
-    async fn fetch_source(&self, release: &Value) -> Result<TorrentSource> {
+    pub(crate) async fn fetch_source(&self, release: &Value) -> Result<TorrentSource> {
         if let Some(m) = release["magnetUrl"].as_str().filter(|m| m.starts_with("magnet:")) {
             return Ok(TorrentSource::Magnet(m.to_owned()));
         }

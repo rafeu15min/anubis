@@ -58,6 +58,22 @@ embutidas no MKV; tudo vira WebVTT (SRT em Windows-1252 incluso), acompanha os
 pulos no modo convertido e o idioma escolhido fica lembrado. O Bazarr pula
 legenda quando o áudio já é português.
 
+**Juntar dublagem** (filmes, botão no cartão): a imagem de uma versão com o
+áudio em português de outra — para quando a dublada só existe em qualidade
+pior. A página lista as versões do Radarr em duas colunas (vídeo, melhor
+imagem primeiro; dublagem, as com áudio em português) e o Anubis baixa as
+duas (só o vídeo de cada torrent). Antes de juntar, confere a sincronia: em
+três pontos do filme (20%, 50%, 80%) procura onde o áudio da dublagem cai no
+do vídeo, pelos "ataques" do som (música e efeitos são os mesmos na
+dublagem). Mesmo atraso nos pontos: corta ou acrescenta esse tempo. Duração
+indicando outra velocidade (25 × 23,976 quadros/s): ajusta e confere de
+novo. Nada bate (versão estendida, cena a mais): não junta e mostra o que
+mediu. O arquivo final tem o vídeo copiado, a dublagem como primeira faixa
+(AAC) e os áudios e legendas originais; entra no Radarr pelo import manual,
+com o idioma marcado como PT-BR, e os dois downloads são apagados. O ffmpeg
+roda numa cópia descartável da imagem do Jellyfin (`docker run`) com o
+`/data` montado como o Radarr o vê.
+
 **Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
 áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
@@ -78,6 +94,9 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /watch/{kind}/{id}` | player |
 | `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |
 | `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
+| `GET /mux/{tmdb}/options` | versões para juntar: vídeo e dublagem PT-BR |
+| `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
+| `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |
 | `GET /preferencias` | página de preferências |
 | `GET /prefs` · `PUT /prefs` | idioma do áudio (filmes/séries) e legendas |
 | `GET /health` | versão e estado |
@@ -122,6 +141,7 @@ src/services.rs      clientes de Sonarr, Radarr, qBittorrent e Jellyfin
 src/disk.rs          uso do sistema de arquivos e inodes
 src/search.rs        busca, pedido e acompanhamento
 src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
+src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
 src/api.rs           rotas HTTP
 web/index.html       página de busca (embutida no binário)
 web/player.html      player

@@ -2,3 +2,6 @@
 # configuração real tem chaves de API
 anubis.toml
 *.pass
+
+# segredos das stacks (ex.: senha do Postgres do bitmagnet)
+.env

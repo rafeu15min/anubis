@@ -1,0 +1,51 @@
+# bitmagnet: escuta a DHT do BitTorrent e cataloga o que circula (inclusive
+# dublados que não aparecem em sites); vira mais uma fonte no Prowlarr
+# (Torznab em http://bitmagnet:3333/torznab). github.com/bitmagnet-io/bitmagnet
+services:
+  bitmagnet:
+    image: ghcr.io/bitmagnet-io/bitmagnet:latest
+    container_name: bitmagnet
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=bitmagnet-postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./config:/root/.config/bitmagnet
+    ports:
+      # painel e Torznab só no link direto PC <-> FeuVault
+      - "10.10.10.2:3333:3333"
+      # rede BitTorrent (DHT)
+      - "3334:3334/tcp"
+      - "3334:3334/udp"
+    command:
+      - worker
+      - run
+      - --keys=http_server
+      - --keys=queue_server
+      - --keys=dht_crawler
+    depends_on:
+      bitmagnet-postgres:
+        condition: service_healthy
+    networks:
+      - proxy-network
+  bitmagnet-postgres:
+    image: postgres:16-alpine
+    container_name: bitmagnet-postgres
+    restart: unless-stopped
+    shm_size: 1g
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=bitmagnet
+      - PGUSER=postgres
+    volumes:
+      # no SSD: banco rápido e fora do RAID0 que o Anubis limpa
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      start_period: 20s
+      interval: 10s
+    networks:
+      - proxy-network
+networks:
+  proxy-network:
+    external: true

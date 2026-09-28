@@ -1,0 +1,26 @@
+# Indexa sites brasileiros de torrent (Comando, BluDV, Torrent dos Filmes,
+# Starck, Rede Torrent, Vaca Torrent) para o Prowlarr — fonte de versões
+# dubladas. github.com/felipemarinho97/torrent-indexer (GPL-3.0)
+services:
+  torrent-indexer:
+    image: felipemarinho97/torrent-indexer:latest
+    container_name: torrent-indexer
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=1
+      - REDIS_HOST=torrent-indexer-redis
+      # o mesmo FlareSolverr que o Prowlarr já usa
+      - FLARESOLVERR_ADDRESS=http://flaresolverr:8191
+    depends_on:
+      - torrent-indexer-redis
+    networks:
+      - proxy-network
+  torrent-indexer-redis:
+    image: redis:alpine
+    container_name: torrent-indexer-redis
+    restart: unless-stopped
+    networks:
+      - proxy-network
+networks:
+  proxy-network:
+    external: true

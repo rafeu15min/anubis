@@ -20,6 +20,14 @@ pub struct Config {
     pub qbittorrent: QBittorrent,
     pub jellyfin: Jellyfin,
     pub stream: Option<Stream>,
+    pub bazarr: Option<BazarrCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BazarrCfg {
+    pub url: String,
+    pub api_key: String,
 }
 
 #[derive(Debug, Deserialize)]

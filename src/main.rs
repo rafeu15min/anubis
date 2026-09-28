@@ -15,6 +15,7 @@ mod config;
 mod disk;
 mod orchestrator;
 mod planner;
+mod prefs;
 mod search;
 mod services;
 mod stream;

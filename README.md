@@ -58,6 +58,12 @@ embutidas no MKV; tudo vira WebVTT (SRT em Windows-1252 incluso), acompanha os
 pulos no modo convertido e o idioma escolhido fica lembrado. O Bazarr pula
 legenda quando o áudio já é português.
 
+**Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
+áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
+houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
+legenda do Bazarr. O Anubis grava direto no Radarr/Sonarr (formato
+personalizado "Anubis · Português (BR)" pontuado no perfil) e no Bazarr.
+
 ## API
 
 Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
@@ -72,6 +78,8 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /watch/{kind}/{id}` | player |
 | `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |
 | `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
+| `GET /preferencias` | página de preferências |
+| `GET /prefs` · `PUT /prefs` | idioma do áudio (filmes/séries) e legendas |
 | `GET /health` | versão e estado |
 | `GET /storage` | uso do disco, regras e o último ciclo executado |
 | `GET /storage/plan` | o que seria apagado agora (não apaga nada) |

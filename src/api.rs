@@ -10,6 +10,8 @@
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
+//! GET  /preferencias            — página de preferências
+//! GET  /prefs  ·  PUT /prefs     — idioma do áudio (filmes/séries) e legendas
 //! GET  /health                  — vivo?
 //! GET  /storage                 — uso do disco, regras e o último ciclo
 //! GET  /storage/plan            — o que seria apagado agora (não apaga)
@@ -47,6 +49,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/search", get(search))
+        .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
+        .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
         .route("/status/{kind}/{id}", get(status))
         .route("/watch", post(watch))
@@ -322,6 +326,20 @@ async fn sub_raw(State(s): State<AppState>, Path((kind, id, n)): Path<(Kind, i64
     match streamer.subtitle_raw(&job, n).await {
         Ok(b) => ([("content-type", "text/plain; charset=utf-8")], b).into_response(),
         Err(e) => error(StatusCode::NOT_FOUND, format!("{e:#}")),
+    }
+}
+
+async fn get_prefs(State(s): State<AppState>) -> Response {
+    match s.orch.prefs().await {
+        Ok(p) => Json(p).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn put_prefs(State(s): State<AppState>, Json(p): Json<crate::prefs::Prefs>) -> Response {
+    match s.orch.set_prefs(&p).await {
+        Ok(p) => Json(p).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
 

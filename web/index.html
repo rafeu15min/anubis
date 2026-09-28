@@ -16,6 +16,8 @@
   h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
   input[type=search] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 16px; }
   input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .gear { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); }
+  .gear:hover { color: var(--accent); background: var(--panel); }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 24px 0 12px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 12px; }
@@ -57,6 +59,7 @@
   <div class="bar">
     <h1>ANUBIS</h1>
     <input id="q" type="search" placeholder="Buscar filme ou série…" autocomplete="off" autofocus>
+    <a class="gear" href="preferencias" title="Preferências" aria-label="Preferências"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.3 7.3 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg></a>
   </div>
 </header>
 <main>

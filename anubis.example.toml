@@ -76,3 +76,8 @@ max_height = 720        # altura máxima do vídeo convertido
 [[stream.url_rewrites]]
 from = "http://prowlarr:9696"
 to = "http://10.10.10.2:9696"
+
+# Legendas (opcional): a página de Preferências configura o Bazarr por aqui
+[bazarr]
+url = "http://10.10.10.2:6767"
+api_key = ""  # Bazarr → Settings → General → API Key

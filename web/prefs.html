@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anubis · Preferências</title>
+<style>
+  :root { --bg: #111016; --panel: #1b1a22; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8; --accent: #c9a24a; --ok: #5fbf7f; --err: #ff8a8a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  header { padding: 16px; border-bottom: 1px solid var(--line); }
+  .bar { display: flex; gap: 16px; align-items: center; max-width: 760px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
+  h1 a { color: inherit; text-decoration: none; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  section { margin: 0 0 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  h2 { margin: 0 0 4px; font-size: 16px; }
+  .help { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .choice { display: grid; gap: 8px; }
+  .row { display: grid; grid-template-columns: 7em 1fr; gap: 12px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row > b { padding-top: 8px; }
+  label.opt { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+  label.opt:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  label.opt input { margin-top: 3px; accent-color: var(--accent); }
+  label.opt small { display: block; color: var(--muted); }
+  .langs { display: flex; flex-wrap: wrap; gap: 8px; }
+  .langs label { display: inline-flex; gap: 6px; align-items: center; padding: 6px 12px; min-height: 40px; border: 1px solid var(--line); border-radius: 99px; cursor: pointer; }
+  .langs label:has(input:checked) { border-color: var(--accent); }
+  .toggle { display: flex; gap: 10px; align-items: center; margin-top: 12px; min-height: 40px; cursor: pointer; }
+  .actions { display: flex; gap: 12px; align-items: center; justify-content: flex-end; }
+  button { padding: 10px 18px; min-height: 44px; border-radius: 8px; border: 0; background: var(--accent); color: #111; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { color: var(--muted); }
+  #msg.ok { color: var(--ok); } #msg.err { color: var(--err); }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; gap: 6px; } .row > b { padding-top: 0; } }
+</style>
+</head>
+<body>
+<header><div class="bar"><h1><a href="/">ANUBIS</a></h1><span>Preferências</span></div></header>
+<main>
+  <section>
+    <h2>Idioma do áudio</h2>
+    <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries), com estas regras.</p>
+    <div id="audio"></div>
+  </section>
+  <section id="subsbox">
+    <h2>Legendas</h2>
+    <p class="help">O Bazarr procura sozinho legendas nestes idiomas para tudo o que entra na biblioteca.</p>
+    <div class="langs" id="langs"></div>
+    <label class="toggle"><input type="checkbox" id="skip"> Não baixar legenda quando o áudio já está no idioma (filme dublado dispensa legenda)</label>
+  </section>
+  <div class="actions"><span id="msg">Carregando…</span><button id="save" disabled>Salvar</button></div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const RULES = [
+  ['required', 'Obrigatório (dublado)', 'Só aceita versões em português do Brasil. O que não tiver versão dublada fica esperando.'],
+  ['preferred', 'Preferido', 'Baixa o que houver agora e troca sozinho pela versão dublada quando ela aparecer.'],
+  ['any', 'Tanto faz', 'Qualquer idioma, sem preferência.'],
+];
+const LANGS = [['pb', 'Português (BR)'], ['pt', 'Português (PT)'], ['en', 'Inglês'], ['es', 'Espanhol']];
+let current = null;
+
+function renderAudio(p) {
+  const row = (key, title) => p[key] == null ? '' : `<div class="row"><b>${title}</b><div class="choice">${RULES.map(([v, t, h]) =>
+    `<label class="opt"><input type="radio" name="${key}" value="${v}" ${p[key] === v ? 'checked' : ''}><span>${t}<small>${h}</small></span></label>`).join('')}</div></div>`;
+  $('#audio').innerHTML = row('movies_audio', 'Filmes') + row('series_audio', 'Séries');
+}
+function renderSubs(s) {
+  if (!s) { $('#subsbox').innerHTML = '<h2>Legendas</h2><p class="help">Bazarr não configurado no Anubis.</p>'; return; }
+  $('#langs').innerHTML = LANGS.map(([c, t]) => `<label><input type="checkbox" value="${c}" ${s.languages.includes(c) ? 'checked' : ''}> ${t}</label>`).join('');
+  $('#skip').checked = s.skip_if_audio;
+}
+async function load() {
+  try {
+    const r = await fetch('prefs');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    current = d;
+    renderAudio(d); renderSubs(d.subs);
+    $('#msg').textContent = ''; $('#save').disabled = false;
+  } catch (e) { $('#msg').textContent = `Não carregou: ${e.message}`; $('#msg').className = 'err'; }
+}
+$('#save').onclick = async () => {
+  const pick = (k) => (document.querySelector(`input[name=${k}]:checked`) || {}).value || null;
+  const body = { movies_audio: pick('movies_audio'), series_audio: pick('series_audio'), subs: null };
+  if (current.subs) body.subs = { languages: [...document.querySelectorAll('#langs input:checked')].map((i) => i.value), skip_if_audio: $('#skip').checked };
+  $('#save').disabled = true; $('#msg').className = ''; $('#msg').textContent = 'Salvando…';
+  try {
+    const r = await fetch('prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    current = d; renderAudio(d); renderSubs(d.subs);
+    $('#msg').textContent = 'Salvo. Vale para as próximas buscas.'; $('#msg').className = 'ok';
+  } catch (e) { $('#msg').textContent = `Falhou: ${e.message}`; $('#msg').className = 'err'; }
+  $('#save').disabled = false;
+};
+load();
+</script>
+</body>
+</html>

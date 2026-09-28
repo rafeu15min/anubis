@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::disk;
 use crate::planner::{self, Media, MediaRef, Plan, Rules, Torrent, TorrentFile, Watching};
-use crate::services::{Arr, Jellyfin, QBittorrent};
+use crate::services::{Arr, Bazarr, Jellyfin, QBittorrent};
 use crate::stream::Streamer;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -19,6 +19,7 @@ pub struct Orchestrator {
     pub(crate) radarr: Option<Arr>,
     pub(crate) qbit: QBittorrent,
     pub(crate) jellyfin: Jellyfin,
+    pub(crate) bazarr: Option<Bazarr>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
     pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
     running: Mutex<()>,
@@ -47,6 +48,7 @@ impl Orchestrator {
             radarr: cfg.radarr.as_ref().map(|a| Arr::new("Radarr", &a.url, &a.api_key)).transpose()?,
             qbit: QBittorrent::new(&cfg.qbittorrent.url, &cfg.qbittorrent.username, password.trim())?,
             jellyfin: Jellyfin::new(&cfg.jellyfin.url, &cfg.jellyfin.api_key)?,
+            bazarr: cfg.bazarr.as_ref().map(|b| Bazarr::new(&b.url, &b.api_key)).transpose()?,
             streamer,
             cfg,
             running: Mutex::new(()),

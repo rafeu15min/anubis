@@ -3,7 +3,8 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use reqwest::{Client, Method, RequestBuilder};
+use reqwest::{Client, RequestBuilder};
+pub use reqwest::Method;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -153,6 +154,14 @@ impl Arr {
         Ok(())
     }
 
+    pub async fn get_json(&self, path: &str) -> Result<Value> {
+        self.get(path).await
+    }
+
+    pub async fn send_json(&self, method: Method, path: &str, body: &Value) -> Result<Value> {
+        send(self.req(method, path).json(body), &format!("{} {path}", self.name)).await
+    }
+
     /// Versões encontradas nos indexadores, já com a decisão do Radarr/Sonarr
     /// (`rejected` + motivos). Demora alguns segundos: é uma busca de verdade.
     pub async fn releases(&self, filter: &str) -> Result<Vec<Value>> {
@@ -201,6 +210,33 @@ fn url_encode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+// ---------------------------------------------------------------- Bazarr
+
+pub struct Bazarr {
+    base: String,
+    key: String,
+    http: Client,
+}
+
+impl Bazarr {
+    pub fn new(base: &str, key: &str) -> Result<Self> {
+        Ok(Self { base: base.trim_end_matches('/').into(), key: key.into(), http: http()? })
+    }
+
+    pub async fn profiles(&self) -> Result<Vec<Value>> {
+        send(self.http.get(format!("{}/api/system/languages/profiles", self.base)).header("X-API-KEY", &self.key), "Bazarr perfis").await
+    }
+
+    /// Grava configurações (o mesmo formulário que a tela do Bazarr usa).
+    pub async fn save(&self, form: &[(&str, String)]) -> Result<()> {
+        let res = self.http.post(format!("{}/api/system/settings", self.base)).header("X-API-KEY", &self.key).form(form).send().await.context("Bazarr: sem resposta")?;
+        if !res.status().is_success() {
+            bail!("Bazarr: HTTP {}", res.status());
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------- qBittorrent

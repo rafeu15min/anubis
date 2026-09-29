@@ -134,6 +134,13 @@ impl Arr {
         Ok(())
     }
 
+    /// Radarr: muda o perfil de qualidade de filmes.
+    pub async fn set_movie_profile(&self, movie_ids: &[i64], profile_id: i64) -> Result<()> {
+        let body = json!({ "movieIds": movie_ids, "qualityProfileId": profile_id });
+        send::<Value>(self.req(Method::PUT, "movie/editor").json(&body), &format!("{} mudar perfil", self.name)).await?;
+        Ok(())
+    }
+
     /// Sonarr: monitora a série e todos os episódios (a série entrou pelo
     /// "assistir agora", sem monitorar, e agora foi pedida inteira).
     pub async fn monitor_series_all(&self, series_id: i64) -> Result<()> {

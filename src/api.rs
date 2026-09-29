@@ -17,6 +17,7 @@
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
+//! POST /movie/{tmdb}/subbed      — o mesmo para filmes
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
@@ -90,7 +91,8 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
-        .route("/series/{tvdb}/subbed", post(accept_subbed))
+        .route("/series/{tvdb}/subbed", post(series_subbed))
+        .route("/movie/{tmdb}/subbed", post(movie_subbed))
         .route("/where/{kind}/{id}", get(where_to_watch))
         .route("/mux", post(start_mux))
         .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
@@ -450,8 +452,16 @@ async fn put_prefs(State(s): State<AppState>, Json(p): Json<crate::prefs::Prefs>
     }
 }
 
-async fn accept_subbed(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
-    match s.orch.accept_subbed(tvdb).await {
+async fn series_subbed(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
+    accept_subbed(s, Kind::Series, tvdb).await
+}
+
+async fn movie_subbed(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
+    accept_subbed(s, Kind::Movie, tmdb).await
+}
+
+async fn accept_subbed(s: AppState, kind: Kind, id: i64) -> Response {
+    match s.orch.accept_subbed(kind, id).await {
         Ok(st) => Json(st).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }

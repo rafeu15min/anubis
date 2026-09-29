@@ -284,7 +284,10 @@ const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.r
 async function watch(k, guid, keep = false) {
   const [kind, id] = [k.split(':')[0], +k.split(':')[1]];
   const btns = document.querySelectorAll(`[data-watch="${k}"]`);
-  btns.forEach((b) => { b.disabled = true; b.textContent = 'Procurando versão…'; });
+  const say = (t) => btns.forEach((b) => { b.disabled = true; b.textContent = t; });
+  say('Procurando versão…');
+  // a busca passa por todas as fontes; as protegidas pelo Cloudflare levam ~30 s
+  const slow = [setTimeout(() => say('Buscando nas fontes…'), 8000), setTimeout(() => say('Ainda buscando (até 1–2 min)…'), 30000)];
   try {
     const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, id, guid, keep }) });
     const d = await r.json();
@@ -303,22 +306,26 @@ async function watch(k, guid, keep = false) {
       return;
     }
     if (r.status === 409 && d.no_approved) {
-      $('#rels').innerHTML = d.candidates.length ? d.candidates.map((c) => `<div class="rel">
-          <div><b>${esc(c.title)}</b><small>${size(c.size)} · ${c.seeders} fontes${c.playable === 0 ? ' · H.265: talvez não toque no navegador' : ''}</small>
-          <small class="why">${esc(c.reasons.join(' · '))}</small></div>
-          <button data-watch="${k}" data-guid="${esc(c.guid)}">Assistir esta</button></div>`).join('')
-        : '';
       const some = d.candidates.length > 0;
-      $('#picktitle').textContent = some ? 'Nenhuma versão passa no seu perfil de qualidade' : 'Nenhuma versão disponível';
-      $('#pickmsg').textContent = some
-        ? 'O Radarr recusou todas as versões encontradas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
-        : 'Os indexadores não têm nenhuma versão deste filme com fontes (pessoas compartilhando) agora.';
+      // recusadas só por não serem dubladas: é a hora do legendado
+      const onlyDub = some && d.candidates.every((c) => c.reasons.length && c.reasons.every((x) => /Custom Formats/i.test(x)));
+      $('#rels').innerHTML = d.candidates.map((c, i) => `<div class="rel">
+          <div><b>${esc(c.title)}</b><small>${size(c.size)} · ${c.seeders} fontes${c.playable === 0 ? ' · H.265: talvez não toque no navegador' : ''}</small>
+          ${onlyDub ? '' : `<small class="why">${esc(c.reasons.join(' · '))}</small>`}</div>
+          <button${onlyDub && i === 0 ? ' class="primary"' : ''} data-watch="${k}" data-guid="${esc(c.guid)}">${onlyDub ? (i === 0 ? 'Assistir legendado' : 'Esta') : 'Assistir esta'}</button></div>`).join('');
+      $('#picktitle').textContent = onlyDub ? 'Dublagem não encontrada' : some ? 'Nenhuma versão passa no seu perfil de qualidade' : 'Nenhuma versão disponível';
+      $('#pickmsg').textContent = onlyDub
+        ? 'Nenhuma fonte tem a versão dublada. A primeira é a recomendada; a legenda em português aparece no player se vier no arquivo (as da Amazon costumam trazer).'
+        : some
+          ? 'Todas as versões encontradas foram recusadas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
+          : 'As fontes não têm nenhuma versão com gente compartilhando agora.';
       // episódio: o "onde assistir" é da série
       if (kind === 'episode') loadWhere($('#pickwhere'), 'series', currentTvdb);
       else loadWhere($('#pickwhere'), kind, id);
       $('#pick').showModal();
     } else alert(`Não deu para assistir: ${d.error}`);
   } finally {
+    slow.forEach(clearTimeout);
     btns.forEach((b) => { b.disabled = false; b.textContent = 'Assistir'; });
   }
 }
@@ -469,12 +476,13 @@ $('#tabs').onclick = (e) => {
   showCategory(b.dataset.cat);
 };
 // "Dublagem não encontrada, instalar legendado?" — sim
-async function acceptSubbed(btn, tvdb) {
+async function acceptSubbed(btn, key) {
+  const [kind, id] = key.split(':');
   btn.disabled = true; btn.textContent = 'Instalando…';
-  const r = await fetch(`series/${tvdb}/subbed`, { method: 'POST' });
+  const r = await fetch(`${kind}/${id}/subbed`, { method: 'POST' });
   const d = await r.json();
   if (!r.ok) { btn.disabled = false; btn.textContent = 'Instalar legendado'; alert(`Não deu: ${d.error}`); return; }
-  const it = tracked[`series:${tvdb}`] || lastResults[`series:${tvdb}`];
+  const it = tracked[key] || lastResults[key];
   if (it) apply(it, d, false);
 }
 
@@ -542,9 +550,9 @@ async function apply(it, st, openable = true) {
   }
   if (st.state === 'searching' && !st.mux) {
     st.versions = await versions(it);
-    // série ou anime: há versões com fontes, mas nenhuma dublada
+    // filme, série ou anime: há versões com fontes, mas nenhuma dublada
     const v = st.versions;
-    if (it.kind === 'series' && v && v.approved === 0 && v.dubbed === 0 && v.found - v.no_seeders > 0) st.offerSubbed = it.id;
+    if (v && v.approved === 0 && v.dubbed === 0 && v.found - v.no_seeders > 0) st.offerSubbed = `${it.kind}:${it.id}`;
   }
   render(it, st);
   if (t && st.state === 'available' && !t.done) { t.done = Date.now(); save(); }
@@ -627,7 +635,7 @@ document.addEventListener('click', (e) => {
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
   const sb = e.target.closest('[data-subbed]');
-  if (sb) acceptSubbed(sb, +sb.dataset.subbed);
+  if (sb) acceptSubbed(sb, sb.dataset.subbed);
   const op = e.target.closest('[data-open]');
   if (op) openItem(op.dataset.open);
   const mx = e.target.closest('[data-mux]');

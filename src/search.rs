@@ -442,27 +442,45 @@ impl Orchestrator {
         Ok(st)
     }
 
-    /// Aviso de uma série que foi para o legendado.
+    /// Aviso do que foi para o legendado.
     async fn dub_note(&self, kind: Kind, item: &Value) -> Option<String> {
         let ids = (*self.profile_ids.lock().await)?;
-        (kind == Kind::Series && item["qualityProfileId"].as_i64() == Some(ids.fallback))
+        let fallback = match kind {
+            Kind::Movie => ids.movies,
+            _ => ids.series,
+        };
+        (fallback.is_some() && item["qualityProfileId"].as_i64() == fallback)
             .then(|| "Sem versão dublada em nenhuma fonte: vem legendada (troca pela dublada se ela surgir)".to_owned())
     }
 
-    /// "Dublagem não encontrada, instalar legendado?" — sim: a série passa
-    /// para o perfil sem dublagem (baixa legendada e troca pela dublada se ela
-    /// surgir) e o Sonarr busca de novo.
-    pub async fn accept_subbed(&self, tvdb: i64) -> Result<Status> {
-        let ids = (*self.profile_ids.lock().await).context("perfis do Sonarr ainda não preparados")?;
-        let sonarr = self.arr(Kind::Series)?;
-        let s = sonarr.find("series", "tvdbId", tvdb).await?.context("série não pedida")?;
-        let sid = s["id"].as_i64().context("série sem id")?;
-        sonarr.set_series_profile(&[sid], ids.fallback).await?;
-        sonarr.command(json!({ "name": "SeriesSearch", "seriesId": sid })).await?;
-        tracing::info!("{}: legendado aceito ({})", s["title"].as_str().unwrap_or_default(), crate::prefs::FALLBACK_PROFILE);
-        self.versions_cache.lock().await.remove(&(Kind::Series, tvdb));
+    /// "Dublagem não encontrada, instalar legendado?" — sim: o filme ou a
+    /// série passa para o perfil sem dublagem (baixa legendado e troca pelo
+    /// dublado se ele surgir) e o Radarr/Sonarr busca de novo.
+    pub async fn accept_subbed(&self, kind: Kind, id: i64) -> Result<Status> {
+        let ids = (*self.profile_ids.lock().await).context("perfis ainda não preparados")?;
+        let arr = self.arr(kind)?;
+        let title = match kind {
+            Kind::Movie => {
+                let profile = ids.movies.context("Radarr não configurado")?;
+                let m = arr.find("movie", "tmdbId", id).await?.context("filme não pedido")?;
+                let mid = m["id"].as_i64().context("filme sem id")?;
+                arr.set_movie_profile(&[mid], profile).await?;
+                arr.command(json!({ "name": "MoviesSearch", "movieIds": [mid] })).await?;
+                m["title"].as_str().unwrap_or_default().to_owned()
+            }
+            _ => {
+                let profile = ids.series.context("Sonarr não configurado")?;
+                let s = arr.find("series", "tvdbId", id).await?.context("série não pedida")?;
+                let sid = s["id"].as_i64().context("série sem id")?;
+                arr.set_series_profile(&[sid], profile).await?;
+                arr.command(json!({ "name": "SeriesSearch", "seriesId": sid })).await?;
+                s["title"].as_str().unwrap_or_default().to_owned()
+            }
+        };
+        tracing::info!("{title}: legendado aceito ({})", crate::prefs::FALLBACK_PROFILE);
+        self.versions_cache.lock().await.remove(&(kind, id));
         crate::live::refresh_arr(self).await;
-        self.status(Kind::Series, tvdb).await
+        self.status(kind, id).await
     }
 
     /// Link do Jellyfin, calculado uma vez por item (é uma busca no Jellyfin).

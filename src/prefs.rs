@@ -25,10 +25,11 @@ const SUBS_REGEX: &str = r"\b(legendad[oa]s?|leg|multi[ ._-]?subs?|pt[ ._-]?br[ 
 /// dublado se ele surgir
 pub const FALLBACK_PROFILE: &str = "Anubis · Sem dublagem";
 
-/// Ids dos perfis do Sonarr que o Anubis usa.
+/// Ids dos perfis "Sem dublagem" que o Anubis usa (None: Arr não configurado).
 #[derive(Debug, Clone, Copy)]
 pub struct ProfileIds {
-    pub fallback: i64,
+    pub series: Option<i64>,
+    pub movies: Option<i64>,
 }
 
 /// A regra de idioma num perfil: pontos do dublado (e da legenda em
@@ -229,10 +230,10 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Perfil do Anubis no Sonarr (cópia do perfil dos pedidos), criando na
-    /// primeira vez com a regra `rule`. Devolve o id.
-    async fn ensure_profile(&self, name: &str, rule: AudioRule) -> Result<i64> {
-        let (arr, base, lang_id) = self.arr_named("sonarr")?;
+    /// Perfil do Anubis no Radarr/Sonarr (cópia do perfil dos pedidos),
+    /// criando na primeira vez com a regra `rule`. Devolve o id.
+    async fn ensure_profile(&self, which: &str, name: &str, rule: AudioRule) -> Result<i64> {
+        let (arr, base, lang_id) = self.arr_named(which)?;
         if let Some(p) = Self::find_profile(arr, name).await? {
             return p["id"].as_i64().context("perfil sem id");
         }
@@ -243,18 +244,23 @@ impl Orchestrator {
         p["name"] = json!(name);
         let id = arr.send_json(Method::POST, "qualityprofile", &p).await?["id"].as_i64().context("perfil sem id")?;
         self.set_rule_of(arr, name, lang_id, rule).await?;
-        tracing::info!("Sonarr: perfil \"{name}\" criado ({rule:?})");
+        tracing::info!("{which}: perfil \"{name}\" criado ({rule:?})");
         Ok(id)
     }
 
-    /// Prepara o Sonarr: o perfil das séries sem dublagem (cópia do perfil dos
-    /// pedidos, em "preferido"). Pode rodar de novo sem efeito.
+    /// Prepara o Radarr e o Sonarr: o perfil do que não tem dublagem em
+    /// nenhuma fonte (cópia do perfil dos pedidos, em "preferido"). Pode rodar
+    /// de novo sem efeito.
     pub async fn setup_profiles(&self) -> Result<()> {
-        if self.sonarr.is_none() {
-            return Ok(());
-        }
-        let fallback = self.ensure_profile(FALLBACK_PROFILE, AudioRule::Preferred).await?;
-        *self.profile_ids.lock().await = Some(ProfileIds { fallback });
+        let series = match self.sonarr {
+            Some(_) => Some(self.ensure_profile("sonarr", FALLBACK_PROFILE, AudioRule::Preferred).await?),
+            None => None,
+        };
+        let movies = match self.radarr {
+            Some(_) => Some(self.ensure_profile("radarr", FALLBACK_PROFILE, AudioRule::Preferred).await?),
+            None => None,
+        };
+        *self.profile_ids.lock().await = Some(ProfileIds { series, movies });
         Ok(())
     }
 
@@ -291,11 +297,8 @@ impl Orchestrator {
 
     async fn set_quality(&self, which: &str, q: &QualityPrefs) -> Result<()> {
         let (arr, profile_name, _) = self.arr_named(which)?;
-        // no Sonarr, o perfil das séries sem dublagem segue o mesmo
-        let mut names = vec![profile_name];
-        if which == "sonarr" {
-            names.push(FALLBACK_PROFILE.to_owned());
-        }
+        // o perfil do que não tem dublagem segue o mesmo
+        let names = vec![profile_name, FALLBACK_PROFILE.to_owned()];
         for name in names {
             let Some(mut profile) = Self::find_profile(arr, &name).await? else { continue };
             let pid = profile["id"].as_i64().context("perfil sem id")?;

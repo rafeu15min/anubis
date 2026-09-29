@@ -44,6 +44,11 @@
     <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries), com estas regras.</p>
     <div id="audio"></div>
   </section>
+  <section>
+    <h2>Qualidade</h2>
+    <p class="help">Vale para os pedidos e para o "Assistir". No "Assistir", uma versão com poucas fontes perde para uma bem semeada, e o player sugere uma versão mais leve se o download não acompanhar.</p>
+    <div id="quality"></div>
+  </section>
   <section id="subsbox">
     <h2>Legendas</h2>
     <p class="help">O Bazarr procura sozinho legendas nestes idiomas para tudo o que entra na biblioteca.</p>
@@ -67,6 +72,17 @@ function renderAudio(p) {
     `<label class="opt"><input type="radio" name="${key}" value="${v}" ${p[key] === v ? 'checked' : ''}><span>${t}<small>${h}</small></span></label>`).join('')}</div></div>`;
   $('#audio').innerHTML = row('movies_audio', 'Filmes') + row('series_audio', 'Séries');
 }
+function renderQuality(p) {
+  const row = (key, title) => {
+    const q = p[key];
+    if (!q) return '';
+    const cinema = q.no_cinema == null ? '' : `<label class="opt"><input type="checkbox" data-q="${key}" data-f="no_cinema" ${q.no_cinema ? 'checked' : ''}><span>Recusar gravações de cinema<small>CAM, Telesync, Telecine e Workprint: imagem e som ruins. Lançamentos esperam a versão digital.</small></span></label>`;
+    return `<div class="row"><b>${title}</b><div class="choice">
+      <label class="opt"><input type="checkbox" data-q="${key}" data-f="bluray_first" ${q.bluray_first ? 'checked' : ''}><span>Bluray 1080p primeiro, WEB 1080p como segunda opção<small>O WEB baixado já basta: a troca pelo Bluray é oferecida quando você clica em Assistir. Desligado: só WEB.</small></span></label>
+      ${cinema}</div></div>`;
+  };
+  $('#quality').innerHTML = row('movies_quality', 'Filmes') + row('series_quality', 'Séries');
+}
 function renderSubs(s) {
   if (!s) { $('#subsbox').innerHTML = '<h2>Legendas</h2><p class="help">Bazarr não configurado no Anubis.</p>'; return; }
   $('#langs').innerHTML = LANGS.map(([c, t]) => `<label><input type="checkbox" value="${c}" ${s.languages.includes(c) ? 'checked' : ''}> ${t}</label>`).join('');
@@ -78,20 +94,25 @@ async function load() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
     current = d;
-    renderAudio(d); renderSubs(d.subs);
+    renderAudio(d); renderQuality(d); renderSubs(d.subs);
     $('#msg').textContent = ''; $('#save').disabled = false;
   } catch (e) { $('#msg').textContent = `Não carregou: ${e.message}`; $('#msg').className = 'err'; }
 }
 $('#save').onclick = async () => {
   const pick = (k) => (document.querySelector(`input[name=${k}]:checked`) || {}).value || null;
   const body = { movies_audio: pick('movies_audio'), series_audio: pick('series_audio'), subs: null };
+  for (const key of ['movies_quality', 'series_quality']) {
+    if (!current[key]) continue;
+    const box = (f) => document.querySelector(`input[data-q=${key}][data-f=${f}]`);
+    body[key] = { bluray_first: box('bluray_first').checked, no_cinema: box('no_cinema') ? box('no_cinema').checked : null };
+  }
   if (current.subs) body.subs = { languages: [...document.querySelectorAll('#langs input:checked')].map((i) => i.value), skip_if_audio: $('#skip').checked };
   $('#save').disabled = true; $('#msg').className = ''; $('#msg').textContent = 'Salvando…';
   try {
     const r = await fetch('prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
-    current = d; renderAudio(d); renderSubs(d.subs);
+    current = d; renderAudio(d); renderQuality(d); renderSubs(d.subs);
     $('#msg').textContent = 'Salvo. Vale para as próximas buscas.'; $('#msg').className = 'ok';
   } catch (e) { $('#msg').textContent = `Falhou: ${e.message}`; $('#msg').className = 'err'; }
   $('#save').disabled = false;

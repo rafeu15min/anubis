@@ -50,6 +50,10 @@
   @keyframes r { to { transform: rotate(360deg); } }
   .msg { max-width: 520px; margin: 0 20px; padding: 18px 20px; border-radius: 12px; background: rgba(20,20,20,.9); text-align: center; pointer-events: auto; display: none; }
   .msg.on { display: block; }
+  .slow { position: fixed; left: 50%; top: 80px; transform: translateX(-50%); width: min(520px, calc(100vw - 32px)); padding: 14px 16px; border-radius: 12px; background: rgba(20,20,20,.94); z-index: 6; font-size: 14px; }
+  .slow p { margin: 0 0 10px; }
+  .slow button { width: 100%; height: auto; min-height: 44px; margin-top: 6px; padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); text-align: left; font: inherit; }
+  .slow small { color: var(--muted); }
   @media (max-width: 600px) { #vol, .desk { display: none; } .bottom { padding: 30px 10px 8px; } }
 </style>
 </head>
@@ -64,6 +68,7 @@
 <div class="panel" id="panel">Preparando…</div>
 <div class="ccmenu" id="ccmenu" hidden></div>
 <button class="next" id="next" hidden></button>
+<div class="slow" id="slow" hidden></div>
 
 <div class="center"><div class="spin"></div><div class="msg" id="msg"></div></div>
 
@@ -288,6 +293,49 @@ async function goNext() {
 }
 $('next').onclick = goNext;
 
+// ---- o download acompanha o vídeo? Se ficar ~30 s abaixo do que o vídeo
+// consome, com pouco já baixado à frente, oferece uma versão mais leve
+const [, , KIND, ID] = base.split('/');
+let slowFor = 0, slowOffered = false;
+const mb = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
+function aheadSecs(d) {
+  const dur = total();
+  if (!dur) return Infinity;
+  const f = now() / dur;
+  const r = have.find(([a, b]) => a <= f + 1e-6 && f < b);
+  return r ? (r[1] - f) * dur : 0;
+}
+function checkPace(d) {
+  const dur = total();
+  if (slowOffered || d.phase !== 'downloading' || !d.size || !dur || d.speed_mbps == null) { slowFor = 0; return; }
+  const need = d.size / dur / 2 ** 20;  // MB/s que o vídeo consome
+  if (d.speed_mbps < need && aheadSecs(d) < 60) slowFor += 2; else slowFor = 0;
+  if (slowFor >= 30) { slowOffered = true; offerLighter(d, need); }
+}
+async function offerLighter(d, need) {
+  const box = $('slow');
+  const head = `<p>O download não está acompanhando esta versão: chega ${d.speed_mbps.toFixed(1)} MB/s e o vídeo precisa de ${need.toFixed(1)} MB/s. Vai travar à frente.</p>`;
+  box.innerHTML = head + '<small>Procurando uma versão mais leve…</small>';
+  box.hidden = false;
+  let list = [];
+  try { const r = await fetch(`${base}/lighter`); if (r.ok) list = await r.json(); } catch {}
+  box.innerHTML = head + (list.length
+    ? list.map((c) => `<button data-guid="${c.guid.replace(/"/g, '&quot;')}">Trocar por ${c.quality} · ${mb(c.size)} · ${c.seeders} fontes<br><small>${c.title.replace(/</g, '&lt;')}</small></button>`).join('')
+    : '<small>Nenhuma versão mais leve com fontes suficientes agora.</small>')
+    + '<button data-keep>Continuar com esta</button>';
+}
+$('slow').onclick = async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.hasAttribute('data-keep')) { $('slow').hidden = true; return; }
+  b.disabled = true; b.textContent = 'Trocando…';
+  // a posição fica salva: a nova versão continua do mesmo ponto
+  try { localStorage.setItem(RESUME, String(now())); } catch {}
+  const r = await fetch('/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: KIND, id: +ID, guid: b.dataset.guid }) });
+  const res = await r.json();
+  if (r.ok) location.href = '/' + res.player; else { b.textContent = `Não deu: ${res.error || 'versão recusada'}`; }
+};
+
 // ---- andamento do download (e o formato, para começar a tocar)
 const PHASE = { downloading: 'Baixando', importing: 'Entrando na biblioteca…', done: 'Na biblioteca', failed: 'Falhou' };
 const MODE = { remux: ' · adaptando o formato', transcode: ' · convertendo o vídeo' };
@@ -310,6 +358,7 @@ async function info() {
       if (d.speed_mbps != null) t += ` · ${d.speed_mbps.toFixed(1)} MB/s`;
       if (d.peers != null) t += ` · ${d.peers} fontes`;
     }
+    checkPace(d);
     if (d.media && MODE[d.media.mode]) t += MODE[d.media.mode];
     if (d.error) t += ` — ${d.error}`;
     $('panel').innerHTML = t + (d.jellyfin_url ? ` · <a href="${d.jellyfin_url}">Abrir no Jellyfin</a>` : '');

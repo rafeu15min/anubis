@@ -221,14 +221,27 @@ async function request(k) {
 
 // "assistir agora": o Anubis escolhe a versão, começa a baixar e abre o player
 const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
-async function watch(k, guid) {
+async function watch(k, guid, keep = false) {
   const [kind, id] = [k.split(':')[0], +k.split(':')[1]];
   const btns = document.querySelectorAll(`[data-watch="${k}"]`);
   btns.forEach((b) => { b.disabled = true; b.textContent = 'Procurando versão…'; });
   try {
-    const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, id, guid }) });
+    const r = await fetch('watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, id, guid, keep }) });
     const d = await r.json();
     if (r.ok) { location.href = d.player; return; }
+    // na biblioteca em WEB e apareceu Bluray (com fontes): pergunta se troca
+    if (r.status === 409 && d.better) {
+      $('rels').innerHTML = d.candidates.map((c) => `<div class="rel">
+          <div><b>${esc(c.title)}</b><small>${esc(c.quality)} · ${size(c.size)} · ${c.seeders} fontes${c.playable === 0 ? ' · H.265: convertido na hora no navegador' : ''}</small></div>
+          <button data-watch="${k}" data-guid="${esc(c.guid)}">Trocar por esta</button></div>`).join('')
+        + `<div class="rel"><div><b>Manter a versão atual</b><small>${esc(d.current)}, já no disco: começa na hora</small></div>
+          <button class="primary" data-watch="${k}" data-keep="1">Assistir a atual</button></div>`;
+      $('picktitle').textContent = 'Há uma versão melhor disponível';
+      $('pickmsg').textContent = 'A troca baixa a nova versão (dá para assistir enquanto baixa) e ela substitui a atual na biblioteca.';
+      $('pickwhere').innerHTML = '';
+      $('pick').showModal();
+      return;
+    }
     if (r.status === 409 && d.no_approved) {
       $('#rels').innerHTML = d.candidates.length ? d.candidates.map((c) => `<div class="rel">
           <div><b>${esc(c.title)}</b><small>${size(c.size)} · ${c.seeders} fontes${c.playable === 0 ? ' · H.265: talvez não toque no navegador' : ''}</small>
@@ -428,8 +441,8 @@ document.addEventListener('click', (e) => {
   if (mc) muxCancel(mc.dataset.muxcancel);
   const w = e.target.closest('[data-watch]');
   if (w) {
-    if (w.dataset.guid) { w.disabled = true; w.textContent = 'Abrindo…'; }
-    watch(w.dataset.watch, w.dataset.guid);
+    if (w.dataset.guid || w.dataset.keep) { w.disabled = true; w.textContent = 'Abrindo…'; }
+    watch(w.dataset.watch, w.dataset.guid, !!w.dataset.keep);
   }
 });
 

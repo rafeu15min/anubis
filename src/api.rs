@@ -9,6 +9,7 @@
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
+//! GET  /watch/{kind}/{id}/lighter — versões mais leves (o download não acompanha o vídeo)
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
@@ -63,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}", get(|| async { Html(include_str!("../web/player.html")) }))
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
+        .route("/watch/{kind}/{id}/lighter", get(lighter))
         .route("/watch/{kind}/{id}/stream.mp4", get(converted))
         .route("/watch/{kind}/{id}/subs", get(subs_list))
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
@@ -171,12 +173,16 @@ struct WatchBody {
     kind: Kind,
     id: i64,
     guid: Option<String>,
+    /// tocar o que está na biblioteca sem oferecer troca
+    #[serde(default)]
+    keep: bool,
 }
 
 async fn watch(State(s): State<AppState>, Json(b): Json<WatchBody>) -> Response {
-    match s.orch.watch(b.kind, b.id, b.guid.as_deref()).await {
+    match s.orch.watch(b.kind, b.id, b.guid.as_deref(), b.keep).await {
         Ok(Started::Ready) => Json(json!({ "player": format!("watch/{}/{}", kind_str(b.kind), b.id) })).into_response(),
         Ok(Started::NoApproved(list)) => (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list }))).into_response(),
+        Ok(Started::Better { current, candidates }) => (StatusCode::CONFLICT, Json(json!({ "better": true, "current": current, "candidates": candidates }))).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
@@ -203,11 +209,25 @@ async fn watch_info(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64
     info["title"] = json!(job.info.title);
     info["release"] = json!(job.info.release);
     info["file"] = json!(job.info.file_name);
+    // com a duração, dá quanto o vídeo consome por segundo (o player compara com a velocidade)
+    info["size"] = json!(job.info.file_len);
     // link do Jellyfin quando já está na biblioteca
     if job.phase().0 == Phase::Done {
         info["jellyfin_url"] = json!(s.orch.watch_jellyfin_url(&job).await);
     }
     Json(info).into_response()
+}
+
+/// Versões mais leves que a que está baixando (o download não acompanha).
+async fn lighter(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    match s.orch.lighter(&job).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 /// Faixa pedida pelo player (`Range: bytes=INÍCIO-FIM`); sem Range, o arquivo todo.

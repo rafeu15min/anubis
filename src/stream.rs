@@ -77,6 +77,9 @@ pub struct JobInfo {
     /// próximo episódio: (id, rótulo)
     pub next: Option<(i64, String)>,
     phase: Phase,
+    /// substitui o arquivo que já estava na biblioteca
+    #[serde(default)]
+    replaces: Option<Replace>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -174,6 +177,18 @@ pub enum Started {
     Ready,
     /// nenhuma versão passa no perfil: a página oferece as recusadas
     NoApproved(Vec<Candidate>),
+    /// na biblioteca em segunda opção (Bluray 1080p) e há versão na primeira:
+    /// a página pergunta se troca
+    Better { current: String, candidates: Vec<Candidate> },
+}
+
+/// Troca do arquivo da biblioteca por outra versão.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Replace {
+    /// arquivo atual no Radarr/Sonarr (o import termina quando ele muda)
+    file_id: i64,
+    /// dado do arquivo atual: o torrent que o semeia sai depois da troca
+    inode: Option<(u64, u64)>,
 }
 
 fn playable(title: &str) -> u8 {
@@ -211,8 +226,9 @@ pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
 
 /// Aprovadas primeiro; depois episódio avulso antes de pacote; depois as
 /// dubladas (com a regra "preferido", o Radarr aprova as outras também);
-/// depois as que tocam no navegador; depois a preferência do próprio
-/// Radarr/Sonarr e as mais semeadas.
+/// depois as que tocam no navegador; depois as com fontes suficientes para
+/// tocar enquanto baixam (um Bluray mal semeado perde para o WEB); depois a
+/// preferência do próprio Radarr/Sonarr e as mais semeadas.
 fn sort_candidates(list: &mut [Candidate]) {
     list.sort_by_key(|c| {
         (
@@ -220,6 +236,7 @@ fn sort_candidates(list: &mut [Candidate]) {
             c.pack,
             !c.portuguese(),
             std::cmp::Reverse(c.playable),
+            c.seeders < ENOUGH_SEEDERS,
             c.raw["releaseWeight"].as_i64().unwrap_or(i64::MAX),
             std::cmp::Reverse(c.seeders),
         )
@@ -304,6 +321,27 @@ impl Streamer {
 
     pub async fn job(&self, kind: Kind, id: i64) -> Option<Arc<Job>> {
         self.jobs.lock().await.get(&(kind, id)).cloned()
+    }
+
+    /// Desiste de um download em andamento (troca de versão no player): tira
+    /// o torrent do librqbit e apaga o que já tinha baixado.
+    async fn cancel(&self, job: &Job) {
+        self.jobs.lock().await.remove(&(job.info.kind, job.info.id));
+        let handle = job.handle.lock().unwrap().take();
+        if let Some(h) = handle
+            && let Err(e) = self.api.session().delete(TorrentIdOrHash::Id(h.id()), true).await
+        {
+            warn!("{}: não tirei o torrent do librqbit: {e:#}", job.info.title);
+        }
+        if let Some(f) = &job.info.torrent_file {
+            let _ = std::fs::remove_file(f);
+        }
+        // a pasta é a da versão (download_dir/<versão>), nunca a da biblioteca
+        if job.info.info_hash.is_some() {
+            let _ = std::fs::remove_dir_all(&job.info.folder);
+        }
+        self.save().await;
+        info!("{}: download de {} cancelado (troca de versão)", job.info.title, job.info.release);
     }
 
     /// Grava os pedidos em andamento (os entregues ao qBittorrent saem).
@@ -643,24 +681,61 @@ impl Orchestrator {
     }
 
     /// Começa (ou retoma) um "assistir agora". `guid`: usar esta versão mesmo
-    /// que o Radarr/Sonarr a recuse (escolha da pessoa na página).
-    pub async fn watch(self: &Arc<Self>, kind: Kind, id: i64, guid: Option<&str>) -> Result<Started> {
+    /// que o Radarr/Sonarr a recuse (escolha da pessoa na página) — com o item
+    /// na biblioteca, é a troca por ela. `keep`: tocar o arquivo da biblioteca
+    /// sem perguntar por versão melhor.
+    pub async fn watch(self: &Arc<Self>, kind: Kind, id: i64, guid: Option<&str>, keep: bool) -> Result<Started> {
         let streamer = self.streamer()?.clone();
+        // um download em andamento segue; um arquivo da biblioteca é conferido
+        // de novo (pode ter surgido versão melhor desde a última vez)
+        // outra versão escolhida no meio do download: esta sai
+        if let Some(job) = streamer.job(kind, id).await
+            && guid.is_some()
+            && job.handle().is_some()
+            && job.phase().0 == Phase::Downloading
+        {
+            streamer.cancel(&job).await;
+        }
         if let Some(job) = streamer.job(kind, id).await
             && job.phase().0 != Phase::Failed
+            && (job.handle().is_some() || keep)
+            && guid.is_none()
         {
             streamer.probe(&job);
             return Ok(Started::Ready);
         }
-        let target = match kind {
+        let mut target = match kind {
             Kind::Movie => self.movie_target(id).await?,
             Kind::Episode => self.episode_target(id).await?,
             Kind::Series => bail!("escolha um episódio"),
         };
 
+        let mut replaces = None;
+        if let Some(lib) = target.library.take() {
+            let host = self.cfg.host_path(&lib.path);
+            if guid.is_some() {
+                // troca: as versões de agora, e o arquivo atual para depois
+                replaces = Some(Replace { file_id: lib.file_id, inode: crate::disk::file_id(&host).map(|f| f.inode) });
+                target.candidates = self.releases_of(kind, target.arr_id).await?;
+            } else {
+                if !keep && SECOND_OPTION.contains(&lib.quality.as_str()) {
+                    // a busca vai aos indexadores: se demorar, toca o que já está no disco
+                    let found = tokio::time::timeout(Duration::from_secs(8), self.releases_of(kind, target.arr_id)).await;
+                    let better = match found {
+                        Ok(Ok(list)) => better_than(&lib, &list),
+                        _ => vec![],
+                    };
+                    if !better.is_empty() {
+                        return Ok(Started::Better { current: lib.quality, candidates: better });
+                    }
+                }
+                target.library = Some(lib);
+            }
+        }
+
         // já na biblioteca: toca o arquivo de lá, sem torrent
-        if let Some(path) = &target.library_file {
-            let host_file = self.cfg.host_path(path);
+        if let Some(lib) = &target.library {
+            let host_file = self.cfg.host_path(&lib.path);
             let file_len = tokio::fs::metadata(&host_file).await?.len();
             let name = host_file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let job = Job::new(
@@ -682,6 +757,7 @@ impl Orchestrator {
                     only_file: false,
                     next: target.next,
                     phase: Phase::Done,
+                    replaces: None,
                 },
                 None,
             );
@@ -739,6 +815,7 @@ impl Orchestrator {
                 only_file,
                 next: target.next,
                 phase: Phase::Downloading,
+                replaces,
             },
             Some(handle),
         );
@@ -747,6 +824,58 @@ impl Orchestrator {
         streamer.probe(&job);
         tokio::spawn(finish(self.clone(), job));
         Ok(Started::Ready)
+    }
+
+    /// Versões mais leves que a que está baixando (o player oferece quando o
+    /// download não acompanha): menores, com fontes suficientes, aceitas (ou
+    /// recusadas só porque já existe arquivo) e dubladas se a atual é dublada.
+    pub async fn lighter(&self, job: &Job) -> Result<Vec<Candidate>> {
+        let list = self.releases_of(job.info.kind, job.info.arr_id).await?;
+        let dubbed = list.iter().find(|c| c.title == job.info.release).is_some_and(|c| c.portuguese());
+        let mut out: Vec<Candidate> = list
+            .into_iter()
+            .filter(|c| c.title != job.info.release && !c.pack && c.size > 0 && c.size < job.info.file_len * 4 / 5)
+            .filter(|c| c.seeders >= ENOUGH_SEEDERS)
+            .filter(|c| !c.rejected || c.reasons.iter().all(|r| r.starts_with("Existing file")))
+            .filter(|c| c.portuguese() || !dubbed)
+            .collect();
+        out.sort_by_key(|c| (std::cmp::Reverse(c.playable), std::cmp::Reverse(c.seeders)));
+        out.truncate(3);
+        Ok(out)
+    }
+
+    /// Versões de um filme ou episódio já no Radarr/Sonarr (id deles).
+    async fn releases_of(&self, kind: Kind, arr_id: i64) -> Result<Vec<Candidate>> {
+        Ok(candidates(match kind {
+            Kind::Movie => self.radarr.as_ref().context("Radarr não configurado")?.releases(&format!("movieId={arr_id}")).await?,
+            _ => self.sonarr.as_ref().context("Sonarr não configurado")?.releases(&format!("episodeId={arr_id}")).await?,
+        }))
+    }
+
+    /// Depois de uma troca: o torrent que semeava o arquivo antigo sai do
+    /// qBittorrent com os dados — só se nenhum arquivo dele continua na
+    /// biblioteca (um pacote de temporada com outros episódios fica).
+    async fn drop_replaced_torrent(&self, inode: (u64, u64)) -> Result<()> {
+        self.qbit.login().await?;
+        for t in self.qbit.torrents().await? {
+            let files: Vec<crate::disk::FileId> = self
+                .qbit
+                .files(&t.hash)
+                .await?
+                .into_iter()
+                .filter_map(|f| crate::disk::file_id(&self.cfg.host_path(&format!("{}/{}", t.save_path.trim_end_matches('/'), f.name))))
+                .collect();
+            if !files.iter().any(|f| f.inode == inode) {
+                continue;
+            }
+            if files.iter().all(|f| f.nlink == 1) {
+                info!("{}: versão antiga trocada, torrent removido", t.name);
+                self.qbit.delete(std::slice::from_ref(&t.hash)).await?;
+            } else {
+                info!("{}: versão antiga trocada; o torrent fica (ainda há arquivos dele na biblioteca)", t.name);
+            }
+        }
+        Ok(())
     }
 
     /// O filme no Radarr, adicionando se preciso — sem busca e sem monitorar:
@@ -772,11 +901,11 @@ impl Orchestrator {
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
         let title = movie["title"].as_str().unwrap_or_default().to_owned();
         if movie["hasFile"].as_bool() == Some(true) {
-            let path = movie["movieFile"]["path"].as_str().context("filme sem caminho")?.to_owned();
-            return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library_file: Some(path), candidates: vec![] });
+            let library = Some(Library::from(&movie["movieFile"])?);
+            return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library, candidates: vec![] });
         }
         let candidates = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
-        Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library_file: None, candidates })
+        Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
     }
 
     async fn episode_target(&self, episode_id: i64) -> Result<Target> {
@@ -807,8 +936,8 @@ impl Orchestrator {
 
         if ep["hasFile"].as_bool() == Some(true) {
             let f = sonarr.episode_file(ep["episodeFileId"].as_i64().unwrap_or(0)).await?;
-            let path = f["path"].as_str().context("episódio sem caminho")?.to_owned();
-            return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library_file: Some(path), candidates: vec![] });
+            let library = Some(Library::from(&f)?);
+            return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library, candidates: vec![] });
         }
         // versões do episódio; sem nenhuma aprovada, também a busca da
         // temporada — que traz pacotes e episódios avulsos que a busca do
@@ -820,7 +949,7 @@ impl Orchestrator {
             list.extend(season.into_iter().filter(|c| !seen.contains(&c.guid) && (c.pack || is_this_episode(&c.raw, s, e))));
             sort_candidates(&mut list);
         }
-        Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library_file: None, candidates: list })
+        Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list })
     }
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar
@@ -878,8 +1007,54 @@ struct Target {
     series_id: Option<i64>,
     episode: Option<(i64, i64)>,
     next: Option<(i64, String)>,
-    library_file: Option<String>,
+    library: Option<Library>,
     candidates: Vec<Candidate>,
+}
+
+/// O arquivo que já está na biblioteca.
+struct Library {
+    /// caminho como o Radarr/Sonarr o veem
+    path: String,
+    /// id do arquivo no Radarr (movieFile) ou no Sonarr (episodeFile)
+    file_id: i64,
+    quality: String,
+    portuguese: bool,
+}
+
+impl Library {
+    fn from(file: &Value) -> Result<Self> {
+        Ok(Self {
+            path: file["path"].as_str().context("arquivo sem caminho")?.to_owned(),
+            file_id: file["id"].as_i64().unwrap_or(0),
+            quality: file["quality"]["quality"]["name"].as_str().unwrap_or_default().to_owned(),
+            portuguese: file["languages"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.starts_with("Portuguese"))),
+        })
+    }
+}
+
+/// Segunda opção de qualidade (Preferências → Qualidade: Bluray primeiro)...
+const SECOND_OPTION: [&str; 2] = ["WEBDL-1080p", "WEBRip-1080p"];
+/// ...e a primeira, que o "assistir" oferece em troca
+const FIRST_OPTION: &str = "Bluray-1080p";
+
+/// Fontes a partir das quais uma versão costuma tocar enquanto baixa sem
+/// travar; abaixo disso, uma versão com fontes suficientes vem antes.
+const ENOUGH_SEEDERS: i64 = 5;
+
+/// Versões na primeira opção, com fontes suficientes, que só foram recusadas
+/// porque já existe arquivo (o WEB conta como bom o bastante, então o
+/// Radarr/Sonarr não trocam sozinhos). Dublado não é trocado por não dublado.
+fn better_than(lib: &Library, list: &[Candidate]) -> Vec<Candidate> {
+    if !SECOND_OPTION.contains(&lib.quality.as_str()) {
+        return vec![];
+    }
+    list.iter()
+        .filter(|c| c.quality == FIRST_OPTION && c.seeders >= ENOUGH_SEEDERS)
+        .filter(|c| !c.rejected || c.reasons.iter().all(|r| r.starts_with("Existing file")))
+        .filter(|c| c.portuguese() || !lib.portuguese)
+        .take(5)
+        .cloned()
+        .collect()
 }
 
 /// Espera o download terminar, importa e, quando ninguém assiste, entrega o
@@ -926,17 +1101,25 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
         _ => (orch.sonarr.as_ref().context("Sonarr não configurado")?, "DownloadedEpisodesScan"),
     };
     arr.command(json!({ "name": cmd, "path": container, "importMode": "Copy" })).await?;
+    let old = job.info.replaces.as_ref().map(|r| r.file_id);
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let has = match job.info.kind {
-            Kind::Movie => arr.movie(job.info.arr_id).await?["hasFile"].as_bool(),
-            _ => arr.episode(job.info.arr_id).await?["hasFile"].as_bool(),
+        // o arquivo atual no Radarr/Sonarr (numa troca, precisa ser outro)
+        let file = match job.info.kind {
+            Kind::Movie => arr.movie(job.info.arr_id).await?["movieFile"]["id"].as_i64(),
+            _ => arr.episode(job.info.arr_id).await?["episodeFileId"].as_i64().filter(|id| *id > 0),
         };
-        if has == Some(true) {
-            return match job.info.kind {
-                Kind::Movie => arr.set_movie_monitored(job.info.arr_id, true).await,
-                _ => arr.monitor_episodes(&[job.info.arr_id]).await,
-            };
+        if file.is_some() && file != old {
+            match job.info.kind {
+                Kind::Movie => arr.set_movie_monitored(job.info.arr_id, true).await?,
+                _ => arr.monitor_episodes(&[job.info.arr_id]).await?,
+            }
+            if let Some(inode) = job.info.replaces.as_ref().and_then(|r| r.inode)
+                && let Err(e) = orch.drop_replaced_torrent(inode).await
+            {
+                warn!("{}: torrent da versão antiga não removido: {e:#}", job.info.title);
+            }
+            return Ok(());
         }
     }
     bail!("o import não aconteceu em 5 min (veja Activity → Queue no Radarr/Sonarr)")
@@ -994,6 +1177,41 @@ mod tests {
         ]);
         let order: Vec<_> = list.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(order, ["Filme.1080p.x264-B", "Filme.1080p.x265-A", "Serie.S01.1080p.x264-P", "Filme.720p.x264-C"]);
+    }
+
+    #[test]
+    fn offers_bluray_only_when_the_existing_file_is_the_only_obstacle() {
+        let rel = |title: &str, quality: &str, lang: &str, seeders: i64, why: &[&str]| {
+            json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": seeders, "rejected": !why.is_empty(), "rejections": why,
+                    "releaseWeight": 1, "languages": [{ "name": lang }], "quality": { "quality": { "name": quality } } })
+        };
+        let cut = "Existing file on disk meets quality cutoff: WEBDL-1080p";
+        let list = candidates(vec![
+            rel("BD-DUB", "Bluray-1080p", "Portuguese (Brazil)", 20, &[cut]),
+            rel("BD-EN", "Bluray-1080p", "English", 20, &[cut]),
+            rel("BD-POUCAS", "Bluray-1080p", "Portuguese (Brazil)", 2, &[cut]),
+            rel("BD-SEM-CF", "Bluray-1080p", "Portuguese (Brazil)", 20, &[cut, "Custom Formats have score 0 below Movie's profile minimum 100"]),
+            rel("WEB-DUB", "WEBDL-1080p", "Portuguese (Brazil)", 20, &[cut]),
+        ]);
+        let dubbed = Library { path: String::new(), file_id: 1, quality: "WEBDL-1080p".into(), portuguese: true };
+        let titles = |v: Vec<Candidate>| v.into_iter().map(|c| c.title).collect::<Vec<_>>();
+        // dublado não vira inglês; poucas fontes ou outra recusa tiram da lista; só Bluray
+        assert_eq!(titles(better_than(&dubbed, &list)), ["BD-DUB"]);
+        let english = Library { portuguese: false, ..dubbed };
+        assert_eq!(titles(better_than(&english, &list)), ["BD-DUB", "BD-EN"]);
+        // já é Bluray (ou outra qualidade): nada a oferecer
+        let bluray = Library { path: String::new(), file_id: 1, quality: "Bluray-1080p".into(), portuguese: true };
+        assert!(better_than(&bluray, &list).is_empty());
+    }
+
+    #[test]
+    fn a_well_seeded_version_beats_a_poorly_seeded_one() {
+        let rel = |title: &str, seeders: i64, weight: i64| {
+            json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": seeders, "rejected": false, "releaseWeight": weight })
+        };
+        // o Radarr prefere o Bluray (peso 1), mas com 2 fontes ele trava
+        let list = candidates(vec![rel("Filme.1080p.BluRay.x264", 2, 1), rel("Filme.1080p.WEB-DL.x264", 40, 2)]);
+        assert_eq!(list[0].title, "Filme.1080p.WEB-DL.x264");
     }
 
     #[test]

@@ -91,6 +91,19 @@ JustWatch via TMDB. O TMDB não informa o idioma do áudio.
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
 legenda do Bazarr. O Anubis grava direto no Radarr/Sonarr (formato
 personalizado "Anubis · Português (BR)" pontuado no perfil) e no Bazarr.
+Qualidade: Bluray 1080p primeiro e WEB 1080p como segunda opção (o alvo do
+perfil fica no WEB, então um WEB baixado não é trocado sozinho) e, nos
+filmes, recusar gravações de cinema (CAM, Telesync, Telecine, Workprint).
+
+**Tocar enquanto baixa sem travar.** No "Assistir", uma versão com menos de
+5 fontes perde para uma bem semeada (um Bluray mal semeado dá lugar ao WEB).
+Se o download ficar ~30 s abaixo do que o vídeo consome, com pouco já
+baixado à frente, o player oferece versões mais leves; trocar cancela o
+download atual e continua do mesmo ponto. Item na biblioteca em WEB com um
+Bluray disponível (e bem semeado): o "Assistir" pergunta se troca — a nova
+versão entra no Radarr/Sonarr como melhoria e o torrent da antiga sai do
+qBittorrent, se nenhum arquivo dele continuar na biblioteca. Essa conferência
+tem limite de 8 s; passado isso, toca o que já está no disco.
 
 ## API
 
@@ -107,6 +120,7 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /watch/{kind}/{id}` | player |
 | `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |
 | `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
+| `GET /watch/{kind}/{id}/lighter` | versões mais leves (o download não acompanha o vídeo) |
 | `GET /where/{kind}/{id}` | onde assistir no Brasil (filme: tmdbId; série: tvdbId) |
 | `GET /mux/{tmdb}/options` | versões para juntar: vídeo e dublagem PT-BR |
 | `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |

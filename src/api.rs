@@ -395,14 +395,16 @@ async fn sub_raw(State(s): State<AppState>, Path((kind, id, n)): Path<(Kind, i64
 
 async fn import_netflix(State(s): State<AppState>, body: String) -> Response {
     match s.orch.import_netflix(&body).await {
-        Ok(r) => Json(r).into_response(),
+        // a busca no TMDB segue em segundo plano; GET /history mostra o andamento
+        Ok(total) => (StatusCode::ACCEPTED, Json(json!({ "total": total }))).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
 }
 
 async fn import_crunchyroll(State(s): State<AppState>, body: String) -> Response {
     match s.orch.import_crunchyroll(&body).await {
-        Ok(r) => Json(r).into_response(),
+        // a busca no TMDB segue em segundo plano; GET /history mostra o andamento
+        Ok(total) => (StatusCode::ACCEPTED, Json(json!({ "total": total }))).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
 }

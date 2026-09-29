@@ -197,7 +197,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
 | `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |
 | `GET /preferencias` | página de preferências |
-| `GET /history` · `POST`/`DELETE /history/netflix` e `/history/crunchyroll` · `PUT /history/anilist` | histórico de outros serviços (Netflix, AniList) |
+| `GET /history` · `POST`/`DELETE /history/netflix` e `/history/crunchyroll` · `PUT /history/anilist` | histórico de outros serviços (Netflix, Crunchyroll, AniList); o envio responde 202 e a busca no TMDB segue em segundo plano, com o andamento em `GET /history` |
 | `GET /prefs` · `PUT /prefs` | idioma do áudio (filmes/séries) e legendas |
 | `GET /health` | versão e estado |
 | `GET /storage` | uso do disco, regras e o último ciclo executado |

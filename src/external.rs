@@ -20,8 +20,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -71,6 +72,7 @@ pub struct External {
     anilist: Mutex<Option<(Instant, Vec<Seed>)>>,
     /// id do AniList → ids no TMDB (série e/ou filme) e no TVDB
     anime_map: Mutex<Option<HashMap<i64, AnimeIds>>>,
+    progress: Mutex<Progress>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -93,7 +95,45 @@ fn anime_ids(x: &Value) -> Option<(i64, AnimeIds)> {
     Some((x["anilist_id"].as_i64()?, AnimeIds { tmdb_tv, tmdb_movie, tvdb: x["tvdb_id"].as_i64().or(x["thetvdb_id"].as_i64()) }))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Netflix,
+    Crunchyroll,
+}
+
+/// Como procurar um título no TMDB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    Series,
+    /// título sem marca de episódio: filme, ou série se não houver filme
+    MovieOrSeries,
+    /// Crunchyroll: série que é quase sempre anime
+    Anime,
+    AnimeMovie,
+}
+
+/// Um título a achar no TMDB, com o quanto foi assistido.
+#[derive(Debug, Clone)]
+struct Wanted {
+    key: String,
+    title: String,
+    want: Want,
+    count: u32,
+    last: Option<NaiveDate>,
+}
+
+/// Andamento da importação em segundo plano (a página acompanha).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Progress {
+    pub source: Option<Source>,
+    pub running: bool,
+    pub done: usize,
+    pub total: usize,
+    pub report: Option<ImportReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
     pub lines: usize,
     pub titles: usize,
@@ -111,6 +151,8 @@ pub struct Summary {
     pub anilist_user: Option<String>,
     /// entradas lidas do AniList na última vez (None: ainda não lido)
     pub anilist_entries: Option<usize>,
+    /// importação em andamento ou a última (Netflix/Crunchyroll)
+    pub import: Progress,
 }
 
 // ------------------------------------------------------------ Netflix
@@ -139,12 +181,26 @@ fn csv_rows(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// "29/09/26", "29/09/2026" (Brasil) ou "9/29/26" (EUA).
-fn parse_date(s: &str) -> Option<NaiveDate> {
+fn date_parts(s: &str) -> Option<[i32; 3]> {
     let p: Vec<i32> = s.split(['/', '-', '.']).filter_map(|x| x.trim().parse().ok()).collect();
-    let [a, b, y] = p[..] else { return None };
+    p.try_into().ok()
+}
+
+/// O arquivo inteiro diz o formato: algum primeiro número > 12 = dia/mês
+/// (Brasil); algum segundo > 12 = mês/dia (EUA, "9/28/26"). Sem pista, Brasil.
+fn day_first(rows: &[(String, String)]) -> bool {
+    let parts: Vec<[i32; 3]> = rows.iter().filter_map(|(_, d)| date_parts(d)).collect();
+    if parts.iter().any(|p| p[0] > 12) {
+        true
+    } else {
+        !parts.iter().any(|p| p[1] > 12)
+    }
+}
+
+fn parse_date(s: &str, day_first: bool) -> Option<NaiveDate> {
+    let [a, b, y] = date_parts(s)?;
     let y = if y < 100 { 2000 + y } else { y };
-    let (d, m) = if b > 12 { (b, a) } else { (a, b) };
+    let (d, m) = if day_first { (a, b) } else { (b, a) };
     NaiveDate::from_ymd_opt(y, m as u32, d as u32)
 }
 
@@ -172,17 +228,47 @@ fn title_key(t: &str) -> (String, bool) {
 
 /// Títulos únicos: (chave, é série, vezes, data mais recente).
 fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>)> {
+    let dmy = day_first(rows);
+    // "Fullmetal Alchemist: Os motivos dela": a Netflix nem sempre marca o
+    // episódio; o mesmo prefixo em dois títulos diferentes é série
+    let mut prefixes: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (t, _) in rows {
+        if let Some((p, _)) = t.split_once(": ") {
+            prefixes.entry(p).or_default().insert(t);
+        }
+    }
     let mut m: HashMap<String, (bool, u32, Option<NaiveDate>)> = HashMap::new();
     for (t, d) in rows {
-        let (key, series) = title_key(t);
-        let e = m.entry(key).or_insert((series, 0, None));
+        let (key, series) = match t.split_once(": ") {
+            Some((p, _)) if prefixes[p].len() >= 2 => (p.to_owned(), true),
+            _ => title_key(t),
+        };
+        // título vazio ou só pontuação: não dá para achar
+        if key.trim().chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+            continue;
+        }
+        let e = m.entry(key.trim().to_owned()).or_insert((series, 0, None));
         e.0 |= series;
         e.1 += 1;
-        e.2 = e.2.max(parse_date(d));
+        e.2 = e.2.max(parse_date(d, dmy));
     }
     let mut out: Vec<_> = m.into_iter().map(|(k, (s, n, d))| (k, s, n, d)).collect();
     out.sort_by(|a, b| b.3.cmp(&a.3));
     out
+}
+
+/// A série buscada entre os resultados: a de nome exato; com várias (o anime
+/// de One Piece e a de 2023), a mais votada. A busca do TMDB às vezes põe
+/// na frente outra de nome parecido ("Hilda Furacão" para "Hilda").
+fn series_named<'a>(list: &'a [Value], title: &str) -> Option<&'a Value> {
+    let tv: Vec<&Value> = list.iter().filter(|r| r["media_type"] == "tv").collect();
+    let same_name = |r: &Value| [&r["name"], &r["original_name"]].iter().any(|n| n.as_str().is_some_and(|n| n.eq_ignore_ascii_case(title)));
+    tv.iter()
+        .take(5)
+        .filter(|r| same_name(r))
+        .max_by_key(|r| r["vote_count"].as_u64().unwrap_or(0))
+        .or(tv.first())
+        .copied()
 }
 
 // ------------------------------------------------------------ AniList
@@ -204,7 +290,7 @@ impl External {
     pub fn load(state_dir: PathBuf) -> Self {
         let path = state_dir.join("externo.json");
         let state = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Self { map_path: state_dir.join("anime-list-full.json"), path, state: Mutex::new(state), anilist: Mutex::new(None), anime_map: Mutex::new(None) }
+        Self { map_path: state_dir.join("anime-list-full.json"), path, state: Mutex::new(state), anilist: Mutex::new(None), anime_map: Mutex::new(None), progress: Mutex::new(Progress::default()) }
     }
 
     async fn save(&self) {
@@ -228,103 +314,160 @@ impl Orchestrator {
             crunchyroll_at: st.crunchyroll_at.clone(),
             anilist_user: st.anilist_user.clone(),
             anilist_entries: entries,
+            import: self.external.progress.lock().await.clone(),
         }
     }
 
-    /// Importa o CSV da Netflix (substitui a importação anterior).
-    pub async fn import_netflix(&self, csv: &str) -> Result<ImportReport> {
-        let tmdb = self.tmdb.as_ref().context("configure [tmdb] para importar da Netflix")?;
+    /// Importa o CSV da Netflix (substitui a importação anterior). Responde
+    /// logo com quantos títulos há; a busca no TMDB segue em segundo plano.
+    pub async fn import_netflix(self: &Arc<Self>, csv: &str) -> Result<usize> {
         let rows = csv_rows(csv);
         if rows.is_empty() {
             bail!("arquivo vazio ou fora do formato (esperado: \"Title\",\"Date\")");
         }
-        let titles = group(&rows);
-        let mut seeds = vec![];
-        let mut unmatched = vec![];
-        for (key, series, count, last) in &titles {
-            let known = self.external.state.lock().await.netflix_map.get(key).copied();
-            let found = match known {
-                Some(f) => f,
-                None => {
-                    let q = crate::services::url_encode(key);
-                    let res = tmdb.get(&format!("search/multi?query={q}&language=pt-BR&include_adult=false")).await?;
-                    let list = res["results"].as_array().cloned().unwrap_or_default();
-                    let pick = |want: &str| list.iter().find(|r| r["media_type"] == want).and_then(|r| r["id"].as_i64());
-                    let f = if *series { pick("tv").map(|id| (Media::Tv, id)) } else { pick("movie").map(|id| (Media::Movie, id)).or_else(|| pick("tv").map(|id| (Media::Tv, id))) };
-                    self.external.state.lock().await.netflix_map.insert(key.clone(), f);
-                    f
-                }
-            };
-            match found {
-                Some((media, id)) => {
-                    let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * *count as f64).min(3.0) };
-                    seeds.push(Seed { media, tmdb: id, title: key.clone(), base, last: *last, favorite: false });
-                }
-                None if unmatched.len() < 10 => unmatched.push(key.clone()),
-                None => {}
-            }
-        }
-        let report = ImportReport { lines: rows.len(), titles: titles.len(), matched: seeds.len(), unmatched };
-        {
-            let mut st = self.external.state.lock().await;
-            st.netflix = seeds;
-            st.netflix_at = Some(Utc::now().format("%Y-%m-%d").to_string());
-        }
-        self.external.save().await;
-        self.for_you_cache.clear().await;
-        info!("Netflix: {} linhas, {} títulos, {} achados no TMDB", report.lines, report.titles, report.matched);
-        Ok(report)
+        let wanted = group(&rows)
+            .into_iter()
+            .map(|(key, series, count, last)| Wanted { title: key.clone(), key, want: if series { Want::Series } else { Want::MovieOrSeries }, count, last })
+            .collect();
+        self.start_import(Source::Netflix, wanted, rows.len()).await
     }
 
     /// Importa o arquivo do botão da Crunchyroll (substitui o anterior):
     /// `{"items": [{"title", "movie", "episodes", "last"}]}`.
-    pub async fn import_crunchyroll(&self, body: &str) -> Result<ImportReport> {
-        let tmdb = self.tmdb.as_ref().context("configure [tmdb] para importar da Crunchyroll")?;
+    pub async fn import_crunchyroll(self: &Arc<Self>, body: &str) -> Result<usize> {
         let v: Value = serde_json::from_str(body).context("arquivo fora do formato (é o crunchyroll-historico.json do botão?)")?;
         let items = v["items"].as_array().context("arquivo sem itens")?;
-        let mut seeds = vec![];
-        let mut unmatched = vec![];
         let mut episodes = 0usize;
-        for it in items {
-            let Some(title) = it["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) else { continue };
-            let movie = it["movie"] == true;
-            let count = it["episodes"].as_u64().unwrap_or(1);
-            episodes += count as usize;
-            let last = it["last"].as_str().and_then(|d| d.get(..10)).and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
-            let key = format!("{}{title}", if movie { "filme:" } else { "" });
-            let known = self.external.state.lock().await.crunchyroll_map.get(&key).copied();
-            let found = match known {
-                Some(f) => f,
-                None => {
-                    let kind = if movie { "movie" } else { "tv" };
-                    let res = tmdb.get(&format!("search/{kind}?query={}&language=pt-BR&include_adult=false", crate::services::url_encode(title))).await?;
-                    let list = res["results"].as_array().cloned().unwrap_or_default();
-                    // na Crunchyroll quase tudo é anime: prefere o resultado que é anime
-                    let pick = list.iter().find(|r| movie || crate::discover::is_anime(r)).or(list.first()).and_then(|r| r["id"].as_i64());
-                    let f = pick.map(|id| (if movie { Media::Movie } else { Media::Tv }, id));
-                    self.external.state.lock().await.crunchyroll_map.insert(key.clone(), f);
-                    f
-                }
-            };
+        let wanted: Vec<Wanted> = items
+            .iter()
+            .filter_map(|it| {
+                let title = it["title"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
+                let movie = it["movie"] == true;
+                let count = it["episodes"].as_u64().unwrap_or(1) as u32;
+                episodes += count as usize;
+                let last = it["last"].as_str().and_then(|d| d.get(..10)).and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+                let key = format!("{}{title}", if movie { "filme:" } else { "" });
+                Some(Wanted { key, title: title.to_owned(), want: if movie { Want::AnimeMovie } else { Want::Anime }, count, last })
+            })
+            .collect();
+        self.start_import(Source::Crunchyroll, wanted, episodes).await
+    }
+
+    async fn start_import(self: &Arc<Self>, source: Source, wanted: Vec<Wanted>, lines: usize) -> Result<usize> {
+        self.tmdb.as_ref().context("configure [tmdb] para importar históricos")?;
+        {
+            let mut p = self.external.progress.lock().await;
+            if p.running {
+                bail!("já há uma importação em andamento — espere terminar");
+            }
+            *p = Progress { source: Some(source), running: true, done: 0, total: wanted.len(), report: None };
+        }
+        let total = wanted.len();
+        let me = self.clone();
+        tokio::spawn(async move { me.run_import(source, wanted, lines).await });
+        Ok(total)
+    }
+
+    /// Acha os títulos no TMDB (8 de cada vez; o que já foi achado antes vem
+    /// da memória) e grava as sementes.
+    async fn run_import(self: Arc<Self>, source: Source, wanted: Vec<Wanted>, lines: usize) {
+        let sem = Arc::new(tokio::sync::Semaphore::new(8));
+        let mut set = tokio::task::JoinSet::new();
+        for w in wanted {
+            let (me, sem) = (self.clone(), sem.clone());
+            set.spawn(async move {
+                let _slot = sem.acquire_owned().await;
+                let found = me.resolve(source, &w).await;
+                me.external.progress.lock().await.done += 1;
+                (w, found)
+            });
+        }
+        let (mut seeds, mut unmatched, mut titles) = (vec![], vec![], 0usize);
+        while let Some(res) = set.join_next().await {
+            let Ok((w, found)) = res else { continue };
+            titles += 1;
             match found {
                 Some((media, id)) => {
-                    let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * count as f64).min(3.0) };
-                    seeds.push(Seed { media, tmdb: id, title: title.to_owned(), base, last, favorite: false });
+                    let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * w.count as f64).min(3.0) };
+                    seeds.push(Seed { media, tmdb: id, title: w.title, base, last: w.last, favorite: false });
                 }
-                None if unmatched.len() < 10 => unmatched.push(title.to_owned()),
+                None if unmatched.len() < 10 => unmatched.push(w.title),
                 None => {}
             }
         }
-        let report = ImportReport { lines: episodes, titles: items.len(), matched: seeds.len(), unmatched };
+        let report = ImportReport { lines, titles, matched: seeds.len(), unmatched };
         {
             let mut st = self.external.state.lock().await;
-            st.crunchyroll = seeds;
-            st.crunchyroll_at = Some(Utc::now().format("%Y-%m-%d").to_string());
+            let today = Some(Utc::now().format("%Y-%m-%d").to_string());
+            match source {
+                Source::Netflix => (st.netflix, st.netflix_at) = (seeds, today),
+                Source::Crunchyroll => (st.crunchyroll, st.crunchyroll_at) = (seeds, today),
+            }
         }
         self.external.save().await;
         self.for_you_cache.clear().await;
-        info!("Crunchyroll: {} episódios, {} títulos, {} achados no TMDB", report.lines, report.titles, report.matched);
-        Ok(report)
+        info!("{source:?}: {} linhas, {} títulos, {} achados no TMDB", report.lines, report.titles, report.matched);
+        let mut p = self.external.progress.lock().await;
+        p.running = false;
+        p.report = Some(report);
+    }
+
+    /// Um título no TMDB (guardado por fonte; falha de rede tenta de novo uma
+    /// vez e, persistindo, fica como não achado sem ser guardado).
+    async fn resolve(&self, source: Source, w: &Wanted) -> Option<(Media, i64)> {
+        let cached = {
+            let st = self.external.state.lock().await;
+            match source {
+                Source::Netflix => st.netflix_map.get(&w.key).copied(),
+                Source::Crunchyroll => st.crunchyroll_map.get(&w.key).copied(),
+            }
+        };
+        if let Some(f) = cached {
+            return f;
+        }
+        let tmdb = self.tmdb.as_ref()?;
+        let q = crate::services::url_encode(&w.title);
+        let path = match w.want {
+            Want::Series | Want::MovieOrSeries => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
+            Want::Anime => format!("search/tv?query={q}&language=pt-BR&include_adult=false"),
+            Want::AnimeMovie => format!("search/movie?query={q}&language=pt-BR&include_adult=false"),
+        };
+        let mut res = tmdb.get(&path).await;
+        if res.is_err() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            res = tmdb.get(&path).await;
+        }
+        let res = res.ok()?;
+        let mut list = res["results"].as_array().cloned().unwrap_or_default();
+        let mut asked = w.title.as_str();
+        // "Série: episódio" visto uma vez só: sem filme com esse nome, tenta a série
+        if list.is_empty()
+            && w.want == Want::MovieOrSeries
+            && let Some((prefix, _)) = w.title.split_once(": ")
+        {
+            asked = prefix;
+            let q = crate::services::url_encode(prefix);
+            let res = tmdb.get(&format!("search/tv?query={q}&language=pt-BR&include_adult=false")).await.ok()?;
+            list = res["results"].as_array().cloned().unwrap_or_default();
+            for r in &mut list {
+                r["media_type"] = "tv".into();
+            }
+        }
+        let of = |want: &str| list.iter().find(|r| r["media_type"] == want).and_then(|r| r["id"].as_i64());
+        let tv = || series_named(&list, asked).and_then(|r| r["id"].as_i64()).map(|id| (Media::Tv, id));
+        let found = match w.want {
+            Want::Series => tv(),
+            Want::MovieOrSeries => of("movie").map(|id| (Media::Movie, id)).or_else(tv),
+            // na Crunchyroll quase tudo é anime: prefere o resultado que é anime
+            Want::Anime => list.iter().find(|r| crate::discover::is_anime(r)).or(list.first()).and_then(|r| r["id"].as_i64()).map(|id| (Media::Tv, id)),
+            Want::AnimeMovie => list.first().and_then(|r| r["id"].as_i64()).map(|id| (Media::Movie, id)),
+        };
+        let mut st = self.external.state.lock().await;
+        match source {
+            Source::Netflix => st.netflix_map.insert(w.key.clone(), found),
+            Source::Crunchyroll => st.crunchyroll_map.insert(w.key.clone(), found),
+        };
+        found
     }
 
     pub async fn clear_crunchyroll(&self) {
@@ -465,9 +608,9 @@ mod tests {
 
     #[test]
     fn netflix_csv_becomes_titles() {
-        let csv = "Title,Date\n\"Round 6: Temporada 1: Batata Quente\",\"17/09/26\"\n\"Round 6: Temporada 1: Luz Vermelha\",\"16/09/26\"\n\"Glass Onion: Um Mistério Knives Out\",\"05/09/26\"\n\"Stranger Things: Stranger Things 4: Capítulo Um\",\"01/08/26\"\n\"Wandinha: Temporada 2\",\"9/28/26\"\n\"O Poço\",\"\"\"x\"\"\"\n";
+        let csv = "Title,Date\n\"Round 6: Temporada 1: Batata Quente\",\"17/09/26\"\n\"Round 6: Temporada 1: Luz Vermelha\",\"16/09/26\"\n\"Glass Onion: Um Mistério Knives Out\",\"05/09/26\"\n\"Stranger Things: Stranger Things 4: Capítulo Um\",\"01/08/26\"\n\"Wandinha: Temporada 2\",\"28/09/26\"\n\"O Poço\",\"\"\"x\"\"\"\n\": \",\"01/01/26\"\n";
         let rows = csv_rows(csv);
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         let g = group(&rows);
         let find = |k: &str| g.iter().find(|x| x.0 == k).unwrap();
         assert_eq!((find("Round 6").1, find("Round 6").2), (true, 2));
@@ -476,6 +619,42 @@ mod tests {
         assert!(find("Stranger Things").1);
         assert_eq!(find("Wandinha").3, NaiveDate::from_ymd_opt(2026, 9, 28));
         assert_eq!(find("O Poço").3, None);
+        // título vazio fica de fora
+        assert_eq!(g.len(), 5);
+        let eps = vec![
+            ("Fullmetal Alchemist: Os motivos dela".to_owned(), "01/08/26".to_owned()),
+            ("Fullmetal Alchemist: Pecado interior".to_owned(), "02/08/26".to_owned()),
+            ("Glass Onion: Um Mistério Knives Out".to_owned(), "05/09/26".to_owned()),
+        ];
+        let g = group(&eps);
+        assert!(g.contains(&("Fullmetal Alchemist".to_owned(), true, 2, NaiveDate::from_ymd_opt(2026, 8, 2))));
+        assert!(g.iter().any(|x| x.0 == "Glass Onion: Um Mistério Knives Out" && !x.1));
+    }
+
+    #[test]
+    fn series_by_exact_name_then_votes() {
+        let list = vec![
+            json!({"media_type": "tv", "id": 111110, "name": "ONE PIECE: A Série", "original_name": "ONE PIECE", "vote_count": 1949}),
+            json!({"media_type": "movie", "id": 900667, "title": "One Piece Film: Red", "vote_count": 1157}),
+            json!({"media_type": "tv", "id": 37854, "name": "One Piece", "original_name": "ONE PIECE", "vote_count": 5567}),
+        ];
+        assert_eq!(series_named(&list, "One Piece").unwrap()["id"], 37854);
+        let hilda = vec![
+            json!({"media_type": "tv", "id": 72351, "name": "Hilda Furacão", "vote_count": 37}),
+            json!({"media_type": "tv", "id": 82456, "name": "Hilda", "vote_count": 253}),
+        ];
+        assert_eq!(series_named(&hilda, "Hilda").unwrap()["id"], 82456);
+        assert_eq!(series_named(&hilda, "Outra").unwrap()["id"], 72351);
+    }
+
+    #[test]
+    fn date_format_comes_from_the_whole_file() {
+        let us = vec![("a".to_owned(), "9/11/26".to_owned()), ("b".to_owned(), "9/28/26".to_owned())];
+        assert!(!day_first(&us));
+        assert_eq!(parse_date("9/11/26", false), NaiveDate::from_ymd_opt(2026, 9, 11));
+        let br = vec![("a".to_owned(), "9/11/26".to_owned()), ("b".to_owned(), "28/09/26".to_owned())];
+        assert!(day_first(&br));
+        assert_eq!(parse_date("9/11/26", true), NaiveDate::from_ymd_opt(2026, 11, 9));
     }
 
     #[test]

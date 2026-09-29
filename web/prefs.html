@@ -142,20 +142,37 @@ async function loadHistory() {
     $('#crmsg').textContent = d.crunchyroll_titles ? `${d.crunchyroll_titles} títulos importados (${d.crunchyroll_at})` : 'nada importado ainda';
     $('#anilist').value = d.anilist_user || '';
     $('#almsg').textContent = d.anilist_user ? `ligado${d.anilist_entries != null ? ` · ${d.anilist_entries} títulos usados` : ''}` : '';
+    if (d.import.running) followImport();
   } catch {}
 }
-$('#nfx').onchange = async (e) => {
-  const f = e.target.files[0];
+// a importação roda no servidor; a página só acompanha o andamento
+const importMsg = { netflix: ['#nfxmsg', 'exibições'], crunchyroll: ['#crmsg', 'episódios'] };
+async function followImport() {
+  let p;
+  do {
+    await new Promise((ok) => setTimeout(ok, 1000));
+    try { p = (await (await fetch('history')).json()).import; } catch { continue; }
+    const [msg, unit] = importMsg[p.source];
+    const r = p.report;
+    $(msg).textContent = p.running ? `Importando… ${p.done}/${p.total} títulos`
+      : `${r.lines} ${unit}, ${r.titles} títulos, ${r.matched} achados` + (r.unmatched.length ? ` · não achados: ${r.unmatched.join(', ')}` : '');
+  } while (!p || p.running);
+}
+async function sendHistory(source, input, type) {
+  const f = input.files[0];
   if (!f) return;
-  $('#nfxmsg').textContent = 'Importando… (acha cada título no TMDB)';
+  const msg = importMsg[source][0];
+  $(msg).textContent = 'Enviando…';
   try {
-    const r = await fetch('history/netflix', { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: await f.text() });
+    const r = await fetch(`history/${source}`, { method: 'POST', headers: { 'Content-Type': type }, body: await f.text() });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
-    $('#nfxmsg').textContent = `${d.lines} exibições, ${d.titles} títulos, ${d.matched} achados` + (d.unmatched.length ? ` · não achados: ${d.unmatched.join(', ')}` : '');
-  } catch (err) { $('#nfxmsg').textContent = `Falhou: ${err.message}`; }
-  e.target.value = '';
-};
+    $(msg).textContent = `Importando… 0/${d.total} títulos`;
+    followImport();
+  } catch (err) { $(msg).textContent = `Falhou: ${err.message}`; }
+  input.value = '';
+}
+$('#nfx').onchange = (e) => sendHistory('netflix', e.target, 'text/csv');
 $('#alsave').onclick = async () => {
   $('#almsg').textContent = 'Lendo a lista…';
   try {
@@ -207,18 +224,7 @@ async function crunchyrollHistory() {
 }
 $('#crbtn').href = 'javascript:' + encodeURIComponent('(' + crunchyrollHistory.toString() + ')()');
 $('#crbtn').onclick = (e) => { e.preventDefault(); alert('Arraste este botão para a barra de favoritos e use-o no crunchyroll.com.'); };
-$('#crfile').onchange = async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  $('#crmsg').textContent = 'Importando… (acha cada título no TMDB)';
-  try {
-    const r = await fetch('history/crunchyroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await f.text() });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error);
-    $('#crmsg').textContent = `${d.lines} episódios, ${d.titles} títulos, ${d.matched} achados` + (d.unmatched.length ? ` · não achados: ${d.unmatched.join(', ')}` : '');
-  } catch (err) { $('#crmsg').textContent = `Falhou: ${err.message}`; }
-  e.target.value = '';
-};
+$('#crfile').onchange = (e) => sendHistory('crunchyroll', e.target, 'application/json');
 </script>
 </body>
 </html>

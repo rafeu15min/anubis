@@ -59,7 +59,7 @@ pub struct Cache {
 }
 
 /// Animação japonesa = anime (o critério da separação entre séries e animes).
-fn is_anime(v: &Value) -> bool {
+pub(crate) fn is_anime(v: &Value) -> bool {
     v["genre_ids"].as_array().is_some_and(|g| g.iter().any(|x| x == 16)) && v["origin_country"].as_array().is_some_and(|c| c.iter().any(|x| x == "JP"))
 }
 
@@ -118,6 +118,12 @@ impl Orchestrator {
         if self.tmdb.is_none() {
             return Ok(out);
         }
+        // "Para você" primeiro (sem histórico nenhum, não aparece)
+        match self.for_you(cat).await {
+            Ok(items) if !items.is_empty() => out.rows.push(Row { title: "Para você", items }),
+            Ok(_) => {}
+            Err(e) => out.errors.push(format!("Para você: {e:#}")),
+        }
         for (title, path) in lists(cat) {
             match self.tmdb_list(cat, title, path).await {
                 Ok(list) => {
@@ -128,6 +134,16 @@ impl Orchestrator {
             }
         }
         Ok(out)
+    }
+
+    /// Uma das listas da vitrine, pelo título (para o "Para você" completar).
+    pub(crate) async fn showcase_list(&self, cat: Category, title: &str) -> Result<Vec<Value>> {
+        let (title, path) = lists(cat).into_iter().find(|(t, _)| *t == title).context("lista desconhecida")?;
+        self.tmdb_list(cat, title, path).await
+    }
+
+    pub(crate) async fn showcase_cards(self: &Arc<Self>, cat: Category, list: &[Value]) -> Vec<Found> {
+        self.cards(cat, list).await
     }
 
     /// Uma lista do TMDB (6 h em memória), já filtrada pela categoria.

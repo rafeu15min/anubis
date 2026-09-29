@@ -38,6 +38,16 @@ completo (assistir, pedir, episódios, juntar dublagem). As listas ficam 6 h em
 memória; a primeira abertura de séries/animes leva alguns segundos (o id do
 TVDB de cada série vem do TMDB), e a página já pré-carrega as outras abas.
 
+**Para você** (primeira fileira de cada aba, depois de Prontos para
+assistir): recomendações a partir do que você assiste. Sementes: favoritos no
+Jellyfin (o coração — o jeito mais forte de ensinar o Anubis; não perdem peso
+com o tempo), assistidos até o fim, em andamento, episódios vistos de cada
+série e, com peso baixo, os pedidos; o peso cai à metade a cada 30 dias. Os
+candidatos são as recomendações do TMDB das sementes mais fortes (quem aparece
+em várias listas sobe); sai o que já foi visto, baixado ou pedido. Para
+funcionar desde o primeiro dia, completa com os Populares no Brasil dos
+gêneros das sementes. Recomendações 24 h e a fileira 10 min em memória.
+
 **Busca unificada.** Página em `/` que pesquisa filmes (Radarr/TMDB) e séries
 (Sonarr/TVDB) ao mesmo tempo. "Pedir" adiciona o item ao Radarr/Sonarr com o
 perfil de qualidade configurado (séries com o gênero Anime vão para a pasta de
@@ -218,6 +228,7 @@ src/disk.rs          uso do sistema de arquivos e inodes
 src/search.rs        busca, pedido e acompanhamento
 src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
 src/discover.rs      vitrine por categoria (TMDB + biblioteca)
+src/foryou.rs        "Para você": sementes do Jellyfin/Radarr/Sonarr + recomendações do TMDB
 src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
 src/api.rs           rotas HTTP

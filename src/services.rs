@@ -487,6 +487,10 @@ struct Session {
 }
 
 impl Jellyfin {
+    pub async fn get_json(&self, path: &str) -> Result<Value> {
+        send(self.req(Method::GET, path), &format!("Jellyfin {path}")).await
+    }
+
     /// Abre uma sessão de `user` para o aparelho `device` (como um login no
     /// Jellyfin web; o mesmo aparelho substitui a sessão anterior dele).
     /// Devolve (token, id do usuário, id do servidor).

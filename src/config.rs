@@ -48,8 +48,11 @@ pub struct BazarrCfg {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
-    /// ex.: "10.10.10.2:7070" (link direto PC <-> FeuVault)
-    pub listen: String,
+    /// Um endereço ou uma lista, na ordem de prioridade (a página troca
+    /// sozinha para o mais rápido que alcança): ex. cabo direto, rede local,
+    /// Tailscale. O primeiro é o que o próprio Anubis usa (ffmpeg).
+    #[serde(deserialize_with = "one_or_many")]
+    pub listen: Vec<String>,
     /// Se definido, as rotas que alteram algo exigem `Authorization: Bearer <token>`.
     pub token: Option<String>,
 }
@@ -171,6 +174,19 @@ pub struct Jellyfin {
     pub public_url: Option<String>,
 }
 
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("lendo {}", path.display()))?;
@@ -189,6 +205,9 @@ impl Config {
         }
         if s.min_age_days < 0 || s.interval_minutes == 0 {
             bail!("storage: min_age_days >= 0 e interval_minutes > 0");
+        }
+        if self.server.listen.is_empty() {
+            bail!("server: listen precisa de ao menos um endereço");
         }
         if self.sonarr.is_none() && self.radarr.is_none() {
             bail!("configure ao menos [sonarr] ou [radarr]");

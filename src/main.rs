@@ -24,6 +24,7 @@ mod subs;
 
 use anyhow::{Context, Result, bail};
 use orchestrator::Orchestrator;
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
     let config = config.or_else(|| std::env::var_os("ANUBIS_CONFIG").map(PathBuf::from)).unwrap_or_else(default_config);
     let mut cfg = config::Config::load(&config)?;
     let serving = command.as_deref().unwrap_or("serve") == "serve";
-    let self_url = format!("http://{}", cfg.server.listen);
+    let self_url = format!("http://{}", cfg.server.listen[0]);
     let streamer = match cfg.stream.as_mut() {
         Some(s) if serving => {
             let transcode = std::mem::take(&mut s.transcode);
@@ -98,20 +99,35 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let wake = Arc::new(Notify::new());
     tokio::spawn(scheduler(orch.clone(), wake.clone()));
 
-    let listen = orch.cfg.server.listen.clone();
-    let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("escutando em {listen}"))?;
+    // um endereço que falha (placa ainda sem IP, sem ip_nonlocal_bind) não
+    // impede os outros
+    let mut listeners = Vec::new();
+    for addr in &orch.cfg.server.listen {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => listeners.push((addr.clone(), l)),
+            Err(e) => error!("não deu para escutar em {addr}: {e}"),
+        }
+    }
+    if listeners.is_empty() {
+        bail!("nenhum endereço de [server] listen disponível");
+    }
     info!(
-        "Anubis {} em http://{listen} — limpeza acima de {}%, até {}%{}",
+        "Anubis {} em {} — limpeza acima de {}%, até {}%{}",
         env!("CARGO_PKG_VERSION"),
+        listeners.iter().map(|(a, _)| format!("http://{a}")).collect::<Vec<_>>().join(", "),
         orch.cfg.storage.start_percent,
         orch.cfg.storage.stop_percent,
         if orch.cfg.storage.dry_run { " (dry_run: só registra)" } else { "" }
     );
-    axum::serve(listener, api::router(api::AppState { orch, wake }))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let app = api::router(api::AppState { orch, wake });
+    let mut servers = tokio::task::JoinSet::new();
+    for (_, l) in listeners {
+        servers.spawn(axum::serve(l, app.clone()).into_future());
+    }
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        Some(res) = servers.join_next() => res??,
+    }
     Ok(())
 }
 

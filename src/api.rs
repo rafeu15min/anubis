@@ -74,7 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mux", post(start_mux))
         .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
         .route("/mux/{tmdb}/options", get(mux_options))
-        .route("/health", get(|| async { Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }))
+        .route("/health", get(health))
         .route("/storage", get(storage))
         .route("/storage/plan", get(plan))
         .route("/storage/run", post(run))
@@ -89,6 +89,12 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
 
 fn error(status: StatusCode, msg: impl ToString) -> Response {
     (status, Json(json!({ "error": msg.to_string() }))).into_response()
+}
+
+/// Vivo? E os endereços em que o Anubis escuta, do caminho mais rápido ao
+/// mais lento (a página troca para o melhor que o aparelho alcança).
+async fn health(State(s): State<AppState>) -> Response {
+    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION"), "addresses": s.orch.cfg.server.listen })).into_response()
 }
 
 async fn storage(State(s): State<AppState>) -> Response {

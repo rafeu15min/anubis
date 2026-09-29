@@ -20,9 +20,14 @@ services:
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
-    # API só no link direto PC <-> FeuVault (fora da rede da casa)
+    # nos três caminhos, do mais rápido ao mais lento: cabo direto com o PC,
+    # rede da casa e Tailscale (o Anubis leva o "Abrir no Jellyfin" pelo mesmo
+    # caminho da página; ip_nonlocal_bind=1 deixa publicar o IP do Tailscale
+    # antes de ele subir no boot)
     ports:
       - "10.10.10.2:8096:8096"
+      - "192.168.1.80:8096:8096"
+      - "100.121.241.44:8096:8096"
     environment:
       - PUID=1000
       - PGID=1000

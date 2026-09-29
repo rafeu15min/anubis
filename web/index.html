@@ -98,6 +98,29 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+// escala de caminhos: cabo direto » rede local » Tailscale. O /health lista os
+// endereços nessa ordem; os mais rápidos que o atual são testados juntos e a
+// página passa para o melhor que responder (uma vez por sessão).
+(async () => {
+  try { if (sessionStorage.getItem('anubis.caminho')) return; sessionStorage.setItem('anubis.caminho', '1'); } catch {}
+  let addrs = [];
+  try { addrs = (await (await fetch('health')).json()).addresses || []; } catch { return; }
+  const here = addrs.indexOf(location.host);
+  const better = here < 0 ? addrs : addrs.slice(0, here);
+  const reach = (a) => {
+    const ctl = new AbortController();
+    setTimeout(() => ctl.abort(), 1500);
+    // sem CORS: só interessa se o endereço responde
+    return fetch(`http://${a}/health`, { mode: 'no-cors', cache: 'no-store', signal: ctl.signal }).then(() => a);
+  };
+  const res = await Promise.allSettled(better.map(reach));
+  const best = res.find((r) => r.status === 'fulfilled');
+  if (best && best.value !== location.host) location.replace(`http://${best.value}${location.pathname}${location.search}${location.hash}`);
+})();
+
+// o Jellyfin pelo mesmo caminho desta página (ele escuta nos mesmos endereços)
+const jf = (u) => { try { const x = new URL(u); x.hostname = location.hostname; return x.href; } catch { return u; } };
+
 // pedidos acompanhados: ficam no navegador (se ele deixar) para sobreviver a um recarregar
 const KEY = 'anubis.pedidos';
 let tracked = {};
@@ -136,7 +159,7 @@ function muxHtml(m) {
   const err = m.error ? `<small class="err">${esc(m.error)}</small>` : '';
   const cancel = m.step === 'downloading' || m.step === 'failed'
     ? `<button data-muxcancel="${m.tmdb}">${m.step === 'failed' ? 'Apagar os downloads' : 'Desistir'}</button>` : '';
-  const link = m.jellyfin_url ? `<a class="btn ok" href="${esc(m.jellyfin_url)}">Abrir no Jellyfin</a>` : '';
+  const link = m.jellyfin_url ? `<a class="btn ok" href="${esc(jf(m.jellyfin_url))}">Abrir no Jellyfin</a>` : '';
   return `<span class="state">${txt}</span>${bar}${err}${cancel}${link}`;
 }
 
@@ -157,7 +180,7 @@ function statusHtml(st) {
   if (st.state === 'downloading' && st.progress != null) txt += ` ${Math.round(st.progress * 100)}%` + (st.eta ? ` · falta ${esc(st.eta)}` : '');
   if (st.episodes) txt += ` · ${st.episodes[0]}/${st.episodes[1]} episódios`;
   const bar = st.progress != null && st.state !== 'available' ? `<div class="progress"><i style="width:${(st.progress * 100).toFixed(1)}%"></i></div>` : '';
-  const link = st.jellyfin_url ? `<a class="btn ok" href="${esc(st.jellyfin_url)}">Abrir no Jellyfin</a>` : '';
+  const link = st.jellyfin_url ? `<a class="btn ok" href="${esc(jf(st.jellyfin_url))}">Abrir no Jellyfin</a>` : '';
   return `<span class="state">${txt}</span>${bar}${link}`;
 }
 
@@ -409,7 +432,7 @@ async function refresh(it, openable = true) {
     if (openable && t && t.openWhenReady && st.state === 'available' && st.jellyfin_url) {
       t.openWhenReady = false;
       save();
-      location.href = st.jellyfin_url;
+      location.href = jf(st.jellyfin_url);
     }
   } catch {}
 }

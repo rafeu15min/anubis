@@ -107,7 +107,16 @@ tem limite de 8 s; passado isso, toca o que já está no disco.
 
 ## API
 
-Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
+Escuta em três caminhos, do mais rápido ao mais lento: cabo direto PC ↔
+FeuVault (`10.10.10.2`), rede da casa (`192.168.1.80`) e Tailscale
+(`100.121.241.44` / `feuvault`), porta 7070. A página de busca testa os
+caminhos mais rápidos que o atual (em paralelo, 1,5 s) e passa para o melhor
+que o aparelho alcança; o "Abrir no Jellyfin" usa o mesmo caminho (o
+Jellyfin publica a 8096 nos mesmos três endereços e trata essas faixas como
+rede local). Para uso fora de casa, o endereço fixo é o do Tailscale:
+em casa, a página sobe sozinha para a rede local ou o cabo. O cabo só fica de
+pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
+(sem isso, o 10.10.10.2 some e o Anubis perde o Radarr/Sonarr).
 
 | Rota | O que faz |
 |---|---|

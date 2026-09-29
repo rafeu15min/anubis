@@ -2,8 +2,12 @@
 # (chmod 600: tem chaves de API) e preencha. Editar com `vim` via ssh.
 
 [server]
-# API HTTP; no FeuVault, só no link direto com o PC (10.10.10.0/30)
-listen = "10.10.10.2:7070"
+# API HTTP. Um endereço ou vários, do caminho mais rápido ao mais lento: a
+# página testa os anteriores ao que está usando e troca para o melhor que o
+# aparelho alcança (e o "Abrir no Jellyfin" segue o mesmo caminho).
+# Com net.ipv4.ip_nonlocal_bind=1, um endereço ainda sem placa (Tailscale no
+# boot) não impede o início.
+listen = ["10.10.10.2:7070", "192.168.1.80:7070", "100.121.241.44:7070"]
 # rotas POST exigem "Authorization: Bearer <token>"; gere com: openssl rand -hex 24
 token = "troque-me"
 
@@ -51,8 +55,9 @@ api_key = ""  # Painel → Chaves de API
 # como o Jellyfin enxerga a biblioteca, e onde ela está no host
 media_path = "/media"
 host_media_path = "/mnt/raid0/anubis/media"
-# endereço do Jellyfin nos links abertos no navegador
-public_url = "http://jellyfin.feuvault.lan"
+# endereço do Jellyfin nos links abertos no navegador; a página troca o host
+# pelo mesmo que ela usa (o Jellyfin precisa escutar nesses endereços também)
+public_url = "http://10.10.10.2:8096"
 
 # "Assistir agora": o Anubis baixa com o próprio motor (librqbit) e toca
 # enquanto baixa. Sem esta seção, só a busca e os pedidos funcionam.

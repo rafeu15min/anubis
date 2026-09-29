@@ -57,9 +57,12 @@
       <input type="file" id="nfx" accept=".csv,text/csv"> <span id="nfxmsg" class="help"></span>
     </div></div>
     <div class="row"><b>Crunchyroll</b><div>
-      <p class="help">Pelo AniList: crie uma conta em <a href="https://anilist.co" target="_blank" rel="noopener">anilist.co</a> e instale a extensão <a href="https://malsync.moe" target="_blank" rel="noopener">MAL-Sync</a> no navegador, ligada ao AniList. Ela registra sozinha o que você assiste na Crunchyroll. Aqui, só o nome de usuário do AniList (a lista precisa ser pública).</p>
+      <p class="help"><b>Histórico completo, de uma vez:</b> arraste este botão para a barra de favoritos do navegador (no computador) →
+        <a id="crbtn" href="#" style="display:inline-block;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);text-decoration:none">Histórico Crunchyroll → Anubis</a>.
+        Depois abra <a href="https://www.crunchyroll.com" target="_blank" rel="noopener">crunchyroll.com</a> (logado) e clique no favorito: ele lê o seu histórico pelo próprio site e baixa <code>crunchyroll-historico.json</code>. Envie o arquivo aqui. A senha não passa pelo Anubis.</p>
+      <input type="file" id="crfile" accept=".json,application/json"> <span id="crmsg" class="help"></span>
+      <p class="help" style="margin-top:12px"><b>Daqui para a frente (opcional):</b> com a extensão <a href="https://malsync.moe" target="_blank" rel="noopener">MAL-Sync</a> ligada a uma conta do <a href="https://anilist.co" target="_blank" rel="noopener">AniList</a>, o que você assiste na Crunchyroll pelo navegador vai sozinho para o AniList. Aqui, o nome de usuário do AniList (lista pública).</p>
       <input id="anilist" placeholder="usuário do AniList" style="min-height:40px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"> <button id="alsave" type="button">Ligar</button> <span id="almsg" class="help"></span>
-    </div></div>
   </section>
   <section id="subsbox">
     <h2>Legendas</h2>
@@ -136,6 +139,7 @@ async function loadHistory() {
   try {
     const d = await (await fetch('history')).json();
     $('#nfxmsg').textContent = d.netflix_titles ? `${d.netflix_titles} títulos importados (${d.netflix_at})` : 'nada importado ainda';
+    $('#crmsg').textContent = d.crunchyroll_titles ? `${d.crunchyroll_titles} títulos importados (${d.crunchyroll_at})` : 'nada importado ainda';
     $('#anilist').value = d.anilist_user || '';
     $('#almsg').textContent = d.anilist_user ? `ligado${d.anilist_entries != null ? ` · ${d.anilist_entries} títulos usados` : ''}` : '';
   } catch {}
@@ -162,6 +166,59 @@ $('#alsave').onclick = async () => {
   } catch (err) { $('#almsg').textContent = `Falhou: ${err.message}`; }
 };
 loadHistory();
+
+// o favorito da Crunchyroll: roda no crunchyroll.com, com a sessão de quem
+// está logado, e baixa o histórico de exibição (o mesmo que o site mostra)
+async function crunchyrollHistory() {
+  if (!/(^|\.)crunchyroll\.com$/.test(location.hostname)) { alert('Abra o crunchyroll.com (logado) e clique no favorito lá.'); return; }
+  try {
+    const id = ((window.__APP_CONFIG__ || {}).cxApiParams || {}).accountAuthClientId;
+    if (!id) throw new Error('não achei a configuração do site (a Crunchyroll mudou algo)');
+    const tr = await fetch('/auth/v1/token', { method: 'POST', credentials: 'include',
+      headers: { Authorization: 'Basic ' + btoa(id + ':'), 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=etp_rt_cookie' });
+    if (!tr.ok) throw new Error('sessão recusada (HTTP ' + tr.status + ') — você está logado?');
+    const tok = await tr.json();
+    const items = {};
+    let total = 0;
+    for (let page = 1; page <= 300; page++) {
+      const r = await fetch('/content/v2/' + tok.account_id + '/watch-history?page_size=100&page=' + page + '&locale=pt-BR', { headers: { Authorization: 'Bearer ' + tok.access_token } });
+      if (!r.ok) throw new Error('histórico: HTTP ' + r.status);
+      const list = (await r.json()).data || [];
+      for (const h of list) {
+        const p = h.panel || {};
+        const ep = p.episode_metadata || {};
+        const movie = p.type === 'movie';
+        const key = movie ? p.id : (ep.series_id || p.id);
+        const title = movie ? p.title : (ep.series_title || p.title);
+        if (!key || !title) continue;
+        const it = items[key] || (items[key] = { title, movie, episodes: 0, last: '' });
+        it.episodes++; total++;
+        if ((h.date_played || '') > it.last) it.last = h.date_played || '';
+      }
+      if (list.length < 100) break;
+    }
+    const out = { source: 'crunchyroll', exported: new Date().toISOString(), items: Object.values(items) };
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
+    a.download = 'crunchyroll-historico.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    alert(out.items.length + ' títulos (' + total + ' episódios) salvos em crunchyroll-historico.json. Envie esse arquivo nas Preferências do Anubis.');
+  } catch (e) { alert('Não deu: ' + e.message); }
+}
+$('#crbtn').href = 'javascript:' + encodeURIComponent('(' + crunchyrollHistory.toString() + ')()');
+$('#crbtn').onclick = (e) => { e.preventDefault(); alert('Arraste este botão para a barra de favoritos e use-o no crunchyroll.com.'); };
+$('#crfile').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $('#crmsg').textContent = 'Importando… (acha cada título no TMDB)';
+  try {
+    const r = await fetch('history/crunchyroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await f.text() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    $('#crmsg').textContent = `${d.lines} episódios, ${d.titles} títulos, ${d.matched} achados` + (d.unmatched.length ? ` · não achados: ${d.unmatched.join(', ')}` : '');
+  } catch (err) { $('#crmsg').textContent = `Falhou: ${err.message}`; }
+  e.target.value = '';
+};
 </script>
 </body>
 </html>

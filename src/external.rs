@@ -3,7 +3,10 @@
 //!   tudo), enviado pela página de Preferências. Episódios viram a série
 //!   ("Série: Temporada 1: Episódio" → "Série"); cada título é achado no TMDB
 //!   uma vez (o resultado fica guardado para as próximas importações).
-//! - Crunchyroll, via AniList: a extensão MAL-Sync registra o que se assiste na
+//! - Crunchyroll, de uma vez: um botão de favoritos (na página de
+//!   Preferências) lê o histórico da conta logada no crunchyroll.com, pelo
+//!   próprio site, e baixa um arquivo que é enviado aqui.
+//! - Crunchyroll daqui para a frente, via AniList: a extensão MAL-Sync registra o que se assiste na
 //!   Crunchyroll numa conta do AniList, que tem API aberta; o Anubis lê a lista
 //!   (status, nota, favoritos) e liga cada anime ao TMDB pela lista pública
 //!   github.com/Fribb/anime-lists (AniList → TVDB/TMDB).
@@ -50,6 +53,12 @@ struct State {
     #[serde(default)]
     netflix_map: HashMap<String, Option<(Media, i64)>>,
     anilist_user: Option<String>,
+    #[serde(default)]
+    crunchyroll: Vec<Seed>,
+    crunchyroll_at: Option<String>,
+    /// título da Crunchyroll → (tipo, id no TMDB); None = não achado
+    #[serde(default)]
+    crunchyroll_map: HashMap<String, Option<(Media, i64)>>,
     /// id do TVDB → id do TMDB (séries de anime)
     #[serde(default)]
     tvdb_tmdb: HashMap<i64, Option<i64>>,
@@ -97,6 +106,8 @@ pub struct ImportReport {
 pub struct Summary {
     pub netflix_titles: usize,
     pub netflix_at: Option<String>,
+    pub crunchyroll_titles: usize,
+    pub crunchyroll_at: Option<String>,
     pub anilist_user: Option<String>,
     /// entradas lidas do AniList na última vez (None: ainda não lido)
     pub anilist_entries: Option<usize>,
@@ -210,7 +221,14 @@ impl Orchestrator {
     pub async fn history_summary(&self) -> Summary {
         let st = self.external.state.lock().await;
         let entries = self.external.anilist.lock().await.as_ref().map(|(_, s)| s.len());
-        Summary { netflix_titles: st.netflix.len(), netflix_at: st.netflix_at.clone(), anilist_user: st.anilist_user.clone(), anilist_entries: entries }
+        Summary {
+            netflix_titles: st.netflix.len(),
+            netflix_at: st.netflix_at.clone(),
+            crunchyroll_titles: st.crunchyroll.len(),
+            crunchyroll_at: st.crunchyroll_at.clone(),
+            anilist_user: st.anilist_user.clone(),
+            anilist_entries: entries,
+        }
     }
 
     /// Importa o CSV da Netflix (substitui a importação anterior).
@@ -258,6 +276,66 @@ impl Orchestrator {
         Ok(report)
     }
 
+    /// Importa o arquivo do botão da Crunchyroll (substitui o anterior):
+    /// `{"items": [{"title", "movie", "episodes", "last"}]}`.
+    pub async fn import_crunchyroll(&self, body: &str) -> Result<ImportReport> {
+        let tmdb = self.tmdb.as_ref().context("configure [tmdb] para importar da Crunchyroll")?;
+        let v: Value = serde_json::from_str(body).context("arquivo fora do formato (é o crunchyroll-historico.json do botão?)")?;
+        let items = v["items"].as_array().context("arquivo sem itens")?;
+        let mut seeds = vec![];
+        let mut unmatched = vec![];
+        let mut episodes = 0usize;
+        for it in items {
+            let Some(title) = it["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) else { continue };
+            let movie = it["movie"] == true;
+            let count = it["episodes"].as_u64().unwrap_or(1);
+            episodes += count as usize;
+            let last = it["last"].as_str().and_then(|d| d.get(..10)).and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+            let key = format!("{}{title}", if movie { "filme:" } else { "" });
+            let known = self.external.state.lock().await.crunchyroll_map.get(&key).copied();
+            let found = match known {
+                Some(f) => f,
+                None => {
+                    let kind = if movie { "movie" } else { "tv" };
+                    let res = tmdb.get(&format!("search/{kind}?query={}&language=pt-BR&include_adult=false", crate::services::url_encode(title))).await?;
+                    let list = res["results"].as_array().cloned().unwrap_or_default();
+                    // na Crunchyroll quase tudo é anime: prefere o resultado que é anime
+                    let pick = list.iter().find(|r| movie || crate::discover::is_anime(r)).or(list.first()).and_then(|r| r["id"].as_i64());
+                    let f = pick.map(|id| (if movie { Media::Movie } else { Media::Tv }, id));
+                    self.external.state.lock().await.crunchyroll_map.insert(key.clone(), f);
+                    f
+                }
+            };
+            match found {
+                Some((media, id)) => {
+                    let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * count as f64).min(3.0) };
+                    seeds.push(Seed { media, tmdb: id, title: title.to_owned(), base, last, favorite: false });
+                }
+                None if unmatched.len() < 10 => unmatched.push(title.to_owned()),
+                None => {}
+            }
+        }
+        let report = ImportReport { lines: episodes, titles: items.len(), matched: seeds.len(), unmatched };
+        {
+            let mut st = self.external.state.lock().await;
+            st.crunchyroll = seeds;
+            st.crunchyroll_at = Some(Utc::now().format("%Y-%m-%d").to_string());
+        }
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+        info!("Crunchyroll: {} episódios, {} títulos, {} achados no TMDB", report.lines, report.titles, report.matched);
+        Ok(report)
+    }
+
+    pub async fn clear_crunchyroll(&self) {
+        let mut st = self.external.state.lock().await;
+        st.crunchyroll.clear();
+        st.crunchyroll_at = None;
+        drop(st);
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+    }
+
     pub async fn clear_netflix(&self) {
         let mut st = self.external.state.lock().await;
         st.netflix.clear();
@@ -287,7 +365,10 @@ impl Orchestrator {
 
     /// Todas as sementes de fora (Netflix + AniList).
     pub async fn external_seeds(&self) -> Vec<Seed> {
-        let mut out = self.external.state.lock().await.netflix.clone();
+        let mut out = {
+            let st = self.external.state.lock().await;
+            st.netflix.iter().chain(&st.crunchyroll).cloned().collect::<Vec<_>>()
+        };
         match self.anilist_seeds().await {
             Ok(a) => out.extend(a),
             Err(e) => warn!("AniList: {e:#}"),

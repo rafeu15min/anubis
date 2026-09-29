@@ -25,6 +25,7 @@
 //! GET  /prefs  ·  PUT /prefs     — idioma do áudio (filmes/séries) e legendas
 //! GET  /history                 — histórico de outros serviços (Netflix, AniList)
 //! POST /history/netflix  · DELETE — importa o CSV da Netflix (corpo = o arquivo) · apaga
+//! POST /history/crunchyroll · DELETE — importa o arquivo do botão da Crunchyroll · apaga
 //! PUT  /history/anilist         — {"user": "nome"} (vazio tira)
 //! GET  /health                  — vivo?
 //! GET  /storage                 — uso do disco, regras e o último ciclo
@@ -70,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/history/anilist", axum::routing::put(set_anilist))
+        .route("/history/crunchyroll", post(import_crunchyroll).delete(clear_crunchyroll).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/request", post(request))
         .route("/events", get(events))
         .route("/discover/{category}", get(discover))
@@ -396,6 +398,18 @@ async fn import_netflix(State(s): State<AppState>, body: String) -> Response {
         Ok(r) => Json(r).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
+}
+
+async fn import_crunchyroll(State(s): State<AppState>, body: String) -> Response {
+    match s.orch.import_crunchyroll(&body).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+async fn clear_crunchyroll(State(s): State<AppState>) -> Response {
+    s.orch.clear_crunchyroll().await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn clear_netflix(State(s): State<AppState>) -> Response {

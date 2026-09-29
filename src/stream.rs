@@ -209,13 +209,28 @@ pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
     out
 }
 
-/// Aprovadas primeiro; depois episódio avulso antes de pacote; depois as que
-/// tocam no navegador; depois a preferência do próprio Radarr/Sonarr e as
-/// mais semeadas.
+/// Aprovadas primeiro; depois episódio avulso antes de pacote; depois as
+/// dubladas (com a regra "preferido", o Radarr aprova as outras também);
+/// depois as que tocam no navegador; depois a preferência do próprio
+/// Radarr/Sonarr e as mais semeadas.
 fn sort_candidates(list: &mut [Candidate]) {
     list.sort_by_key(|c| {
-        (c.rejected, c.pack, std::cmp::Reverse(c.playable), c.raw["releaseWeight"].as_i64().unwrap_or(i64::MAX), std::cmp::Reverse(c.seeders))
+        (
+            c.rejected,
+            c.pack,
+            !c.portuguese(),
+            std::cmp::Reverse(c.playable),
+            c.raw["releaseWeight"].as_i64().unwrap_or(i64::MAX),
+            std::cmp::Reverse(c.seeders),
+        )
     });
+}
+
+impl Candidate {
+    /// áudio em português, como o Radarr/Sonarr entenderam o nome
+    pub fn portuguese(&self) -> bool {
+        self.languages.iter().any(|l| l.starts_with("Portuguese"))
+    }
 }
 
 /// O nome do arquivo é do episódio `s`x`e`? (S01E05, s1e05, 1x05)
@@ -979,6 +994,21 @@ mod tests {
         ]);
         let order: Vec<_> = list.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(order, ["Filme.1080p.x264-B", "Filme.1080p.x265-A", "Serie.S01.1080p.x264-P", "Filme.720p.x264-C"]);
+    }
+
+    #[test]
+    fn dubbed_comes_first_among_the_approved() {
+        let rel = |title: &str, rejected: bool, lang: &str| {
+            json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": 5, "rejected": rejected, "releaseWeight": 1, "languages": [{ "name": lang }] })
+        };
+        let list = candidates(vec![
+            rel("Filme.1080p.x264-EN", false, "English"),
+            rel("Filme.1080p.x265-DUB", false, "Portuguese (Brazil)"),
+            rel("Filme.2160p-DUB", true, "Portuguese (Brazil)"),
+        ]);
+        let order: Vec<_> = list.iter().map(|c| c.title.as_str()).collect();
+        // dublada antes mesmo de tocar direto; recusada continua por último
+        assert_eq!(order, ["Filme.1080p.x265-DUB", "Filme.1080p.x264-EN", "Filme.2160p-DUB"]);
     }
 
     #[test]

@@ -118,6 +118,13 @@ impl Arr {
         send::<Value>(self.req(Method::PUT, "episode/monitor").json(&body), &format!("{} monitorar", self.name)).await?;
         Ok(())
     }
+    /// Sonarr: monitora a série e todos os episódios (a série entrou pelo
+    /// "assistir agora", sem monitorar, e agora foi pedida inteira).
+    pub async fn monitor_series_all(&self, series_id: i64) -> Result<()> {
+        let body = json!({ "series": [{ "id": series_id, "monitored": true }], "monitoringOptions": { "monitor": "all" } });
+        send::<Value>(self.req(Method::POST, "seasonpass").json(&body), &format!("{} monitorar série", self.name)).await?;
+        Ok(())
+    }
     pub async fn movies(&self) -> Result<Vec<Movie>> {
         self.get("movie").await
     }

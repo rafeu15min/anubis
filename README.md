@@ -32,10 +32,16 @@ só registra no log o que apagaria.
 perfil de qualidade configurado (séries com o gênero Anime vão para a pasta de
 animes) e manda buscar. A página acompanha o pedido — procurando, baixando
 (progresso lido direto do qBittorrent), entrando na biblioteca, disponível — e
-abre o item no Jellyfin quando ele fica pronto.
+abre o item no Jellyfin quando ele fica pronto. Pedido parado em
+"procurando" diz por quê: a página busca as versões nos indexadores (uma vez
+a cada 15 min) e mostra, por exemplo, "Nenhuma versão aceita: 11 encontradas
+— 3 sem áudio em português, 8 sem fontes". Item que só passou pelo "assistir
+agora" (no Radarr/Sonarr sem monitorar) aparece como não pedido, e pedi-lo
+liga o monitoramento.
 
 **Assistir agora (padrão para filmes e episódios).** "Assistir" escolhe a versão entre as
-que o Radarr aprova (preferindo H.264/AV1, que o navegador toca direto), baixa
+que o Radarr aprova (preferindo a dublada e, depois, H.264/AV1, que o
+navegador toca direto), baixa
 com o motor próprio do Anubis (librqbit) e abre o player da página enquanto
 baixa. Sem ninguém assistindo, o download vai em ordem; com o player aberto, as
 peças da posição dele vêm primeiro — pular para o meio do filme reprioriza o
@@ -96,6 +102,7 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
 | `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
 | `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
+| `GET /status/{kind}/{id}/versions` | pedido parado: versões encontradas e motivos das recusas |
 | `POST /watch` | assistir agora: `{"kind":"movie","id":N,"guid"?:…}` |
 | `GET /watch/{kind}/{id}` | player |
 | `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |

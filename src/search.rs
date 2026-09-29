@@ -92,6 +92,61 @@ pub struct Status {
     pub jellyfin_url: Option<String>,
 }
 
+/// O que a busca nos indexadores achou para um pedido parado em "procurando":
+/// quantas versões, quantas aceitas e por que as outras foram recusadas.
+#[derive(Debug, Clone, Serialize)]
+pub struct Versions {
+    pub found: usize,
+    pub approved: usize,
+    /// com fontes zero (ninguém compartilhando)
+    pub no_seeders: usize,
+    /// motivo (em português quando conhecido) → quantas versões
+    pub reasons: Vec<(String, usize)>,
+}
+
+/// Os motivos do Radarr/Sonarr que aparecem na prática, em português.
+fn reason_pt(r: &str) -> String {
+    let l = r.to_lowercase();
+    if l.contains("custom format") && l.contains("minimum") {
+        // o único formato pontuado é o "Anubis · Português (BR)" das Preferências
+        "sem áudio em português".into()
+    } else if l.contains("not wanted in profile") {
+        "qualidade fora do perfil".into()
+    } else if l.contains("upgrade") || l.contains("existing file") {
+        "não é melhor que o arquivo atual".into()
+    } else if l.contains("seeders") {
+        "poucas fontes".into()
+    } else if l.contains("size") {
+        "tamanho fora do limite".into()
+    } else {
+        r.to_owned()
+    }
+}
+
+fn summarize(releases: &[Value]) -> Versions {
+    let seeded = |r: &&Value| r["protocol"] != "torrent" || r["seeders"].as_i64().unwrap_or(0) > 0;
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in releases.iter().filter(seeded).filter(|r| r["rejected"].as_bool() == Some(true)) {
+        // uma versão com o mesmo motivo repetido conta uma vez
+        let mine: std::collections::BTreeSet<String> = r["rejections"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(reason_pt)).collect();
+        for m in mine {
+            *counts.entry(m).or_default() += 1;
+        }
+    }
+    let mut reasons: Vec<(String, usize)> = counts.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    reasons.truncate(3);
+    Versions {
+        found: releases.len(),
+        approved: releases.iter().filter(seeded).filter(|r| r["rejected"].as_bool() != Some(true)).count(),
+        no_seeders: releases.iter().filter(|r| !seeded(r)).count(),
+        reasons,
+    }
+}
+
+/// resultado da busca de versões guardado por este tempo (é uma busca de verdade nos indexadores)
+const VERSIONS_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Onde o título passa oficialmente (streaming do país configurado).
 #[derive(Debug, Serialize)]
 pub struct WhereToWatch {
@@ -150,7 +205,8 @@ fn found(kind: Kind, v: &Value) -> Option<Found> {
         poster,
         anime: kind == Kind::Series && genres.iter().any(|g| g == "Anime"),
         genres,
-        requested: v["id"].as_i64().is_some_and(|i| i > 0),
+        // no Radarr/Sonarr sem monitorar = só assistido pelo "assistir agora", não pedido
+        requested: v["id"].as_i64().is_some_and(|i| i > 0) && v["monitored"].as_bool() != Some(false),
     })
 }
 
@@ -190,6 +246,14 @@ impl Orchestrator {
 
         if let Some(existing) = arr.find(what, id_param, id).await? {
             let lib_id = existing["id"].as_i64().context("item sem id")?;
+            // entrou pelo "assistir agora" (sem monitorar): sem isto a busca
+            // não baixaria nada
+            if existing["monitored"].as_bool() == Some(false) {
+                match kind {
+                    Kind::Movie => arr.set_movie_monitored(lib_id, true).await?,
+                    Kind::Series | Kind::Episode => arr.monitor_series_all(lib_id).await?,
+                }
+            }
             let cmd = match kind {
                 Kind::Movie => json!({ "name": "MoviesSearch", "movieIds": [lib_id] }),
                 Kind::Series | Kind::Episode => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
@@ -277,6 +341,9 @@ impl Orchestrator {
             State::Importing
         } else if !queue.is_empty() {
             State::Downloading
+        } else if item["monitored"].as_bool() == Some(false) {
+            // só passou pelo "assistir agora": ninguém está procurando
+            State::NotRequested
         } else {
             State::Searching
         };
@@ -342,6 +409,40 @@ impl Orchestrator {
         Ok(Episodes { title: series["title"].as_str().unwrap_or_default().to_owned(), seasons })
     }
 
+    /// Por que um pedido não sai de "procurando": busca as versões (filme; série:
+    /// a primeira temporada com episódios faltando) e resume as recusas.
+    pub async fn versions(&self, kind: Kind, id: i64) -> Result<Versions> {
+        if let Some((at, v)) = self.versions_cache.lock().await.get(&(kind, id))
+            && at.elapsed() < VERSIONS_TTL
+        {
+            return Ok(v.clone());
+        }
+        let arr = self.arr(kind)?;
+        let filter = match kind {
+            Kind::Movie => {
+                let m = arr.find("movie", "tmdbId", id).await?.context("filme não pedido")?;
+                format!("movieId={}", m["id"])
+            }
+            Kind::Series => {
+                let s = arr.find("series", "tvdbId", id).await?.context("série não pedida")?;
+                let season = s["seasons"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|x| x["seasonNumber"].as_i64().unwrap_or(0) > 0 && x["monitored"].as_bool() == Some(true))
+                    .filter(|x| x["statistics"]["episodeFileCount"].as_i64() < x["statistics"]["episodeCount"].as_i64())
+                    .filter_map(|x| x["seasonNumber"].as_i64())
+                    .min()
+                    .context("nenhuma temporada faltando")?;
+                format!("seriesId={}&seasonNumber={season}", s["id"])
+            }
+            Kind::Episode => bail!("peça pela série"),
+        };
+        let v = summarize(&arr.releases(&filter).await?);
+        self.versions_cache.lock().await.insert((kind, id), (std::time::Instant::now(), v.clone()));
+        Ok(v)
+    }
+
     /// Onde assistir oficialmente (filme: tmdbId; série: tvdbId).
     pub async fn where_to_watch(&self, kind: Kind, id: i64) -> Result<WhereToWatch> {
         let (tmdb, cfg) = self.tmdb.as_ref().zip(self.cfg.tmdb.as_ref()).context("configure [tmdb] para ver onde assistir")?;
@@ -383,5 +484,22 @@ mod tests {
         assert_eq!(w.offers[0].providers[1].logo, None);
         // país sem nada
         assert!(offers(&Value::Null).offers.is_empty());
+    }
+
+    #[test]
+    fn explains_why_nothing_was_accepted() {
+        let cf = "Custom Formats have score 0 below Movie's profile minimum 100";
+        let rel = |seeders: i64, rejected: bool, why: &[&str]| json!({ "protocol": "torrent", "seeders": seeders, "rejected": rejected, "rejections": why });
+        let v = summarize(&[
+            rel(10, true, &[cf]),
+            rel(3, true, &[cf, "WEBDL-480p is not wanted in profile"]),
+            rel(0, true, &[cf]),
+            rel(7, true, &["Some new reason"]),
+        ]);
+        assert_eq!((v.found, v.approved, v.no_seeders), (4, 0, 1));
+        assert_eq!(v.reasons[0], ("sem áudio em português".to_owned(), 2));
+        assert_eq!(v.reasons.len(), 3);
+        assert!(v.reasons.iter().any(|(r, n)| r == "Some new reason" && *n == 1));
+        assert_eq!(summarize(&[rel(4, false, &[])]).approved, 1);
     }
 }

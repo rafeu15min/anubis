@@ -443,7 +443,7 @@ impl Orchestrator {
                 break;
             }
         }
-        let portuguese = |c: &Candidate| c.languages.iter().any(|l| l.starts_with("Portuguese"));
+        let portuguese = |c: &Candidate| c.portuguese();
         let mut video: Vec<Candidate> = all.iter().filter(|c| !portuguese(c)).cloned().collect();
         video.sort_by_key(|c| (std::cmp::Reverse(c.raw["qualityWeight"].as_i64().unwrap_or(0)), std::cmp::Reverse(c.seeders)));
         let mut audio: Vec<Candidate> = all.into_iter().filter(portuguese).collect();

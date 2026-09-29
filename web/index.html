@@ -140,10 +140,20 @@ function muxHtml(m) {
   return `<span class="state">${txt}</span>${bar}${err}${cancel}${link}`;
 }
 
+// pedido parado em "procurando": o que os indexadores têm e por que foi recusado
+function versionsText(v) {
+  if (v.approved > 0) return 'Versão aceita encontrada — o download deve começar em instantes';
+  if (v.found === 0) return 'Nenhuma versão nos indexadores agora';
+  const why = v.reasons.map(([r, n]) => `${n} ${esc(r)}`);
+  if (v.no_seeders) why.push(`${v.no_seeders} sem fontes`);
+  return `Nenhuma versão aceita: ${v.found} encontradas — ${why.join(', ')}`;
+}
+
 function statusHtml(st) {
   if (!st) return '';
   if (st.mux) return muxHtml(st.mux);
   let txt = STATE[st.state] || st.state;
+  if (st.state === 'searching' && st.versions) txt = versionsText(st.versions);
   if (st.state === 'downloading' && st.progress != null) txt += ` ${Math.round(st.progress * 100)}%` + (st.eta ? ` · falta ${esc(st.eta)}` : '');
   if (st.episodes) txt += ` · ${st.episodes[0]}/${st.episodes[1]} episódios`;
   const bar = st.progress != null && st.state !== 'available' ? `<div class="progress"><i style="width:${(st.progress * 100).toFixed(1)}%"></i></div>` : '';
@@ -354,6 +364,19 @@ function render(it, st) {
   document.querySelectorAll(`#results [data-key="${k}"] .status`).forEach((el) => { el.innerHTML = statusHtml(st); });
 }
 
+// a busca de versões é lenta (vai aos indexadores): uma por item, refeita a cada 15 min
+const versionsSeen = {};
+async function versions(it) {
+  const k = keyOf(it), c = versionsSeen[k];
+  if (c && (c.pending || Date.now() - c.at < 15 * 60e3)) return c.v;
+  versionsSeen[k] = { pending: true, v: c && c.v };
+  try {
+    const r = await fetch(`status/${it.kind}/${it.id}/versions`);
+    versionsSeen[k] = { at: Date.now(), v: r.ok ? await r.json() : null };
+  } catch { versionsSeen[k] = { at: Date.now(), v: null }; }
+  return versionsSeen[k].v;
+}
+
 async function refresh(it, openable = true) {
   try {
     const r = await fetch(`status/${it.kind}/${it.id}`);
@@ -366,6 +389,7 @@ async function refresh(it, openable = true) {
       // ainda juntando: não conta como pronto
       if (st.mux && st.mux.step !== 'done') st.state = 'searching';
     }
+    if (st.state === 'searching' && !st.mux) st.versions = await versions(it);
     render(it, st);
     if (t && st.state === 'available' && !t.done) { t.done = Date.now(); save(); }
     // pedido feito nesta página e pronto: abre o Jellyfin (uma vez)

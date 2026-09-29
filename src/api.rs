@@ -4,6 +4,7 @@
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
+//! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
@@ -57,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
         .route("/status/{kind}/{id}", get(status))
+        .route("/status/{kind}/{id}/versions", get(versions))
         .route("/watch", post(watch))
         .route("/watch/{kind}/{id}", get(|| async { Html(include_str!("../web/player.html")) }))
         .route("/watch/{kind}/{id}/video", get(video))
@@ -153,6 +155,13 @@ async fn request(State(s): State<AppState>, Json(b): Json<RequestBody>) -> Respo
 async fn status(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     match s.orch.status(kind, id).await {
         Ok(st) => Json(st).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn versions(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.versions(kind, id).await {
+        Ok(v) => Json(v).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }

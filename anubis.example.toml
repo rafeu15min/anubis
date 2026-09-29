@@ -58,6 +58,12 @@ host_media_path = "/mnt/raid0/anubis/media"
 # endereço do Jellyfin nos links abertos no navegador; a página troca o host
 # pelo mesmo que ela usa (o Jellyfin precisa escutar nesses endereços também)
 public_url = "http://10.10.10.2:8096"
+# "Abrir no Jellyfin" já logado (opcional): o Anubis abre uma sessão com este
+# usuário para cada navegador e passa pela página-ponte montada no Jellyfin
+# (infra/feuvault/media-core/jellyfin-anubis-login.html). Atenção: quem
+# alcança o Anubis entra no Jellyfin como esse usuário.
+#login_user = "rafeu"
+#login_password_file = "/home/rafeu/.config/anubis/jellyfin.pass"  # chmod 600
 
 # "Assistir agora": o Anubis baixa com o próprio motor (librqbit) e toca
 # enquanto baixa. Sem esta seção, só a busca e os pedidos funcionam.

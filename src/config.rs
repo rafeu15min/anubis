@@ -172,6 +172,10 @@ pub struct Jellyfin {
     pub host_media_path: String,
     /// endereço do Jellyfin para os links abertos no navegador
     pub public_url: Option<String>,
+    /// "Abrir no Jellyfin" já logado: o Anubis abre uma sessão com este
+    /// usuário para cada navegador (a senha fica só no arquivo, chmod 600)
+    pub login_user: Option<String>,
+    pub login_password_file: Option<PathBuf>,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {

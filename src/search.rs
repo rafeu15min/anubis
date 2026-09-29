@@ -545,6 +545,10 @@ impl Orchestrator {
         let folder = self.cfg.jellyfin_path_from_container(item["path"].as_str()?)?;
         let jf_kind = if kind == Kind::Movie { "Movie" } else { "Series" };
         let id = self.jellyfin.find_item(jf_kind, item["title"].as_str()?, &folder).await.ok()??;
+        if self.jellyfin_login.is_some() {
+            // pelo Anubis, que abre a sessão deste navegador e segue para o Jellyfin
+            return Some(format!("/jellyfin/open?next={}", crate::services::url_encode(&format!("/details?id={id}"))));
+        }
         Some(format!("{public}/web/#/details?id={id}"))
     }
 }

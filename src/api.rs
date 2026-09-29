@@ -3,6 +3,7 @@
 //! GET  /                        — página de busca
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
+//! GET  /jellyfin/open?next=/details?id=X — abre o Jellyfin já logado (sessão deste navegador)
 //! GET  /events?items=movie:ID,series:ID — estado ao vivo (SSE) desses itens
 //! GET  /requests                — pedidos e biblioteca (a lista "Pedidos" da página)
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
@@ -63,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
         .route("/events", get(events))
+        .route("/jellyfin/open", get(jellyfin_open))
         .route("/requests", get(|State(s): State<AppState>| async move { Json(s.orch.requests().await) }))
         .route("/status/{kind}/{id}", get(status))
         .route("/status/{kind}/{id}/versions", get(versions))
@@ -514,6 +516,63 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
         }
     });
     Sse::new(Rx(rx)).keep_alive(KeepAlive::default()).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct OpenQuery {
+    /// tela do Jellyfin web (ex.: "/details?id=…")
+    #[serde(default)]
+    next: String,
+}
+
+/// Identificador deste navegador (cookie de um ano): o mesmo aparelho no
+/// Jellyfin, então um novo clique substitui a sessão em vez de somar outra.
+fn device_id(headers: &HeaderMap) -> (String, bool) {
+    let from_cookie = headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().strip_prefix("anubis_jf="))
+        .find(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned);
+    match from_cookie {
+        Some(id) => (id, false),
+        None => {
+            let mut b = [0u8; 16];
+            let _ = std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom").expect("/dev/urandom"), &mut b);
+            (b.iter().map(|x| format!("{x:02x}")).collect(), true)
+        }
+    }
+}
+
+/// Nome do aparelho na lista do Jellyfin, pelo navegador que pediu.
+fn device_name(headers: &HeaderMap) -> String {
+    let ua = headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let os = ["Android", "iPhone", "iPad", "Windows", "Mac OS", "Linux"].into_iter().find(|o| ua.contains(o)).unwrap_or("navegador");
+    format!("Anubis · {os}")
+}
+
+/// "Abrir no Jellyfin" já logado: abre (ou renova) a sessão deste navegador
+/// e segue para a página-ponte do Jellyfin pelo mesmo endereço que o
+/// navegador usou para chegar aqui (cabo, rede local ou Tailscale).
+async fn jellyfin_open(State(s): State<AppState>, Query(q): Query<OpenQuery>, headers: HeaderMap) -> Response {
+    let Some((user, password)) = &s.orch.jellyfin_login else { return error(StatusCode::NOT_FOUND, "login automático do Jellyfin não configurado") };
+    let (device, new) = device_id(&headers);
+    let (token, user_id, server_id) = match s.orch.jellyfin.authenticate(user, password, &device, &device_name(&headers)).await {
+        Ok(x) => x,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let host = headers.get("host").and_then(|v| v.to_str().ok()).and_then(|h| h.rsplit_once(':').map_or(Some(h), |(a, _)| Some(a))).unwrap_or("10.10.10.2");
+    let port = reqwest::Url::parse(&s.orch.cfg.jellyfin.url).ok().and_then(|u| u.port_or_known_default()).unwrap_or(8096);
+    let next = if q.next.starts_with('/') { q.next.as_str() } else { "/home" };
+    let enc = crate::services::url_encode;
+    let to = format!("http://{host}:{port}/web/anubis-login.html#t={}&u={}&s={}&d={device}&next={}", enc(&token), enc(&user_id), enc(&server_id), enc(next));
+    let mut res = (StatusCode::FOUND, [("location", to), ("cache-control", "no-store".to_owned())]).into_response();
+    if new {
+        res.headers_mut().insert("set-cookie", format!("anubis_jf={device}; Max-Age=31536000; Path=/; SameSite=Lax; HttpOnly").parse().unwrap());
+    }
+    res
 }
 
 #[derive(serde::Deserialize)]

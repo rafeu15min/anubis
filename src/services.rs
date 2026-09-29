@@ -487,6 +487,16 @@ struct Session {
 }
 
 impl Jellyfin {
+    /// Abre uma sessão de `user` para o aparelho `device` (como um login no
+    /// Jellyfin web; o mesmo aparelho substitui a sessão anterior dele).
+    /// Devolve (token, id do usuário, id do servidor).
+    pub async fn authenticate(&self, user: &str, password: &str, device: &str, device_name: &str) -> Result<(String, String, String)> {
+        let auth = format!("MediaBrowser Client=\"Anubis\", Device=\"{device_name}\", DeviceId=\"{device}\", Version=\"{}\"", env!("CARGO_PKG_VERSION"));
+        let req = self.http.post(format!("{}/Users/AuthenticateByName", self.base)).header("Authorization", auth).json(&json!({ "Username": user, "Pw": password }));
+        let v: Value = send(req, "Jellyfin login").await?;
+        let get = |p: &str| v.pointer(p).and_then(Value::as_str).map(str::to_owned).with_context(|| format!("Jellyfin login: resposta sem {p}"));
+        Ok((get("/AccessToken")?, get("/User/Id")?, get("/ServerId")?))
+    }
     pub fn new(base: &str, key: &str) -> Result<Self> {
         Ok(Self { base: base.trim_end_matches('/').into(), key: key.into(), http: http()? })
     }

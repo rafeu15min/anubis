@@ -35,6 +35,8 @@ services:
     volumes:
       - /home/rafeu/media-core/config/jellyfin:/config
       - /mnt/raid0/anubis/media:/media:ro
+      # página-ponte do Anubis: "Abrir no Jellyfin" já logado
+      - /home/rafeu/media-core/jellyfin-anubis-login.html:/usr/share/jellyfin/web/anubis-login.html:ro
     restart: unless-stopped
     networks:
       - proxy-network

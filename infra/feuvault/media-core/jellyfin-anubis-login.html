@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  Página-ponte do Anubis, servida pelo próprio Jellyfin em /web/anubis-login.html
+  (montada no container pelo compose). O Anubis abre uma sessão no Jellyfin
+  para este navegador e manda para cá, no fragmento da URL (#…, que não vai ao
+  servidor): t = token, u = usuário, s = servidor, d = aparelho, next = tela.
+  Ela grava a sessão no mesmo formato que o Jellyfin web usa
+  (localStorage "jellyfin_credentials" e "_deviceId2") e abre a tela já logada.
+  Se o formato mudar numa atualização do Jellyfin, ele só volta a pedir login.
+-->
+<html lang="pt-BR">
+<head><meta charset="utf-8"><title>Entrando no Jellyfin…</title></head>
+<body style="background:#101010">
+<script>
+(function () {
+  var p = new URLSearchParams(location.hash.slice(1));
+  var next = p.get('next') || '/home';
+  if (next.charAt(0) !== '/') next = '/home';
+  if (p.get('t') && p.get('u') && p.get('s')) {
+    var c = {};
+    try { c = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}'); } catch (e) {}
+    c.Servers = (c.Servers || []).filter(function (x) { return x.Id !== p.get('s'); });
+    c.Servers.push({
+      Id: p.get('s'),
+      AccessToken: p.get('t'),
+      UserId: p.get('u'),
+      ManualAddress: location.origin,
+      LastConnectionMode: 2,
+      DateLastAccessed: Date.now()
+    });
+    localStorage.setItem('jellyfin_credentials', JSON.stringify(c));
+    // o aparelho da sessão que o Anubis abriu
+    if (p.get('d')) localStorage.setItem('_deviceId2', p.get('d'));
+  }
+  // replace: o fragmento com o token não fica no histórico
+  location.replace('/web/#' + next);
+})();
+</script>
+</body>
+</html>

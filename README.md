@@ -100,6 +100,16 @@ Radarr/Sonarr), independente de quantos itens acompanham. Medido com 2 abas × 2
 46 chamadas ao Radarr/Sonarr/Jellyfin (em regime, zero por consulta) e de
 22 ms para 1,4 ms por `/status`. O `/health` mostra o total de chamadas.
 
+**Jellyfin já logado** (opcional, `login_user` + `login_password_file` em
+`[jellyfin]`): o "Abrir no Jellyfin" passa por `/jellyfin/open`, que abre uma
+sessão no Jellyfin para aquele navegador (um identificador fixo num cookie:
+novos cliques renovam a mesma sessão em vez de somar aparelhos) e segue para
+uma página-ponte servida pelo próprio Jellyfin (`/web/anubis-login.html`,
+montada pelo compose). Ela grava a sessão no formato do Jellyfin web e abre o
+item — pelo mesmo caminho (cabo, rede local, Tailscale) que o navegador usou.
+A senha fica só no servidor. Quem alcança o Anubis entra no Jellyfin como esse
+usuário.
+
 **Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
 áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
@@ -138,6 +148,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
 | `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
 | `GET /requests` | pedidos e biblioteca (a lista "Seus filmes e séries", igual em qualquer aparelho) |
+| `GET /jellyfin/open?next=…` | abre o Jellyfin já logado (sessão deste navegador, pela página-ponte) |
 | `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
 | `GET /status/{kind}/{id}/versions` | pedido parado: versões encontradas e motivos das recusas |
 | `POST /watch` | assistir agora: `{"kind":"movie","id":N,"guid"?:…}` |

@@ -21,6 +21,8 @@ pub struct Orchestrator {
     pub(crate) jellyfin: Jellyfin,
     pub(crate) bazarr: Option<Bazarr>,
     pub(crate) tmdb: Option<Tmdb>,
+    /// "Abrir no Jellyfin" já logado: (usuário, senha)
+    pub(crate) jellyfin_login: Option<(String, String)>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
     pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
     /// "juntar dublagem" em andamento ou que falharam, por tmdbId
@@ -50,7 +52,12 @@ impl Orchestrator {
     pub fn new(cfg: Config, streamer: Option<std::sync::Arc<Streamer>>) -> Result<Self> {
         let password = std::fs::read_to_string(&cfg.qbittorrent.password_file)
             .with_context(|| format!("lendo {}", cfg.qbittorrent.password_file.display()))?;
+        let jellyfin_login = match (&cfg.jellyfin.login_user, &cfg.jellyfin.login_password_file) {
+            (Some(u), Some(f)) => Some((u.clone(), std::fs::read_to_string(f).with_context(|| format!("lendo {}", f.display()))?.trim().to_owned())),
+            _ => None,
+        };
         Ok(Self {
+            jellyfin_login,
             sonarr: cfg.sonarr.as_ref().map(|a| Arr::new("Sonarr", &a.url, &a.api_key)).transpose()?,
             radarr: cfg.radarr.as_ref().map(|a| Arr::new("Radarr", &a.url, &a.api_key)).transpose()?,
             qbit: QBittorrent::new(&cfg.qbittorrent.url, &cfg.qbittorrent.username, password.trim())?,

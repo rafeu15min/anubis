@@ -81,3 +81,8 @@ to = "http://10.10.10.2:9696"
 [bazarr]
 url = "http://10.10.10.2:6767"
 api_key = ""  # Bazarr → Settings → General → API Key
+
+# "Onde assistir" (opcional): serviços de streaming do país, pelo TMDB
+[tmdb]
+api_key = ""  # themoviedb.org → Configurações → API: a chave (v3) ou o token de leitura
+region = "BR"

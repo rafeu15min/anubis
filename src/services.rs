@@ -239,6 +239,44 @@ impl Bazarr {
     }
 }
 
+// ---------------------------------------------------------------- TMDB
+
+/// Só o "onde assistir": os serviços de streaming de um país (o TMDB recebe
+/// esses dados do JustWatch).
+pub struct Tmdb {
+    key: String,
+    http: Client,
+}
+
+impl Tmdb {
+    pub fn new(key: &str) -> Result<Self> {
+        Ok(Self { key: key.trim().into(), http: http()? })
+    }
+
+    pub async fn get(&self, path: &str) -> Result<Value> {
+        let url = format!("https://api.themoviedb.org/3/{path}");
+        // "Token de leitura" (v4, um JWT) vai no cabeçalho; a "Chave da API" (v3), na URL
+        let req = if self.key.starts_with("eyJ") {
+            self.http.get(url).bearer_auth(&self.key)
+        } else {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            self.http.get(format!("{url}{sep}api_key={}", url_encode(&self.key)))
+        };
+        // o erro do reqwest traz a URL, e a URL traz a chave
+        let res = req.send().await.map_err(|e| anyhow::anyhow!("TMDB {path}: sem resposta: {}", e.without_url()))?;
+        let status = res.status();
+        if !status.is_success() {
+            bail!("TMDB {path}: HTTP {status}");
+        }
+        res.json().await.map_err(|e| anyhow::anyhow!("TMDB {path}: resposta inesperada: {}", e.without_url()))
+    }
+
+    /// Id do TMDB de uma série, pelo id do TVDB (o que o Sonarr usa).
+    pub async fn tv_id(&self, tvdb: i64) -> Result<Option<i64>> {
+        Ok(self.get(&format!("find/{tvdb}?external_source=tvdb_id")).await?["tv_results"][0]["id"].as_i64())
+    }
+}
+
 // ---------------------------------------------------------------- qBittorrent
 
 /// De onde vem um torrent: link magnet ou o arquivo .torrent.

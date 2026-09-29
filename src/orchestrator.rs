@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::disk;
 use crate::planner::{self, Media, MediaRef, Plan, Rules, Torrent, TorrentFile, Watching};
-use crate::services::{Arr, Bazarr, Jellyfin, QBittorrent};
+use crate::services::{Arr, Bazarr, Jellyfin, QBittorrent, Tmdb};
 use crate::stream::Streamer;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -20,6 +20,7 @@ pub struct Orchestrator {
     pub(crate) qbit: QBittorrent,
     pub(crate) jellyfin: Jellyfin,
     pub(crate) bazarr: Option<Bazarr>,
+    pub(crate) tmdb: Option<Tmdb>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
     pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
     /// "juntar dublagem" em andamento ou que falharam, por tmdbId
@@ -51,6 +52,7 @@ impl Orchestrator {
             qbit: QBittorrent::new(&cfg.qbittorrent.url, &cfg.qbittorrent.username, password.trim())?,
             jellyfin: Jellyfin::new(&cfg.jellyfin.url, &cfg.jellyfin.api_key)?,
             bazarr: cfg.bazarr.as_ref().map(|b| Bazarr::new(&b.url, &b.api_key)).transpose()?,
+            tmdb: cfg.tmdb.as_ref().map(|t| Tmdb::new(&t.api_key)).transpose()?,
             streamer,
             muxes: Mutex::new(HashMap::new()),
             cfg,

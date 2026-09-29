@@ -92,6 +92,47 @@ pub struct Status {
     pub jellyfin_url: Option<String>,
 }
 
+/// Onde o título passa oficialmente (streaming do país configurado).
+#[derive(Debug, Serialize)]
+pub struct WhereToWatch {
+    /// página do TMDB com os links para cada serviço
+    pub link: Option<String>,
+    pub offers: Vec<Offer>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Offer {
+    /// "assinatura", "grátis", "grátis com anúncios", "aluguel", "compra"
+    pub kind: &'static str,
+    pub providers: Vec<Provider>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Provider {
+    pub name: String,
+    pub logo: Option<String>,
+}
+
+/// As ofertas de um país na resposta de `watch/providers`, na ordem que
+/// interessa (assinatura antes de comprar), cada uma na ordem do TMDB.
+fn offers(country: &Value) -> WhereToWatch {
+    let kinds = [("flatrate", "assinatura"), ("free", "grátis"), ("ads", "grátis com anúncios"), ("rent", "aluguel"), ("buy", "compra")];
+    let offers = kinds
+        .iter()
+        .filter_map(|(key, kind)| {
+            let providers: Vec<Provider> = country[*key]
+                .as_array()?
+                .iter()
+                .filter_map(|p| {
+                    Some(Provider { name: p["provider_name"].as_str()?.to_owned(), logo: p["logo_path"].as_str().map(|l| format!("https://image.tmdb.org/t/p/w92{l}")) })
+                })
+                .collect();
+            (!providers.is_empty()).then_some(Offer { kind, providers })
+        })
+        .collect();
+    WhereToWatch { link: country["link"].as_str().map(str::to_owned), offers }
+}
+
 const LIMIT: usize = 12;
 
 fn found(kind: Kind, v: &Value) -> Option<Found> {
@@ -301,6 +342,17 @@ impl Orchestrator {
         Ok(Episodes { title: series["title"].as_str().unwrap_or_default().to_owned(), seasons })
     }
 
+    /// Onde assistir oficialmente (filme: tmdbId; série: tvdbId).
+    pub async fn where_to_watch(&self, kind: Kind, id: i64) -> Result<WhereToWatch> {
+        let (tmdb, cfg) = self.tmdb.as_ref().zip(self.cfg.tmdb.as_ref()).context("configure [tmdb] para ver onde assistir")?;
+        let path = match kind {
+            Kind::Movie => format!("movie/{id}/watch/providers"),
+            Kind::Series => format!("tv/{}/watch/providers", tmdb.tv_id(id).await?.context("série não encontrada no TMDB")?),
+            Kind::Episode => bail!("peça pela série"),
+        };
+        Ok(offers(&tmdb.get(&path).await?["results"][&cfg.region]))
+    }
+
     /// Link do item no Jellyfin, se ele já o conhece.
     pub(crate) async fn jellyfin_url(&self, kind: Kind, item: &Value) -> Option<String> {
         let public = self.cfg.jellyfin.public_url.as_deref().unwrap_or(&self.cfg.jellyfin.url).trim_end_matches('/');
@@ -308,5 +360,28 @@ impl Orchestrator {
         let jf_kind = if kind == Kind::Movie { "Movie" } else { "Series" };
         let id = self.jellyfin.find_item(jf_kind, item["title"].as_str()?, &folder).await.ok()??;
         Some(format!("{public}/web/#/details?id={id}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orders_offers_subscription_first_and_skips_empty() {
+        let br = json!({
+            "link": "https://www.themoviedb.org/movie/1/watch?locale=BR",
+            "buy": [{ "provider_name": "Apple TV", "logo_path": "/a.jpg" }],
+            "rent": [],
+            "flatrate": [{ "provider_name": "Netflix", "logo_path": "/n.jpg" }, { "provider_name": "Globoplay" }],
+        });
+        let w = offers(&br);
+        assert_eq!(w.link.as_deref(), Some("https://www.themoviedb.org/movie/1/watch?locale=BR"));
+        let kinds: Vec<_> = w.offers.iter().map(|o| o.kind).collect();
+        assert_eq!(kinds, ["assinatura", "compra"]);
+        assert_eq!(w.offers[0].providers[0].logo.as_deref(), Some("https://image.tmdb.org/t/p/w92/n.jpg"));
+        assert_eq!(w.offers[0].providers[1].logo, None);
+        // país sem nada
+        assert!(offers(&Value::Null).offers.is_empty());
     }
 }

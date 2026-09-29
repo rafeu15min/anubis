@@ -10,7 +10,8 @@
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
-//! GET  /mux/{tmdb}/options      — versões para juntar: vídeo e dublagem PT-BR
+//! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
+//! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
 //! GET  /mux/{tmdb}  ·  DELETE   — andamento · desistir (apaga os downloads)
 //! GET  /preferencias            — página de preferências
@@ -65,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
+        .route("/where/{kind}/{id}", get(where_to_watch))
         .route("/mux", post(start_mux))
         .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
         .route("/mux/{tmdb}/options", get(mux_options))
@@ -352,6 +354,16 @@ async fn put_prefs(State(s): State<AppState>, Json(p): Json<crate::prefs::Prefs>
 async fn episodes(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
     match s.orch.episodes(tvdb).await {
         Ok(e) => Json(e).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn where_to_watch(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    if s.orch.tmdb.is_none() {
+        return error(StatusCode::NOT_FOUND, "configure [tmdb] para ver onde assistir");
+    }
+    match s.orch.where_to_watch(kind, id).await {
+        Ok(w) => Json(w).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }

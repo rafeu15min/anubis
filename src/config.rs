@@ -21,6 +21,21 @@ pub struct Config {
     pub jellyfin: Jellyfin,
     pub stream: Option<Stream>,
     pub bazarr: Option<BazarrCfg>,
+    pub tmdb: Option<TmdbCfg>,
+}
+
+/// "Onde assistir": serviços de streaming do país, pelo TMDB.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TmdbCfg {
+    /// chave da API (v3) ou token de leitura (v4)
+    pub api_key: String,
+    #[serde(default = "default_region")]
+    pub region: String,
+}
+
+fn default_region() -> String {
+    "BR".into()
 }
 
 #[derive(Debug, Deserialize)]

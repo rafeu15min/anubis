@@ -74,6 +74,12 @@ com o idioma marcado como PT-BR, e os dois downloads são apagados. O ffmpeg
 roda numa cópia descartável da imagem do Jellyfin (`docker run`) com o
 `/data` montado como o Radarr o vê.
 
+**Onde assistir** (opcional, com `[tmdb]` na config): quando não há versão
+para baixar — no "Assistir" sem versão aceita e no "Juntar dublagem" sem
+áudio em português —, a página mostra em quais serviços de streaming do
+Brasil o título está (assinatura, grátis, aluguel, compra), com os dados do
+JustWatch via TMDB. O TMDB não informa o idioma do áudio.
+
 **Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
 áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
@@ -94,6 +100,7 @@ Escuta no link direto PC ↔ FeuVault (`10.10.10.2:7070`), fora da rede da casa.
 | `GET /watch/{kind}/{id}` | player |
 | `GET /watch/{kind}/{id}/video` | o vídeo, com Range (toca enquanto baixa) |
 | `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
+| `GET /where/{kind}/{id}` | onde assistir no Brasil (filme: tmdbId; série: tvdbId) |
 | `GET /mux/{tmdb}/options` | versões para juntar: vídeo e dublagem PT-BR |
 | `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
 | `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |

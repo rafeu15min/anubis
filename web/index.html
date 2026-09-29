@@ -53,6 +53,10 @@
   .err { color: #ff8a8a; }
   label.rel { cursor: pointer; }
   label.rel input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .where { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; padding: 6px 0; }
+  .where .prov { display: flex; flex-wrap: wrap; gap: 6px; }
+  .where .prov span { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 3px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .where img { width: 26px; height: 26px; border-radius: 6px; }
   dialog h4 { margin: 16px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
   @media (max-width: 480px) { .card { grid-template-columns: 72px 1fr; } .card img, .noposter { width: 72px; } }
 </style>
@@ -76,6 +80,7 @@
   <h3 id="picktitle"></h3>
   <p class="meta" id="pickmsg"></p>
   <div id="rels"></div>
+  <div id="pickwhere"></div>
   <div class="row" style="justify-content:flex-end"><button id="pickclose">Fechar</button></div>
 </dialog>
 <dialog id="mux">
@@ -225,6 +230,9 @@ async function watch(k, guid) {
       $('#pickmsg').textContent = some
         ? 'O Radarr recusou todas as versões encontradas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
         : 'Os indexadores não têm nenhuma versão deste filme com fontes (pessoas compartilhando) agora.';
+      // episódio: o "onde assistir" é da série
+      if (kind === 'episode') loadWhere($('#pickwhere'), 'series', currentTvdb);
+      else loadWhere($('#pickwhere'), kind, id);
       $('#pick').showModal();
     } else alert(`Não deu para assistir: ${d.error}`);
   } finally {
@@ -232,6 +240,24 @@ async function watch(k, guid) {
   }
 }
 $('#pickclose').onclick = () => $('#pick').close();
+
+// onde o título passa oficialmente no Brasil (sem [tmdb] na config, some)
+async function loadWhere(el, kind, id) {
+  el.innerHTML = '';
+  if (!id) return;
+  try {
+    const r = await fetch(`where/${kind}/${id}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const rows = d.offers.map((o) => `<small class="meta">${esc(o.kind)}</small><div class="prov">${o.providers.map((p) =>
+      `<span>${p.logo ? `<img src="${esc(p.logo)}" alt="">` : ''}${esc(p.name)}</span>`).join('')}</div>`).join('');
+    el.innerHTML = `<h4>Onde assistir no Brasil</h4>`
+      + (rows ? `<div class="where">${rows}</div>
+          <p class="meta">O TMDB não informa o idioma do áudio; nos serviços brasileiros a dublagem costuma estar disponível.
+          ${d.link ? `<a href="${esc(d.link)}" target="_blank" rel="noopener">Links para cada serviço</a> · ` : ''}dados do JustWatch via TMDB</p>`
+        : '<p class="meta">Não está em nenhum serviço de streaming no Brasil agora.</p>');
+  } catch {}
+}
 
 // "juntar dublagem": escolher o vídeo e a dublagem
 async function muxOptions(id, title) {
@@ -248,7 +274,8 @@ async function muxOptions(id, title) {
         <div><b>${esc(c.title)}</b><small>${esc(c.quality)} · ${c.size ? size(c.size) : 'tamanho não informado'} · ${c.seeders} fontes · ${esc(c.languages.join(', ') || 'idioma não informado')}</small></div>
         <input type="radio" name="${name}" value="${esc(c.guid)}" ${checked ? 'checked' : ''}></label>`;
     if (!d.audio.length || !d.video.length) {
-      $('#muxbody').innerHTML = `<p class="msg">${d.audio.length ? 'Nenhuma versão sem dublagem para usar como vídeo.' : 'Nenhuma versão com áudio em português nos indexadores agora.'}</p>`;
+      $('#muxbody').innerHTML = `<p class="msg">${d.audio.length ? 'Nenhuma versão sem dublagem para usar como vídeo.' : 'Nenhuma versão com áudio em português nos indexadores agora.'}</p><div id="muxwhere"></div>`;
+      if (!d.audio.length) loadWhere($('#muxwhere'), 'movie', id);
       return;
     }
     $('#muxbody').innerHTML = `<h4>Vídeo (a imagem)</h4>${d.video.map((c) => row(c, 'v', false)).join('')}
@@ -289,7 +316,9 @@ async function muxCancel(id) {
 }
 
 // temporadas e episódios de uma série
+let currentTvdb = null;
 async function episodes(tvdb, title) {
+  currentTvdb = tvdb;
   $('#epstitle').textContent = title;
   $('#epslist').innerHTML = '<p class="msg">Carregando episódios…</p>';
   $('#eps').showModal();

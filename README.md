@@ -91,7 +91,12 @@ mantido pelo servidor e as rotas respondem da memória: uma consulta por
 diferença ao qBittorrent a cada 2 s (só com algo na fila), as listas do
 Radarr/Sonarr a cada minuto ou na hora de um webhook (versão pega, importada,
 item adicionado), e o link do Jellyfin calculado uma vez por item. Só trabalha
-enquanto alguém acompanha. Medido com 2 abas × 2 itens por 60 s: de 240 para
+enquanto alguém acompanha. A página recebe o estado ao vivo por uma conexão
+SSE (`/events`, uma por aba): tudo ao conectar, depois só o que muda — um
+pedido aparece em todas as abas junto com a resposta (medido: ~0,3 s, o tempo
+do próprio Radarr); sem a conexão, volta a consultar a cada 3 s. Duas abas
+abertas por um minuto custam ~12 chamadas externas (as listas do
+Radarr/Sonarr), independente de quantos itens acompanham. Medido com 2 abas × 2 itens por 60 s: de 240 para
 46 chamadas ao Radarr/Sonarr/Jellyfin (em regime, zero por consulta) e de
 22 ms para 1,4 ms por `/status`. O `/health` mostra o total de chamadas.
 

@@ -3,6 +3,7 @@
 //! GET  /                        — página de busca
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
+//! GET  /events?items=movie:ID,series:ID — estado ao vivo (SSE) desses itens
 //! GET  /requests                — pedidos e biblioteca (a lista "Pedidos" da página)
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
 //! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
@@ -38,6 +39,7 @@ use axum::body::Body;
 use tokio_util::io::ReaderStream;
 use axum::extract::{Path, Query, State};
 use axum::response::Html;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -60,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
+        .route("/events", get(events))
         .route("/requests", get(|State(s): State<AppState>| async move { Json(s.orch.requests().await) }))
         .route("/status/{kind}/{id}", get(status))
         .route("/status/{kind}/{id}/versions", get(versions))
@@ -440,6 +443,77 @@ async fn cancel_mux(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Respons
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => error(StatusCode::CONFLICT, format!("{e:#}")),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    /// "movie:TMDB,series:TVDB,…"
+    #[serde(default)]
+    items: String,
+}
+
+/// Canal do SSE como Stream (a conexão fecha quando o navegador sai).
+struct Rx(tokio::sync::mpsc::Receiver<Event>);
+
+impl futures_core::Stream for Rx {
+    type Item = Result<Event, std::convert::Infallible>;
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx).map(|e| e.map(Ok))
+    }
+}
+
+/// Estado ao vivo (SSE) dos itens pedidos: tudo ao conectar, depois só o que
+/// muda — conferido na memória da central a cada 2 s e na hora em que ela se
+/// atualiza (webhook do Radarr/Sonarr, qBittorrent). Inclui o "juntar dublagem".
+async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Response {
+    let keys: Vec<(Kind, i64)> = q
+        .items
+        .split(',')
+        .filter_map(|k| {
+            let (kind, id) = k.trim().split_once(':')?;
+            let kind = match kind {
+                "movie" => Kind::Movie,
+                "series" => Kind::Series,
+                _ => return None,
+            };
+            Some((kind, id.parse().ok()?))
+        })
+        .take(200)
+        .collect();
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    tokio::spawn(async move {
+        let mut sent: std::collections::HashMap<(Kind, i64), serde_json::Value> = Default::default();
+        let mut changed = s.orch.live.changed.subscribe();
+        loop {
+            // conexão aberta = alguém acompanhando: a central segue viva
+            s.orch.live.touch();
+            for &(kind, id) in &keys {
+                let mut v = match s.orch.status(kind, id).await {
+                    Ok(st) => json!(st),
+                    Err(e) => json!({ "error": format!("{e:#}") }),
+                };
+                if kind == Kind::Movie
+                    && let Some(m) = s.orch.mux_status(id).await
+                {
+                    v["mux"] = m;
+                }
+                if sent.get(&(kind, id)) == Some(&v) {
+                    continue;
+                }
+                let data = json!({ "key": format!("{}:{id}", kind_str(kind)), "status": v });
+                if tx.send(Event::default().event("status").data(data.to_string())).await.is_err() {
+                    return;
+                }
+                sent.insert((kind, id), v);
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = changed.recv() => {}
+                _ = tx.closed() => return,
+            }
+        }
+    });
+    Sse::new(Rx(rx)).keep_alive(KeepAlive::default()).into_response()
 }
 
 #[derive(serde::Deserialize)]

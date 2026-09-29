@@ -352,7 +352,7 @@ impl Orchestrator {
                 Kind::Series | Kind::Episode => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
             };
             arr.command(cmd).await?;
-            self.live.dirty.notify_one();
+            crate::live::refresh_arr(self).await;
             return self.status(kind, id).await;
         }
 
@@ -378,8 +378,9 @@ impl Orchestrator {
             }
         }
         arr.add(what, item).await?;
-        // a central refaz as listas agora (senão o item novo só entraria em até 1 min)
-        self.live.dirty.notify_one();
+        // a central refaz as listas antes de responder (senão o item novo
+        // pareceria ausente até a próxima atualização)
+        crate::live::refresh_arr(self).await;
         self.status(kind, id).await
     }
 
@@ -403,9 +404,13 @@ impl Orchestrator {
             }
             return Ok(st);
         }
+        if snap.fresh() {
+            // a central está em dia e não o tem: não está no Radarr/Sonarr
+            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None });
+        }
         drop(snap);
 
-        // fora da central (acabou de ser pedido, ou ela está parada): na hora
+        // central parada (ninguém acompanhava): na hora
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
         let Some(item) = arr.find(what, id_param, id).await? else {

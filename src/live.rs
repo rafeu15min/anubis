@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tracing::warn;
 
 /// sem acesso por este tempo, a central para de consultar
@@ -64,6 +64,8 @@ pub struct Live {
     pub(crate) dirty: Notify,
     /// alguém voltou a acompanhar depois de um tempo parado
     woke: Notify,
+    /// a central acabou de se atualizar: as conexões ao vivo conferem na hora
+    pub(crate) changed: broadcast::Sender<()>,
 }
 
 impl Default for Live {
@@ -76,6 +78,7 @@ impl Default for Live {
             last_access: std::sync::Mutex::new(None),
             dirty: Notify::new(),
             woke: Notify::new(),
+            changed: broadcast::channel(16).0,
         }
     }
 }
@@ -129,10 +132,11 @@ pub async fn run(orch: Arc<Orchestrator>) {
             refresh_arr(&orch).await;
             last_arr = Some(Instant::now());
         }
-        // o progresso do qBittorrent só importa com algo na fila do Radarr/Sonarr
+        // o progresso do qBittorrent só importa com algo baixando na fila do
+        // Radarr/Sonarr (um item concluído, esperando import, não muda mais)
         let downloading = {
             let s = live.arr.lock().await;
-            !s.movie_queue.is_empty() || !s.series_queue.is_empty()
+            s.movie_queue.iter().chain(&s.series_queue).any(|q| q["status"] != "completed")
         };
         if downloading {
             refresh_qbit(&orch).await;
@@ -151,7 +155,7 @@ async fn get(arr: Option<&crate::services::Arr>, path: &str) -> anyhow::Result<V
     }
 }
 
-async fn refresh_arr(orch: &Orchestrator) {
+pub(crate) async fn refresh_arr(orch: &Orchestrator) {
     let (movies, series, mq, sq) = tokio::join!(
         get(orch.radarr.as_ref(), "movie"),
         get(orch.sonarr.as_ref(), "series"),
@@ -161,6 +165,7 @@ async fn refresh_arr(orch: &Orchestrator) {
     match (movies, series, mq, sq) {
         (Ok(movies), Ok(series), Ok(movie_queue), Ok(series_queue)) => {
             *orch.live.arr.lock().await = Snapshot { movies, series, movie_queue, series_queue, at: Some(Instant::now()) };
+            let _ = orch.live.changed.send(());
         }
         (m, s, q1, q2) => {
             let why: Vec<String> = [m.err(), s.err(), q1.err(), q2.err()].into_iter().flatten().map(|e| format!("{e:#}")).collect();
@@ -175,6 +180,10 @@ async fn refresh_qbit(orch: &Orchestrator) {
         Ok(d) => {
             merge(&mut *orch.live.torrents.lock().await, &d);
             *orch.live.rid.lock().await = d["rid"].as_u64().unwrap_or(0);
+            // resposta só com o rid = nada mudou
+            if d.as_object().is_some_and(|o| o.len() > 1) {
+                let _ = orch.live.changed.send(());
+            }
         }
         Err(e) => warn!("central: qBittorrent não respondeu: {e:#}"),
     }

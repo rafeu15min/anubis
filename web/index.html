@@ -125,7 +125,11 @@ const jf = (u) => { try { const x = new URL(u); x.hostname = location.hostname; 
 const KEY = 'anubis.pedidos';
 let tracked = {};
 try { tracked = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(tracked)); } catch {} };
+const save = () => {
+  try { localStorage.setItem(KEY, JSON.stringify(tracked)); } catch {}
+  // a lista mudou: a conexão ao vivo passa a cobrir os itens novos
+  if (typeof watchLive === 'function') watchLive();
+};
 const keyOf = (it) => `${it.kind}:${it.id}`;
 
 const STATE = {
@@ -413,6 +417,7 @@ async function versions(it) {
   return versionsSeen[k].v;
 }
 
+// consulta avulsa (resultado de busca, ou sem a conexão ao vivo)
 async function refresh(it, openable = true) {
   try {
     const r = await fetch(`status/${it.kind}/${it.id}`);
@@ -421,20 +426,54 @@ async function refresh(it, openable = true) {
     const t = tracked[keyOf(it)];
     if (t && t.mux) {
       const m = await fetch(`mux/${it.id}`);
-      if (m.ok) st.mux = { ...(await m.json()), tmdb: it.id };
-      // ainda juntando: não conta como pronto
-      if (st.mux && st.mux.step !== 'done') st.state = 'searching';
+      if (m.ok) st.mux = await m.json();
     }
-    if (st.state === 'searching' && !st.mux) st.versions = await versions(it);
-    render(it, st);
-    if (t && st.state === 'available' && !t.done) { t.done = Date.now(); save(); }
-    // pedido feito nesta página e pronto: abre o Jellyfin (uma vez)
-    if (openable && t && t.openWhenReady && st.state === 'available' && st.jellyfin_url) {
-      t.openWhenReady = false;
-      save();
-      location.href = jf(st.jellyfin_url);
-    }
+    await apply(it, st, openable);
   } catch {}
+}
+
+// aplica um estado (da consulta ou da conexão ao vivo) ao cartão
+async function apply(it, st, openable = true) {
+  const t = tracked[keyOf(it)];
+  if (st.mux) {
+    st.mux.tmdb = it.id;
+    // ainda juntando: não conta como pronto
+    if (st.mux.step !== 'done') st.state = 'searching';
+  }
+  if (st.state === 'searching' && !st.mux) st.versions = await versions(it);
+  render(it, st);
+  if (t && st.state === 'available' && !t.done) { t.done = Date.now(); save(); }
+  // pedido feito nesta página e pronto: abre o Jellyfin (uma vez)
+  if (openable && t && t.openWhenReady && st.state === 'available' && st.jellyfin_url) {
+    t.openWhenReady = false;
+    save();
+    location.href = jf(st.jellyfin_url);
+  }
+}
+
+// estado ao vivo: uma conexão por aba (SSE). O servidor manda o estado de
+// cada item ao conectar e depois só o que muda; sem ela (ou enquanto ela
+// reconecta), consulta a cada 3 s o que ainda não está pronto.
+let stream = null, streamKeys = '', pollTimer = null;
+function fallbackPolling(on) {
+  if (on && !pollTimer) pollTimer = setInterval(poll, 3000);
+  if (!on && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+function watchLive() {
+  const keys = Object.keys(tracked).filter((k) => k.startsWith('movie:') || k.startsWith('series:')).sort().join(',');
+  if (stream && keys === streamKeys) return;
+  streamKeys = keys;
+  if (stream) { stream.close(); stream = null; }
+  if (!keys) return;
+  if (!window.EventSource) { fallbackPolling(true); return; }
+  stream = new EventSource(`events?items=${encodeURIComponent(keys)}`);
+  stream.addEventListener('status', (e) => {
+    const d = JSON.parse(e.data);
+    const it = tracked[d.key];
+    if (it && !d.status.error) apply(it, d.status);
+  });
+  stream.onopen = () => fallbackPolling(false);
+  stream.onerror = () => fallbackPolling(true);
 }
 
 // a cada 3 s, só o que ainda não está pronto (cada consulta vai ao Radarr/Sonarr)
@@ -453,7 +492,6 @@ async function loadRequests() {
       if (tracked[k]) continue;
       tracked[k] = { ...it, requested: true };
       render(tracked[k], null);
-      refresh(tracked[k], false);
     }
     save();
   } catch {}
@@ -488,9 +526,9 @@ document.addEventListener('click', (e) => {
 });
 
 prune();
-for (const it of Object.values(tracked)) { render(it, null); refresh(it); }
+for (const it of Object.values(tracked)) render(it, null);
+watchLive();
 loadRequests();
-setInterval(poll, 3000);
 </script>
 </body>
 </html>

@@ -6,6 +6,9 @@ services:
     image: felipemarinho97/torrent-indexer:latest
     container_name: torrent-indexer
     restart: unless-stopped
+    # espera o FlareSolverr: se sobe antes dele (boot do servidor), fica sem
+    # sessões e Comando/Starck passam a responder só "challenge"
+    entrypoint: ["/bin/sh", "-c", "until wget -q -O /dev/null http://flaresolverr:8191/; do sleep 2; done; exec /app/torrent-indexer"]
     environment:
       - LOG_LEVEL=1
       - REDIS_HOST=torrent-indexer-redis

@@ -14,8 +14,17 @@ fn http() -> Result<Client> {
     Ok(Client::builder().timeout(Duration::from_secs(30)).cookie_store(true).build()?)
 }
 
+/// Chamadas feitas ao Radarr/Sonarr/qBittorrent/Jellyfin/Bazarr/TMDB desde o
+/// início (GET /health) — para medir a carga que o Anubis gera neles.
+pub static UPSTREAM_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn counted(req: RequestBuilder) -> RequestBuilder {
+    UPSTREAM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    req
+}
+
 async fn send<T: DeserializeOwned>(req: RequestBuilder, what: &str) -> Result<T> {
-    let res = req.send().await.with_context(|| format!("{what}: sem resposta"))?;
+    let res = counted(req).send().await.with_context(|| format!("{what}: sem resposta"))?;
     let status = res.status();
     if !status.is_success() {
         bail!("{what}: HTTP {status}: {}", res.text().await.unwrap_or_default());
@@ -238,7 +247,7 @@ impl Bazarr {
 
     /// Grava configurações (o mesmo formulário que a tela do Bazarr usa).
     pub async fn save(&self, form: &[(&str, String)]) -> Result<()> {
-        let res = self.http.post(format!("{}/api/system/settings", self.base)).header("X-API-KEY", &self.key).form(form).send().await.context("Bazarr: sem resposta")?;
+        let res = counted(self.http.post(format!("{}/api/system/settings", self.base)).header("X-API-KEY", &self.key).form(form)).send().await.context("Bazarr: sem resposta")?;
         if !res.status().is_success() {
             bail!("Bazarr: HTTP {}", res.status());
         }
@@ -270,7 +279,7 @@ impl Tmdb {
             self.http.get(format!("{url}{sep}api_key={}", url_encode(&self.key)))
         };
         // o erro do reqwest traz a URL, e a URL traz a chave
-        let res = req.send().await.map_err(|e| anyhow::anyhow!("TMDB {path}: sem resposta: {}", e.without_url()))?;
+        let res = counted(req).send().await.map_err(|e| anyhow::anyhow!("TMDB {path}: sem resposta: {}", e.without_url()))?;
         let status = res.status();
         if !status.is_success() {
             bail!("TMDB {path}: HTTP {status}");
@@ -333,7 +342,8 @@ impl QBittorrent {
     pub async fn login(&self) -> Result<()> {
         let res = self
             .req(Method::POST, "auth/login")
-            .form(&[("username", &self.user), ("password", &self.password)])
+            .form(&[("username", &self.user), ("password", &self.password)]);
+        let res = counted(res)
             .send()
             .await
             .context("qBittorrent login: sem resposta")?;
@@ -354,7 +364,7 @@ impl QBittorrent {
     /// sem logar a cada consulta de progresso.
     pub async fn by_hashes(&self, hashes: &[String]) -> Result<Vec<TorrentInfo>> {
         let path = format!("torrents/info?hashes={}", hashes.join("|").to_lowercase());
-        let res = self.req(Method::GET, &path).send().await.context("qBittorrent: sem resposta")?;
+        let res = counted(self.req(Method::GET, &path)).send().await.context("qBittorrent: sem resposta")?;
         if res.status() == reqwest::StatusCode::FORBIDDEN {
             self.login().await?;
             return send(self.req(Method::GET, &path), "qBittorrent torrents").await;
@@ -362,6 +372,22 @@ impl QBittorrent {
         let status = res.status();
         if !status.is_success() {
             bail!("qBittorrent torrents: HTTP {status}");
+        }
+        Ok(res.json().await?)
+    }
+
+    /// Estado de todos os torrents por diferença: `rid` 0 traz tudo; os
+    /// seguintes, só o que mudou desde a resposta com aquele `rid`.
+    pub async fn maindata(&self, rid: u64) -> Result<Value> {
+        let path = format!("sync/maindata?rid={rid}");
+        let res = counted(self.req(Method::GET, &path)).send().await.context("qBittorrent: sem resposta")?;
+        if res.status() == reqwest::StatusCode::FORBIDDEN {
+            self.login().await?;
+            return send(self.req(Method::GET, &path), "qBittorrent estado").await;
+        }
+        let status = res.status();
+        if !status.is_success() {
+            bail!("qBittorrent estado: HTTP {status}");
         }
         Ok(res.json().await?)
     }
@@ -386,10 +412,10 @@ impl QBittorrent {
                 TorrentSource::File(b) => f.part("torrents", reqwest::multipart::Part::bytes(b.to_vec()).file_name("anubis.torrent")),
             }
         };
-        let res = self.req(Method::POST, "torrents/add").multipart(form()).send().await.context("qBittorrent: sem resposta")?;
+        let res = counted(self.req(Method::POST, "torrents/add").multipart(form())).send().await.context("qBittorrent: sem resposta")?;
         let res = if res.status() == reqwest::StatusCode::FORBIDDEN {
             self.login().await?;
-            self.req(Method::POST, "torrents/add").multipart(form()).send().await?
+            counted(self.req(Method::POST, "torrents/add").multipart(form())).send().await?
         } else {
             res
         };

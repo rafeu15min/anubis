@@ -24,6 +24,7 @@
 //! GET  /storage/plan            — o que seria apagado agora (não apaga)
 //! POST /storage/run             — roda um ciclo agora (respeita dry_run)
 //! POST /hooks/torrent-finished  — gatilho do qBittorrent ao concluir um download
+//! POST /hooks/arr?token=T       — webhook do Radarr/Sonarr: a central refaz as listas
 //!
 //! `/storage/run` e o gancho exigem `Authorization: Bearer <token>` quando há
 //! token na config. A busca e os pedidos ficam abertos na rede local: pedir um
@@ -81,6 +82,7 @@ pub fn router(state: AppState) -> Router {
         .route("/storage/plan", get(plan))
         .route("/storage/run", post(run))
         .route("/hooks/torrent-finished", post(torrent_finished))
+        .route("/hooks/arr", post(arr_event))
         .with_state(state)
 }
 
@@ -96,7 +98,7 @@ fn error(status: StatusCode, msg: impl ToString) -> Response {
 /// Vivo? E os endereços em que o Anubis escuta, do caminho mais rápido ao
 /// mais lento (a página troca para o melhor que o aparelho alcança).
 async fn health(State(s): State<AppState>) -> Response {
-    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION"), "addresses": s.orch.cfg.server.listen })).into_response()
+    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION"), "addresses": s.orch.cfg.server.listen, "upstream_calls": crate::services::UPSTREAM_CALLS.load(std::sync::atomic::Ordering::Relaxed) })).into_response()
 }
 
 async fn storage(State(s): State<AppState>) -> Response {
@@ -438,6 +440,23 @@ async fn cancel_mux(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Respons
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => error(StatusCode::CONFLICT, format!("{e:#}")),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct HookToken {
+    token: Option<String>,
+}
+
+/// Webhook do Radarr/Sonarr (versão pega, importada, item adicionado…): a
+/// central refaz as listas agora. O token vai na URL (`?token=`), que é o
+/// que o webhook deles permite configurar.
+async fn arr_event(State(s): State<AppState>, Query(q): Query<HookToken>, headers: HeaderMap) -> Response {
+    let by_query = s.orch.cfg.server.token.is_some() && q.token == s.orch.cfg.server.token;
+    if !by_query && !authorized(&s, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "token inválido");
+    }
+    s.orch.live.dirty.notify_one();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Response {

@@ -86,6 +86,15 @@ para baixar — no "Assistir" sem versão aceita e no "Juntar dublagem" sem
 Brasil o título está (assinatura, grátis, aluguel, compra), com os dados do
 JustWatch via TMDB. O TMDB não informa o idioma do áudio.
 
+**Central de estado.** O que a página acompanha (pedidos, downloads) é
+mantido pelo servidor e as rotas respondem da memória: uma consulta por
+diferença ao qBittorrent a cada 2 s (só com algo na fila), as listas do
+Radarr/Sonarr a cada minuto ou na hora de um webhook (versão pega, importada,
+item adicionado), e o link do Jellyfin calculado uma vez por item. Só trabalha
+enquanto alguém acompanha. Medido com 2 abas × 2 itens por 60 s: de 240 para
+46 chamadas ao Radarr/Sonarr/Jellyfin (em regime, zero por consulta) e de
+22 ms para 1,4 ms por `/status`. O `/health` mostra o total de chamadas.
+
 **Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
 áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
@@ -142,6 +151,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /storage/plan` | o que seria apagado agora (não apaga nada) |
 | `POST /storage/run` | roda um ciclo agora (respeita `dry_run`) |
 | `POST /hooks/torrent-finished` | gatilho do qBittorrent ao concluir um download |
+| `POST /hooks/arr?token=T` | webhook do Radarr/Sonarr: a central de estado refaz as listas na hora |
 
 `POST /storage/run` e o gancho do qBittorrent exigem
 `Authorization: Bearer <token>`. A busca e os pedidos ficam abertos na rede

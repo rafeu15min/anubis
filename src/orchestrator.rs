@@ -26,6 +26,8 @@ pub struct Orchestrator {
     /// "juntar dublagem" em andamento ou que falharam, por tmdbId
     pub(crate) muxes: Mutex<HashMap<i64, std::sync::Arc<crate::mux::MuxJob>>>,
     /// última busca de versões de um pedido parado (evita repetir nos indexadores)
+    /// central de estado (pedidos e downloads) que as rotas consultam
+    pub(crate) live: crate::live::Live,
     pub(crate) versions_cache: Mutex<HashMap<(crate::search::Kind, i64), (std::time::Instant, crate::search::Versions)>>,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
@@ -57,6 +59,7 @@ impl Orchestrator {
             tmdb: cfg.tmdb.as_ref().map(|t| Tmdb::new(&t.api_key)).transpose()?,
             streamer,
             muxes: Mutex::new(HashMap::new()),
+            live: crate::live::Live::default(),
             versions_cache: Mutex::new(HashMap::new()),
             cfg,
             running: Mutex::new(()),

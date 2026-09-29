@@ -14,6 +14,7 @@ mod api;
 mod config;
 mod disk;
 mod orchestrator;
+mod live;
 mod mux;
 mod planner;
 mod prefs;
@@ -98,6 +99,7 @@ fn default_config() -> PathBuf {
 async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let wake = Arc::new(Notify::new());
     tokio::spawn(scheduler(orch.clone(), wake.clone()));
+    tokio::spawn(live::run(orch.clone()));
 
     // um endereço que falha (placa ainda sem IP, sem ip_nonlocal_bind) não
     // impede os outros

@@ -144,6 +144,56 @@ fn summarize(releases: &[Value]) -> Versions {
     }
 }
 
+/// Estado de um item a partir do que o Radarr/Sonarr dizem (o item e a fila
+/// dele) e do progresso de cada torrent no qBittorrent (`torrent(hash)` →
+/// progresso 0..1, tamanho, segundos restantes). O link do Jellyfin fica de fora.
+fn compute(kind: Kind, item: &Value, queue: &[Value], torrent: impl Fn(&str) -> Option<(f64, f64, i64)>) -> Status {
+    let (have_any, episodes) = match kind {
+        Kind::Movie => (item["hasFile"].as_bool().unwrap_or(false), None),
+        Kind::Series | Kind::Episode => {
+            let st = &item["statistics"];
+            let files = st["episodeFileCount"].as_i64().unwrap_or(0);
+            (files > 0, Some((files, st["episodeCount"].as_i64().unwrap_or(0))))
+        }
+    };
+    let (mut size, mut left, mut importing) = (0.0, 0.0, false);
+    let mut eta = None;
+    for q in queue {
+        size += q["size"].as_f64().unwrap_or(0.0);
+        left += q["sizeleft"].as_f64().unwrap_or(0.0);
+        importing |= matches!(q["trackedDownloadState"].as_str(), Some("importPending" | "importing"));
+        eta = eta.or_else(|| q["timeleft"].as_str().map(str::to_owned));
+    }
+    let mut progress = (size > 0.0).then(|| 1.0 - left / size);
+
+    // a fila do Radarr/Sonarr só se atualiza a cada minuto: o progresso real
+    // vem do qBittorrent, pelo hash que a fila registra
+    let ts: Vec<(f64, f64, i64)> = queue.iter().filter_map(|q| q["downloadId"].as_str()).filter_map(&torrent).collect();
+    let total: f64 = ts.iter().map(|t| t.1).sum();
+    if total > 0.0 {
+        progress = Some(ts.iter().map(|t| t.0 * t.1).sum::<f64>() / total);
+    }
+    if let Some(s) = ts.iter().map(|t| t.2).filter(|e| *e < 8_640_000).max() {
+        eta = Some(format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60));
+    }
+
+    // disponível ganha dos outros estados: uma série pode ter episódios
+    // prontos enquanto outros ainda baixam
+    let state = if have_any {
+        State::Available
+    } else if importing || progress.is_some_and(|p| p >= 1.0) {
+        State::Importing
+    } else if !queue.is_empty() {
+        State::Downloading
+    } else if item["monitored"].as_bool() == Some(false) {
+        // só passou pelo "assistir agora": ninguém está procurando
+        State::NotRequested
+    } else {
+        State::Searching
+    };
+    Status { state, progress, eta, episodes, jellyfin_url: None }
+}
+
 /// resultado da busca de versões guardado por este tempo (é uma busca de verdade nos indexadores)
 const VERSIONS_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
@@ -241,10 +291,17 @@ impl Orchestrator {
     pub async fn requests(&self) -> Results {
         const MAX: usize = 30;
         let mut out = Results::default();
-        let (movies, series) = tokio::join!(
-            async { self.arr(Kind::Movie)?.get_json("movie").await },
-            async { self.arr(Kind::Series)?.get_json("series").await },
-        );
+        self.live.touch();
+        let snap = self.live.arr.lock().await;
+        let (movies, series) = if snap.fresh() {
+            (Ok(json!(snap.movies)), Ok(json!(snap.series)))
+        } else {
+            drop(snap);
+            tokio::join!(
+                async { self.arr(Kind::Movie)?.get_json("movie").await },
+                async { self.arr(Kind::Series)?.get_json("series").await },
+            )
+        };
         let pick = |v: Value, kind: Kind| -> Vec<Found> {
             let mut list: Vec<Value> = v
                 .as_array()
@@ -295,6 +352,7 @@ impl Orchestrator {
                 Kind::Series | Kind::Episode => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
             };
             arr.command(cmd).await?;
+            self.live.dirty.notify_one();
             return self.status(kind, id).await;
         }
 
@@ -320,6 +378,8 @@ impl Orchestrator {
             }
         }
         arr.add(what, item).await?;
+        // a central refaz as listas agora (senão o item novo só entraria em até 1 min)
+        self.live.dirty.notify_one();
         self.status(kind, id).await
     }
 
@@ -327,65 +387,49 @@ impl Orchestrator {
         if kind == Kind::Episode {
             bail!("o estado de episódios vem do player");
         }
+        self.live.touch();
+        // da central (listas recentes do Radarr/Sonarr + qBittorrent), sem consultar ninguém
+        let snap = self.live.arr.lock().await;
+        if snap.fresh()
+            && let Some((item, queue)) = snap.item(kind, id)
+        {
+            let (item, queue): (Value, Vec<Value>) = (item.clone(), queue.into_iter().cloned().collect());
+            drop(snap);
+            let torrents = self.live.torrents.lock().await;
+            let mut st = compute(kind, &item, &queue, |h| torrents.get(&h.to_lowercase()).map(|t| (t["progress"].as_f64().unwrap_or(0.0), t["size"].as_f64().unwrap_or(0.0), t["eta"].as_i64().unwrap_or(8_640_000))));
+            drop(torrents);
+            if st.state == State::Available {
+                st.jellyfin_url = self.cached_jellyfin_url(kind, id, &item).await;
+            }
+            return Ok(st);
+        }
+        drop(snap);
+
+        // fora da central (acabou de ser pedido, ou ela está parada): na hora
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
         let Some(item) = arr.find(what, id_param, id).await? else {
             return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None });
         };
         let lib_id = item["id"].as_i64().context("item sem id")?;
-
-        let (have_any, episodes) = match kind {
-            Kind::Movie => (item["hasFile"].as_bool().unwrap_or(false), None),
-            Kind::Series | Kind::Episode => {
-                let st = &item["statistics"];
-                let files = st["episodeFileCount"].as_i64().unwrap_or(0);
-                (files > 0, Some((files, st["episodeCount"].as_i64().unwrap_or(0))))
-            }
-        };
-
         let queue = arr.queue(&format!("{}={lib_id}", if kind == Kind::Movie { "movieId" } else { "seriesId" })).await?;
-        let (mut size, mut left, mut importing) = (0.0, 0.0, false);
-        let mut eta = None;
-        for q in &queue {
-            size += q["size"].as_f64().unwrap_or(0.0);
-            left += q["sizeleft"].as_f64().unwrap_or(0.0);
-            importing |= matches!(q["trackedDownloadState"].as_str(), Some("importPending" | "importing"));
-            eta = eta.or_else(|| q["timeleft"].as_str().map(str::to_owned));
-        }
-        let mut progress = (size > 0.0).then(|| 1.0 - left / size);
-
-        // a fila do Radarr/Sonarr só se atualiza a cada minuto: o progresso
-        // real vem do qBittorrent, pelo hash que a fila registra
         let hashes: Vec<String> = queue.iter().filter_map(|q| q["downloadId"].as_str().map(str::to_owned)).collect();
-        if !hashes.is_empty()
-            && let Ok(ts) = self.qbit.by_hashes(&hashes).await
-            && !ts.is_empty()
-        {
-            let total: f64 = ts.iter().map(|t| t.size).sum();
-            if total > 0.0 {
-                progress = Some(ts.iter().map(|t| t.progress * t.size).sum::<f64>() / total);
-            }
-            let secs = ts.iter().map(|t| t.eta).filter(|e| *e < 8_640_000).max();
-            eta = secs.map(|s| format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)).or(eta);
+        let ts = if hashes.is_empty() { vec![] } else { self.qbit.by_hashes(&hashes).await.unwrap_or_default() };
+        let mut st = compute(kind, &item, &queue, |h| ts.iter().find(|t| t.hash.eq_ignore_ascii_case(h)).map(|t| (t.progress, t.size, t.eta)));
+        if st.state == State::Available {
+            st.jellyfin_url = self.cached_jellyfin_url(kind, id, &item).await;
         }
+        Ok(st)
+    }
 
-        // disponível ganha dos outros estados: uma série pode ter episódios
-        // prontos enquanto outros ainda baixam
-        let state = if have_any {
-            State::Available
-        } else if importing || progress.is_some_and(|p| p >= 1.0) {
-            State::Importing
-        } else if !queue.is_empty() {
-            State::Downloading
-        } else if item["monitored"].as_bool() == Some(false) {
-            // só passou pelo "assistir agora": ninguém está procurando
-            State::NotRequested
-        } else {
-            State::Searching
-        };
-
-        let jellyfin_url = if have_any { self.jellyfin_url(kind, &item).await } else { None };
-        Ok(Status { state, progress, eta, episodes, jellyfin_url })
+    /// Link do Jellyfin, calculado uma vez por item (é uma busca no Jellyfin).
+    async fn cached_jellyfin_url(&self, kind: Kind, id: i64, item: &Value) -> Option<String> {
+        if let Some(u) = self.live.jellyfin.lock().await.get(&(kind, id)) {
+            return Some(u.clone());
+        }
+        let url = self.jellyfin_url(kind, item).await?;
+        self.live.jellyfin.lock().await.insert((kind, id), url.clone());
+        Some(url)
     }
 
     /// A série no Sonarr, adicionando se preciso — sem monitorar e sem buscar:

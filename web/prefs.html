@@ -41,7 +41,7 @@
 <main>
   <section>
     <h2>Idioma do áudio</h2>
-    <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries), com estas regras.</p>
+    <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries e animes), com estas regras. Série ou anime em "obrigatório" sem versão dublada em nenhuma fonte: o cartão pergunta se pode instalar o legendado (e troca pelo dublado se ele surgir). Entre as legendadas, as com legenda em português vêm primeiro.</p>
     <div id="audio"></div>
   </section>
   <section>
@@ -70,7 +70,7 @@ let current = null;
 function renderAudio(p) {
   const row = (key, title) => p[key] == null ? '' : `<div class="row"><b>${title}</b><div class="choice">${RULES.map(([v, t, h]) =>
     `<label class="opt"><input type="radio" name="${key}" value="${v}" ${p[key] === v ? 'checked' : ''}><span>${t}<small>${h}</small></span></label>`).join('')}</div></div>`;
-  $('#audio').innerHTML = row('movies_audio', 'Filmes') + row('series_audio', 'Séries');
+  $('#audio').innerHTML = row('movies_audio', 'Filmes') + row('series_audio', 'Séries e animes');
 }
 function renderQuality(p) {
   const row = (key, title) => {

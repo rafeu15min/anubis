@@ -16,6 +16,7 @@
 //! GET  /watch/{kind}/{id}/lighter — versões mais leves (o download não acompanha o vídeo)
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
+//! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
@@ -80,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
+        .route("/series/{tvdb}/subbed", post(accept_subbed))
         .route("/where/{kind}/{id}", get(where_to_watch))
         .route("/mux", post(start_mux))
         .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
@@ -393,6 +395,13 @@ async fn get_prefs(State(s): State<AppState>) -> Response {
 async fn put_prefs(State(s): State<AppState>, Json(p): Json<crate::prefs::Prefs>) -> Response {
     match s.orch.set_prefs(&p).await {
         Ok(p) => Json(p).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn accept_subbed(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
+    match s.orch.accept_subbed(tvdb).await {
+        Ok(st) => Json(st).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }

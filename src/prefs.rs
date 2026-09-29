@@ -16,6 +16,44 @@ use serde_json::{Value, json};
 
 const FORMAT: &str = "Anubis · Português (BR)";
 const SCORE: i64 = 100;
+/// legenda em português pelo nome da versão; vale menos que o dublado
+const SUBS_FORMAT: &str = "Anubis · Legenda PT-BR";
+const SUBS_SCORE: i64 = 10;
+const SUBS_REGEX: &str = r"\b(legendad[oa]s?|leg|multi[ ._-]?subs?|pt[ ._-]?br[ ._-]?subs?|subs?[ ._-]?pt[ ._-]?br)\b";
+/// Sonarr: perfil de uma série (ou anime) sem versão dublada em nenhuma
+/// fonte, quando a pessoa aceita o legendado: baixa legendado e troca pelo
+/// dublado se ele surgir
+pub const FALLBACK_PROFILE: &str = "Anubis · Sem dublagem";
+
+/// Ids dos perfis do Sonarr que o Anubis usa.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileIds {
+    pub fallback: i64,
+}
+
+/// A regra de idioma num perfil: pontos do dublado (e da legenda em
+/// português, onde o legendado é aceito), mínimo e alvo.
+fn apply_audio(profile: &mut Value, dub: i64, subs: Option<i64>, rule: AudioRule) -> Result<()> {
+    let score = if rule == AudioRule::Any { 0 } else { SCORE };
+    let items = profile["formatItems"].as_array_mut().context("perfil sem formatItems")?;
+    let mut set = |fid: i64, name: &str, score: i64| match items.iter_mut().find(|i| i["format"].as_i64() == Some(fid)) {
+        Some(i) => i["score"] = json!(score),
+        None => items.push(json!({ "format": fid, "name": name, "score": score })),
+    };
+    set(dub, FORMAT, score);
+    if let Some(s) = subs {
+        set(s, SUBS_FORMAT, SUBS_SCORE);
+    }
+    profile["minFormatScore"] = json!(if rule == AudioRule::Required { SCORE } else { 0 });
+    // preferido: continua trocando até achar a versão em PT-BR
+    profile["cutoffFormatScore"] = json!(score);
+    profile["upgradeAllowed"] = json!(true);
+    if profile.get("language").is_some() {
+        // Radarr: o idioma passa a ser decidido pelo formato
+        profile["language"] = json!({ "id": -1, "name": "Any" });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,14 +151,50 @@ impl Orchestrator {
         }
     }
 
-    async fn profile(arr: &Arr, name: &str) -> Result<Value> {
+    pub(crate) async fn profile(arr: &Arr, name: &str) -> Result<Value> {
+        Self::find_profile(arr, name).await?.with_context(|| format!("perfil \"{name}\" não existe"))
+    }
+
+    async fn find_profile(arr: &Arr, name: &str) -> Result<Option<Value>> {
         let all = arr.get_json("qualityprofile").await?;
-        all.as_array().and_then(|a| a.iter().find(|p| p["name"] == name).cloned()).with_context(|| format!("perfil \"{name}\" não existe"))
+        Ok(all.as_array().and_then(|a| a.iter().find(|p| p["name"] == name).cloned()))
+    }
+
+    /// Id de um formato personalizado do Anubis, criando na primeira vez.
+    async fn format_id(arr: &Arr, name: &str, spec: Value) -> Result<i64> {
+        let formats = arr.get_json("customformat").await?;
+        if let Some(id) = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).and_then(|f| f["id"].as_i64()) {
+            return Ok(id);
+        }
+        let body = json!({ "name": name, "includeCustomFormatWhenRenaming": false, "specifications": [spec] });
+        arr.send_json(Method::POST, "customformat", &body).await?["id"].as_i64().context("formato sem id")
+    }
+
+    async fn dub_format(arr: &Arr, lang_id: i64) -> Result<i64> {
+        let spec = json!({
+            "name": "Português (Brasil)", "implementation": "LanguageSpecification", "negate": false, "required": true,
+            "fields": [{ "name": "value", "value": lang_id }, { "name": "exceptLanguage", "value": false }]
+        });
+        Self::format_id(arr, FORMAT, spec).await
+    }
+
+    /// Legenda em português pelo nome da versão: entre as não dubladas, estas
+    /// vêm primeiro (o Bazarr continua buscando legenda para as outras).
+    async fn subs_format(arr: &Arr) -> Result<i64> {
+        let spec = json!({
+            "name": "Legendado / MultiSub", "implementation": "ReleaseTitleSpecification", "negate": false, "required": true,
+            "fields": [{ "name": "value", "value": SUBS_REGEX }]
+        });
+        Self::format_id(arr, SUBS_FORMAT, spec).await
     }
 
     async fn audio_rule(&self, which: &str) -> Result<AudioRule> {
         let (arr, profile_name, _) = self.arr_named(which)?;
-        let profile = Self::profile(arr, &profile_name).await?;
+        self.rule_of(arr, &profile_name).await
+    }
+
+    async fn rule_of(&self, arr: &Arr, profile_name: &str) -> Result<AudioRule> {
+        let profile = Self::profile(arr, profile_name).await?;
         let formats = arr.get_json("customformat").await?;
         let fid = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == FORMAT)).and_then(|f| f["id"].as_i64());
         let score = fid
@@ -140,43 +214,47 @@ impl Orchestrator {
 
     async fn set_audio_rule(&self, which: &str, rule: AudioRule) -> Result<()> {
         let (arr, profile_name, lang_id) = self.arr_named(which)?;
-        // o formato personalizado (cria na primeira vez)
-        let formats = arr.get_json("customformat").await?;
-        let fid = match formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == FORMAT)).and_then(|f| f["id"].as_i64()) {
-            Some(id) => id,
-            None => {
-                let body = json!({
-                    "name": FORMAT,
-                    "includeCustomFormatWhenRenaming": false,
-                    "specifications": [{
-                        "name": "Português (Brasil)",
-                        "implementation": "LanguageSpecification",
-                        "negate": false,
-                        "required": true,
-                        "fields": [{ "name": "value", "value": lang_id }, { "name": "exceptLanguage", "value": false }]
-                    }]
-                });
-                arr.send_json(Method::POST, "customformat", &body).await?["id"].as_i64().context("formato sem id")?
-            }
-        };
+        self.set_rule_of(arr, &profile_name, lang_id, rule).await
+    }
+
+    async fn set_rule_of(&self, arr: &Arr, profile_name: &str, lang_id: i64, rule: AudioRule) -> Result<()> {
+        let fid = Self::dub_format(arr, lang_id).await?;
+        // legenda em português só conta onde o legendado é aceito
+        let subs = if rule == AudioRule::Required { None } else { Some(Self::subs_format(arr).await?) };
         // o perfil já traz formatItems de todos os formatos (score 0 nos novos)
-        let mut profile = Self::profile(arr, &profile_name).await?;
+        let mut profile = Self::profile(arr, profile_name).await?;
         let pid = profile["id"].as_i64().context("perfil sem id")?;
-        let score = if rule == AudioRule::Any { 0 } else { SCORE };
-        let items = profile["formatItems"].as_array_mut().context("perfil sem formatItems")?;
-        match items.iter_mut().find(|i| i["format"].as_i64() == Some(fid)) {
-            Some(i) => i["score"] = json!(score),
-            None => items.push(json!({ "format": fid, "name": FORMAT, "score": score })),
-        }
-        profile["minFormatScore"] = json!(if rule == AudioRule::Required { SCORE } else { 0 });
-        // preferido: continua trocando até achar a versão em PT-BR
-        profile["cutoffFormatScore"] = json!(score);
-        profile["upgradeAllowed"] = json!(true);
-        if profile.get("language").is_some() {
-            // Radarr: o idioma passa a ser decidido pelo formato
-            profile["language"] = json!({ "id": -1, "name": "Any" });
-        }
+        apply_audio(&mut profile, fid, subs, rule)?;
         arr.send_json(Method::PUT, &format!("qualityprofile/{pid}"), &profile).await?;
+        Ok(())
+    }
+
+    /// Perfil do Anubis no Sonarr (cópia do perfil dos pedidos), criando na
+    /// primeira vez com a regra `rule`. Devolve o id.
+    async fn ensure_profile(&self, name: &str, rule: AudioRule) -> Result<i64> {
+        let (arr, base, lang_id) = self.arr_named("sonarr")?;
+        if let Some(p) = Self::find_profile(arr, name).await? {
+            return p["id"].as_i64().context("perfil sem id");
+        }
+        let mut p = Self::profile(arr, &base).await?;
+        if let Some(o) = p.as_object_mut() {
+            o.remove("id");
+        }
+        p["name"] = json!(name);
+        let id = arr.send_json(Method::POST, "qualityprofile", &p).await?["id"].as_i64().context("perfil sem id")?;
+        self.set_rule_of(arr, name, lang_id, rule).await?;
+        tracing::info!("Sonarr: perfil \"{name}\" criado ({rule:?})");
+        Ok(id)
+    }
+
+    /// Prepara o Sonarr: o perfil das séries sem dublagem (cópia do perfil dos
+    /// pedidos, em "preferido"). Pode rodar de novo sem efeito.
+    pub async fn setup_profiles(&self) -> Result<()> {
+        if self.sonarr.is_none() {
+            return Ok(());
+        }
+        let fallback = self.ensure_profile(FALLBACK_PROFILE, AudioRule::Preferred).await?;
+        *self.profile_ids.lock().await = Some(ProfileIds { fallback });
         Ok(())
     }
 
@@ -213,10 +291,17 @@ impl Orchestrator {
 
     async fn set_quality(&self, which: &str, q: &QualityPrefs) -> Result<()> {
         let (arr, profile_name, _) = self.arr_named(which)?;
-        let mut profile = Self::profile(arr, &profile_name).await?;
-        let pid = profile["id"].as_i64().context("perfil sem id")?;
-        apply_quality(&mut profile, q)?;
-        arr.send_json(Method::PUT, &format!("qualityprofile/{pid}"), &profile).await?;
+        // no Sonarr, o perfil das séries sem dublagem segue o mesmo
+        let mut names = vec![profile_name];
+        if which == "sonarr" {
+            names.push(FALLBACK_PROFILE.to_owned());
+        }
+        for name in names {
+            let Some(mut profile) = Self::find_profile(arr, &name).await? else { continue };
+            let pid = profile["id"].as_i64().context("perfil sem id")?;
+            apply_quality(&mut profile, q)?;
+            arr.send_json(Method::PUT, &format!("qualityprofile/{pid}"), &profile).await?;
+        }
         Ok(())
     }
 

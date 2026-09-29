@@ -136,6 +136,12 @@ usuário.
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
 legenda do Bazarr. O Anubis grava direto no Radarr/Sonarr (formato
 personalizado "Anubis · Português (BR)" pontuado no perfil) e no Bazarr.
+Série ou anime em "obrigatório" sem versão dublada em nenhuma fonte (a busca
+acha versões com fontes, nenhuma em português): o cartão avisa "Dublagem não
+encontrada em nenhuma fonte" e oferece "Instalar legendado" — aquela série
+passa para o perfil "Anubis · Sem dublagem" do Sonarr (preferido: baixa
+legendada e troca pela dublada se ela surgir; entre as legendadas, as com
+legenda em português vêm primeiro) e o cartão passa a avisar que vem legendada.
 Qualidade: Bluray 1080p primeiro e WEB 1080p como segunda opção (o alvo do
 perfil fica no WEB, então um WEB baixado não é trocado sozinho) e, nos
 filmes, recusar gravações de cinema (CAM, Telesync, Telecine, Workprint).

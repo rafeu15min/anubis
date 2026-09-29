@@ -92,6 +92,9 @@ pub struct Status {
     /// série: episódios na biblioteca / episódios monitorados
     pub episodes: Option<(i64, i64)>,
     pub jellyfin_url: Option<String>,
+    /// aviso para a página (ex.: nenhuma fonte tem versão dublada)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// O que a busca nos indexadores achou para um pedido parado em "procurando":
@@ -104,6 +107,8 @@ pub struct Versions {
     pub no_seeders: usize,
     /// motivo (em português quando conhecido) → quantas versões
     pub reasons: Vec<(String, usize)>,
+    /// com fontes e áudio em português (dubladas)
+    pub dubbed: usize,
 }
 
 /// Os motivos do Radarr/Sonarr que aparecem na prática, em português.
@@ -143,6 +148,11 @@ fn summarize(releases: &[Value]) -> Versions {
         approved: releases.iter().filter(seeded).filter(|r| r["rejected"].as_bool() != Some(true)).count(),
         no_seeders: releases.iter().filter(|r| !seeded(r)).count(),
         reasons,
+        dubbed: releases
+            .iter()
+            .filter(seeded)
+            .filter(|r| r["languages"].as_array().is_some_and(|l| l.iter().any(|x| x["name"].as_str().is_some_and(|n| n.starts_with("Portuguese")))))
+            .count(),
     }
 }
 
@@ -193,7 +203,7 @@ fn compute(kind: Kind, item: &Value, queue: &[Value], torrent: impl Fn(&str) -> 
     } else {
         State::Searching
     };
-    Status { state, progress, eta, episodes, jellyfin_url: None }
+    Status { state, progress, eta, episodes, jellyfin_url: None, note: None }
 }
 
 /// resultado da busca de versões guardado por este tempo (é uma busca de verdade nos indexadores)
@@ -405,11 +415,12 @@ impl Orchestrator {
             if st.state == State::Available {
                 st.jellyfin_url = self.cached_jellyfin_url(kind, id, &item).await;
             }
+            st.note = self.dub_note(kind, &item).await;
             return Ok(st);
         }
         if snap.fresh() {
             // a central está em dia e não o tem: não está no Radarr/Sonarr
-            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None });
+            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None });
         }
         drop(snap);
 
@@ -417,7 +428,7 @@ impl Orchestrator {
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
         let Some(item) = arr.find(what, id_param, id).await? else {
-            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None });
+            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None });
         };
         let lib_id = item["id"].as_i64().context("item sem id")?;
         let queue = arr.queue(&format!("{}={lib_id}", if kind == Kind::Movie { "movieId" } else { "seriesId" })).await?;
@@ -427,7 +438,31 @@ impl Orchestrator {
         if st.state == State::Available {
             st.jellyfin_url = self.cached_jellyfin_url(kind, id, &item).await;
         }
+        st.note = self.dub_note(kind, &item).await;
         Ok(st)
+    }
+
+    /// Aviso de uma série que foi para o legendado.
+    async fn dub_note(&self, kind: Kind, item: &Value) -> Option<String> {
+        let ids = (*self.profile_ids.lock().await)?;
+        (kind == Kind::Series && item["qualityProfileId"].as_i64() == Some(ids.fallback))
+            .then(|| "Sem versão dublada em nenhuma fonte: vem legendada (troca pela dublada se ela surgir)".to_owned())
+    }
+
+    /// "Dublagem não encontrada, instalar legendado?" — sim: a série passa
+    /// para o perfil sem dublagem (baixa legendada e troca pela dublada se ela
+    /// surgir) e o Sonarr busca de novo.
+    pub async fn accept_subbed(&self, tvdb: i64) -> Result<Status> {
+        let ids = (*self.profile_ids.lock().await).context("perfis do Sonarr ainda não preparados")?;
+        let sonarr = self.arr(Kind::Series)?;
+        let s = sonarr.find("series", "tvdbId", tvdb).await?.context("série não pedida")?;
+        let sid = s["id"].as_i64().context("série sem id")?;
+        sonarr.set_series_profile(&[sid], ids.fallback).await?;
+        sonarr.command(json!({ "name": "SeriesSearch", "seriesId": sid })).await?;
+        tracing::info!("{}: legendado aceito ({})", s["title"].as_str().unwrap_or_default(), crate::prefs::FALLBACK_PROFILE);
+        self.versions_cache.lock().await.remove(&(Kind::Series, tvdb));
+        crate::live::refresh_arr(self).await;
+        self.status(Kind::Series, tvdb).await
     }
 
     /// Link do Jellyfin, calculado uma vez por item (é uma busca no Jellyfin).
@@ -593,5 +628,8 @@ mod tests {
         assert_eq!(v.reasons.len(), 3);
         assert!(v.reasons.iter().any(|(r, n)| r == "Some new reason" && *n == 1));
         assert_eq!(summarize(&[rel(4, false, &[])]).approved, 1);
+        let dub = json!({ "protocol": "torrent", "seeders": 3, "rejected": false, "languages": [{ "name": "Portuguese (Brazil)" }, { "name": "English" }] });
+        let dub_sem_fontes = json!({ "protocol": "torrent", "seeders": 0, "rejected": false, "languages": [{ "name": "Portuguese (Brazil)" }] });
+        assert_eq!(summarize(&[dub, dub_sem_fontes, rel(4, false, &[])]).dubbed, 1);
     }
 }

@@ -102,6 +102,15 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let wake = Arc::new(Notify::new());
     tokio::spawn(scheduler(orch.clone(), wake.clone()));
     tokio::spawn(live::run(orch.clone()));
+    // perfil do Sonarr para séries sem dublagem (quando se aceita o legendado)
+    {
+        let orch = orch.clone();
+        tokio::spawn(async move {
+            if let Err(e) = orch.setup_profiles().await {
+                error!("perfil do Sonarr não preparado: {e:#}");
+            }
+        });
+    }
 
     // um endereço que falha (placa ainda sem IP, sem ip_nonlocal_bind) não
     // impede os outros

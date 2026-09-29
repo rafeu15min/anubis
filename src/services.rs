@@ -127,6 +127,13 @@ impl Arr {
         send::<Value>(self.req(Method::PUT, "episode/monitor").json(&body), &format!("{} monitorar", self.name)).await?;
         Ok(())
     }
+    /// Sonarr: muda o perfil de qualidade de séries.
+    pub async fn set_series_profile(&self, series_ids: &[i64], profile_id: i64) -> Result<()> {
+        let body = json!({ "seriesIds": series_ids, "qualityProfileId": profile_id });
+        send::<Value>(self.req(Method::PUT, "series/editor").json(&body), &format!("{} mudar perfil", self.name)).await?;
+        Ok(())
+    }
+
     /// Sonarr: monitora a série e todos os episódios (a série entrou pelo
     /// "assistir agora", sem monitorar, e agora foi pedida inteira).
     pub async fn monitor_series_all(&self, series_id: i64) -> Result<()> {

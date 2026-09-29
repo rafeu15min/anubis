@@ -206,7 +206,10 @@ function statusHtml(st) {
   if (st.episodes) txt += ` · ${st.episodes[0]}/${st.episodes[1]} episódios`;
   const bar = st.progress != null && st.state !== 'available' ? `<div class="progress"><i style="width:${(st.progress * 100).toFixed(1)}%"></i></div>` : '';
   const link = st.jellyfin_url ? `<a class="btn ok" href="${esc(jf(st.jellyfin_url))}">Abrir no Jellyfin</a>` : '';
-  return `<span class="state">${txt}</span>${bar}${link}`;
+  const note = st.note ? `<small class="meta" style="flex-basis:100%">${esc(st.note)}</small>` : '';
+  const offer = st.offerSubbed ? `<span class="state" style="flex-basis:100%;color:#ffb36b">Dublagem não encontrada em nenhuma fonte.</span>
+    <button data-subbed="${st.offerSubbed}">Instalar legendado</button><small class="meta" style="flex-basis:100%">Baixa a versão legendada agora e troca pela dublada se ela surgir.</small>` : '';
+  return `<span class="state">${txt}</span>${bar}${link}${note}${offer}`;
 }
 
 function card(it, st) {
@@ -453,6 +456,16 @@ $('#tabs').onclick = (e) => {
   $('#q').value = ''; $('#results').hidden = true; $('#showcase').hidden = false;
   showCategory(b.dataset.cat);
 };
+// "Dublagem não encontrada, instalar legendado?" — sim
+async function acceptSubbed(btn, tvdb) {
+  btn.disabled = true; btn.textContent = 'Instalando…';
+  const r = await fetch(`series/${tvdb}/subbed`, { method: 'POST' });
+  const d = await r.json();
+  if (!r.ok) { btn.disabled = false; btn.textContent = 'Instalar legendado'; alert(`Não deu: ${d.error}`); return; }
+  const it = tracked[`series:${tvdb}`] || lastResults[`series:${tvdb}`];
+  if (it) apply(it, d, false);
+}
+
 function openItem(k) {
   const it = lastResults[k];
   if (!it) return;
@@ -515,7 +528,12 @@ async function apply(it, st, openable = true) {
     // ainda juntando: não conta como pronto
     if (st.mux.step !== 'done') st.state = 'searching';
   }
-  if (st.state === 'searching' && !st.mux) st.versions = await versions(it);
+  if (st.state === 'searching' && !st.mux) {
+    st.versions = await versions(it);
+    // série ou anime: há versões com fontes, mas nenhuma dublada
+    const v = st.versions;
+    if (it.kind === 'series' && v && v.approved === 0 && v.dubbed === 0 && v.found - v.no_seeders > 0) st.offerSubbed = it.id;
+  }
   render(it, st);
   if (t && st.state === 'available' && !t.done) { t.done = Date.now(); save(); }
   // pedido feito nesta página e pronto: abre o Jellyfin (uma vez)
@@ -591,6 +609,8 @@ document.addEventListener('click', (e) => {
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
+  const sb = e.target.closest('[data-subbed]');
+  if (sb) acceptSubbed(sb, +sb.dataset.subbed);
   const op = e.target.closest('[data-open]');
   if (op) openItem(op.dataset.open);
   const mx = e.target.closest('[data-mux]');

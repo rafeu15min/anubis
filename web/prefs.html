@@ -187,13 +187,22 @@ loadHistory();
 // o favorito da Crunchyroll: roda no crunchyroll.com, com a sessão de quem
 // está logado, e baixa o histórico de exibição (o mesmo que o site mostra)
 async function crunchyrollHistory() {
-  if (!/(^|\.)crunchyroll\.com$/.test(location.hostname)) { alert('Abra o crunchyroll.com (logado) e clique no favorito lá.'); return; }
+  if (location.hostname !== 'www.crunchyroll.com') { alert('Abra o www.crunchyroll.com (logado) e clique no favorito lá.'); return; }
   try {
-    const id = ((window.__APP_CONFIG__ || {}).cxApiParams || {}).accountAuthClientId;
+    const cfg = window.__APP_CONFIG__ || (window.etp || {}).config || {};
+    const id = (cfg.cxApiParams || {}).accountAuthClientId;
     if (!id) throw new Error('não achei a configuração do site (a Crunchyroll mudou algo)');
+    // o site manda o aparelho junto: device_id vem do cookie dele, device_type é "Navegador on Sistema"
+    const device = (document.cookie.match(/(?:^|; )device_id=([^;]*)/) || [])[1] || crypto.randomUUID();
+    const ua = navigator.userAgent;
+    const kind = (/Firefox\//.test(ua) ? 'Firefox' : /Edg\//.test(ua) ? 'Edge' : 'Chrome') + ' on ' + (/Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac OS' : 'Linux');
     const tr = await fetch('/auth/v1/token', { method: 'POST', credentials: 'include',
-      headers: { Authorization: 'Basic ' + btoa(id + ':'), 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=etp_rt_cookie' });
-    if (!tr.ok) throw new Error('sessão recusada (HTTP ' + tr.status + ') — você está logado?');
+      headers: { Authorization: 'Basic ' + btoa(id + ':'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=etp_rt_cookie&device_id=' + encodeURIComponent(device) + '&device_type=' + encodeURIComponent(kind) });
+    if (!tr.ok) {
+      const why = await tr.text();
+      throw new Error(/etp_rt/.test(why) ? 'este navegador não está logado na Crunchyroll (entre com sua conta no site e tente de novo)' : 'sessão recusada (HTTP ' + tr.status + '): ' + why.slice(0, 200));
+    }
     const tok = await tr.json();
     const items = {};
     let total = 0;

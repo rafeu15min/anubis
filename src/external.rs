@@ -257,17 +257,22 @@ fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>
     out
 }
 
-/// A série buscada entre os resultados: a de nome exato; com várias (o anime
-/// de One Piece e a de 2023), a mais votada. A busca do TMDB às vezes põe
-/// na frente outra de nome parecido ("Hilda Furacão" para "Hilda").
-fn series_named<'a>(list: &'a [Value], title: &str) -> Option<&'a Value> {
-    let tv: Vec<&Value> = list.iter().filter(|r| r["media_type"] == "tv").collect();
-    let same_name = |r: &Value| [&r["name"], &r["original_name"]].iter().any(|n| n.as_str().is_some_and(|n| n.eq_ignore_ascii_case(title)));
-    tv.iter()
+/// O título buscado entre os resultados (`media`: "tv" ou "movie"): o de nome
+/// igual, sem contar pontuação; com vários (o anime de One Piece e a série de
+/// 2023, o "Belle" do Hosoda e um de 2025), o mais votado. A busca do TMDB às
+/// vezes põe na frente outro de nome parecido ("Hilda Furacão" para "Hilda").
+fn best_named<'a>(list: &'a [Value], title: &str, media: &str) -> Option<&'a Value> {
+    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let want = norm(title);
+    let found: Vec<&Value> = list.iter().filter(|r| r["media_type"] == media).collect();
+    let fields = if media == "tv" { ["name", "original_name"] } else { ["title", "original_title"] };
+    let same_name = |r: &Value| fields.iter().any(|f| r[*f].as_str().is_some_and(|n| norm(n) == want));
+    found
+        .iter()
         .take(5)
         .filter(|r| same_name(r))
         .max_by_key(|r| r["vote_count"].as_u64().unwrap_or(0))
-        .or(tv.first())
+        .or(found.first())
         .copied()
 }
 
@@ -453,11 +458,11 @@ impl Orchestrator {
                 r["media_type"] = "tv".into();
             }
         }
-        let of = |want: &str| list.iter().find(|r| r["media_type"] == want).and_then(|r| r["id"].as_i64());
-        let tv = || series_named(&list, asked).and_then(|r| r["id"].as_i64()).map(|id| (Media::Tv, id));
+        let named = |media| best_named(&list, asked, media).and_then(|r| r["id"].as_i64());
+        let tv = || named("tv").map(|id| (Media::Tv, id));
         let found = match w.want {
             Want::Series => tv(),
-            Want::MovieOrSeries => of("movie").map(|id| (Media::Movie, id)).or_else(tv),
+            Want::MovieOrSeries => named("movie").map(|id| (Media::Movie, id)).or_else(tv),
             // na Crunchyroll quase tudo é anime: prefere o resultado que é anime
             Want::Anime => list.iter().find(|r| crate::discover::is_anime(r)).or(list.first()).and_then(|r| r["id"].as_i64()).map(|id| (Media::Tv, id)),
             Want::AnimeMovie => list.first().and_then(|r| r["id"].as_i64()).map(|id| (Media::Movie, id)),
@@ -632,19 +637,29 @@ mod tests {
     }
 
     #[test]
-    fn series_by_exact_name_then_votes() {
+    fn title_by_exact_name_then_votes() {
         let list = vec![
             json!({"media_type": "tv", "id": 111110, "name": "ONE PIECE: A Série", "original_name": "ONE PIECE", "vote_count": 1949}),
             json!({"media_type": "movie", "id": 900667, "title": "One Piece Film: Red", "vote_count": 1157}),
             json!({"media_type": "tv", "id": 37854, "name": "One Piece", "original_name": "ONE PIECE", "vote_count": 5567}),
         ];
-        assert_eq!(series_named(&list, "One Piece").unwrap()["id"], 37854);
+        assert_eq!(best_named(&list, "One Piece", "tv").unwrap()["id"], 37854);
         let hilda = vec![
             json!({"media_type": "tv", "id": 72351, "name": "Hilda Furacão", "vote_count": 37}),
             json!({"media_type": "tv", "id": 82456, "name": "Hilda", "vote_count": 253}),
         ];
-        assert_eq!(series_named(&hilda, "Hilda").unwrap()["id"], 82456);
-        assert_eq!(series_named(&hilda, "Outra").unwrap()["id"], 72351);
+        assert_eq!(best_named(&hilda, "Hilda", "tv").unwrap()["id"], 82456);
+        assert_eq!(best_named(&hilda, "Outra", "tv").unwrap()["id"], 72351);
+        let belle = vec![
+            json!({"media_type": "movie", "id": 1130863, "title": "Belle", "original_title": "Belle", "vote_count": 38}),
+            json!({"media_type": "movie", "id": 776305, "title": "Belle", "original_title": "竜とそばかすの姫", "vote_count": 918}),
+        ];
+        assert_eq!(best_named(&belle, "Belle", "movie").unwrap()["id"], 776305);
+        let your_name = vec![
+            json!({"media_type": "movie", "id": 372058, "title": "Your Name.", "original_title": "君の名は。", "vote_count": 11000}),
+            json!({"media_type": "movie", "id": 553301, "title": "Your Name", "original_title": "Your Name", "vote_count": 0}),
+        ];
+        assert_eq!(best_named(&your_name, "Your Name", "movie").unwrap()["id"], 372058);
     }
 
     #[test]

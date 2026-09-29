@@ -9,6 +9,10 @@ services:
     environment:
       - POSTGRES_HOST=bitmagnet-postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # ritmo da varredura (padrão 10): no 10, as milhares de conversas UDP
+      # lotavam a tabela de conexões do roteador/provedor e metade das
+      # conexões do FeuVault para a internet falhava ("host unreachable")
+      - DHT_CRAWLER_SCALING_FACTOR=1
     volumes:
       - ./config:/root/.config/bitmagnet
     ports:

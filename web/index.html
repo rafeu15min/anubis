@@ -71,7 +71,7 @@
 </header>
 <main>
   <section id="tracking" hidden>
-    <h2>Pedidos</h2>
+    <h2>Seus filmes e séries</h2>
     <div class="grid" id="tracked"></div>
   </section>
   <div id="results"><p class="msg">Digite o nome de um filme ou série. Os pedidos vão para o Radarr/Sonarr, com as regras de qualidade de sempre.</p></div>
@@ -437,8 +437,26 @@ async function refresh(it, openable = true) {
   } catch {}
 }
 
+// a cada 3 s, só o que ainda não está pronto (cada consulta vai ao Radarr/Sonarr)
 function poll() {
-  for (const it of Object.values(tracked)) refresh(it);
+  for (const it of Object.values(tracked)) if (!it.done) refresh(it);
+}
+
+// pedidos e biblioteca vêm do servidor: a mesma lista em qualquer aparelho e caminho
+async function loadRequests() {
+  try {
+    const r = await fetch('requests');
+    if (!r.ok) return;
+    const d = await r.json();
+    for (const it of [...d.movies, ...d.series]) {
+      const k = keyOf(it);
+      if (tracked[k]) continue;
+      tracked[k] = { ...it, requested: true };
+      render(tracked[k], null);
+      refresh(tracked[k], false);
+    }
+    save();
+  } catch {}
 }
 
 // remove da lista de pedidos o que já está disponível há um tempo
@@ -470,8 +488,8 @@ document.addEventListener('click', (e) => {
 });
 
 prune();
-for (const it of Object.values(tracked)) render(it, null);
-poll();
+for (const it of Object.values(tracked)) { render(it, null); refresh(it); }
+loadRequests();
 setInterval(poll, 3000);
 </script>
 </body>

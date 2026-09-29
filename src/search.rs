@@ -235,6 +235,42 @@ impl Orchestrator {
         out
     }
 
+    /// Pedidos (monitorados) e o que já está na biblioteca, mais recentes
+    /// primeiro. A lista "Pedidos" da página vem daqui: a mesma em qualquer
+    /// aparelho e por qualquer caminho (cabo, rede local, Tailscale).
+    pub async fn requests(&self) -> Results {
+        const MAX: usize = 30;
+        let mut out = Results::default();
+        let (movies, series) = tokio::join!(
+            async { self.arr(Kind::Movie)?.get_json("movie").await },
+            async { self.arr(Kind::Series)?.get_json("series").await },
+        );
+        let pick = |v: Value, kind: Kind| -> Vec<Found> {
+            let mut list: Vec<Value> = v
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|x| {
+                    let has_file = if kind == Kind::Movie { x["hasFile"] == true } else { x["statistics"]["episodeFileCount"].as_i64().unwrap_or(0) > 0 };
+                    x["monitored"] == true || has_file
+                })
+                .collect();
+            // datas ISO: a ordem do texto é a ordem do tempo
+            list.sort_by(|a, b| b["added"].as_str().cmp(&a["added"].as_str()));
+            list.iter().filter_map(|x| found(kind, x)).take(MAX).collect()
+        };
+        match movies {
+            Ok(v) => out.movies = pick(v, Kind::Movie),
+            Err(e) => out.errors.push(format!("filmes: {e:#}")),
+        }
+        match series {
+            Ok(v) => out.series = pick(v, Kind::Series),
+            Err(e) => out.errors.push(format!("séries: {e:#}")),
+        }
+        out
+    }
+
     /// Pede o item: adiciona ao Radarr/Sonarr e manda buscar. Se já estava lá,
     /// só manda buscar de novo o que falta.
     pub async fn request(&self, kind: Kind, id: i64) -> Result<Status> {

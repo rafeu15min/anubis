@@ -123,6 +123,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /` | página de busca |
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
 | `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
+| `GET /requests` | pedidos e biblioteca (a lista "Seus filmes e séries", igual em qualquer aparelho) |
 | `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
 | `GET /status/{kind}/{id}/versions` | pedido parado: versões encontradas e motivos das recusas |
 | `POST /watch` | assistir agora: `{"kind":"movie","id":N,"guid"?:…}` |

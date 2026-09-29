@@ -3,6 +3,7 @@
 //! GET  /                        — página de busca
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
+//! GET  /requests                — pedidos e biblioteca (a lista "Pedidos" da página)
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
 //! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
+        .route("/requests", get(|State(s): State<AppState>| async move { Json(s.orch.requests().await) }))
         .route("/status/{kind}/{id}", get(status))
         .route("/status/{kind}/{id}/versions", get(versions))
         .route("/watch", post(watch))

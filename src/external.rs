@@ -43,6 +43,9 @@ pub struct Seed {
     pub last: Option<NaiveDate>,
     #[serde(default)]
     pub favorite: bool,
+    /// gêneros no TMDB (ids do tipo: filme ou série); vazio se não se sabe
+    #[serde(default)]
+    pub genres: Vec<i64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -63,6 +66,13 @@ struct State {
     /// id do TVDB → id do TMDB (séries de anime)
     #[serde(default)]
     tvdb_tmdb: HashMap<i64, Option<i64>>,
+    /// "Movie:123"/"Tv:123" → gêneros, vindos da busca na importação
+    #[serde(default)]
+    genres: HashMap<String, Vec<i64>>,
+}
+
+fn genre_key(media: Media, id: i64) -> String {
+    format!("{media:?}:{id}")
 }
 
 pub struct External {
@@ -394,7 +404,8 @@ impl Orchestrator {
             match found {
                 Some((media, id)) => {
                     let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * w.count as f64).min(3.0) };
-                    seeds.push(Seed { media, tmdb: id, title: w.title, base, last: w.last, favorite: false });
+                    let genres = self.external.state.lock().await.genres.get(&genre_key(media, id)).cloned().unwrap_or_default();
+                    seeds.push(Seed { media, tmdb: id, title: w.title, base, last: w.last, favorite: false, genres });
                 }
                 None if unmatched.len() < 10 => unmatched.push(w.title),
                 None => {}
@@ -468,6 +479,12 @@ impl Orchestrator {
             Want::AnimeMovie => list.first().and_then(|r| r["id"].as_i64()).map(|id| (Media::Movie, id)),
         };
         let mut st = self.external.state.lock().await;
+        if let Some((media, id)) = found {
+            let kind = if media == Media::Movie { "movie" } else { "tv" };
+            let hit = list.iter().find(|r| r["id"].as_i64() == Some(id) && (r["media_type"].is_null() || r["media_type"] == kind));
+            let genres: Vec<i64> = hit.map(|r| r["genre_ids"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect()).unwrap_or_default();
+            st.genres.insert(genre_key(media, id), genres);
+        }
         match source {
             Source::Netflix => st.netflix_map.insert(w.key.clone(), found),
             Source::Crunchyroll => st.crunchyroll_map.insert(w.key.clone(), found),
@@ -563,7 +580,7 @@ impl Orchestrator {
             let Some((media, id)) = target else { continue };
             let last = e["updatedAt"].as_i64().and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.date_naive());
             let title = e["media"]["title"]["romaji"].as_str().unwrap_or_default().to_owned();
-            seeds.push(Seed { media, tmdb: id, title, base: if fav { base.max(3.0) } else { base }, last, favorite: fav });
+            seeds.push(Seed { media, tmdb: id, title, base: if fav { base.max(3.0) } else { base }, last, favorite: fav, genres: vec![] });
         }
         info!("AniList {user}: {} entradas, {} sementes", entries.len(), seeds.len());
         self.external.save().await; // guarda os ids do TMDB achados

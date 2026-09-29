@@ -9,8 +9,13 @@
 //!
 //! Candidatos: as recomendações do TMDB ("quem viu isto também viu") das
 //! sementes mais fortes; quem aparece em várias listas, bem colocado, sobe.
-//! Sai o que já foi visto, baixado ou pedido. Para completar a fileira desde
-//! o primeiro dia, entram os "Populares no Brasil" dos gêneros das sementes.
+//! Entram também os "Populares no Brasil" e os populares dos gêneros
+//! preferidos. Sai o que já foi visto, baixado ou pedido.
+//!
+//! Gosto por gênero vale para todos os tipos: muito filme de aventura puxa
+//! séries e animes de aventura. Os gêneros de filme e de série do TMDB são
+//! unificados (Ação/Aventura = "Ação e Aventura"), e o gosto vem dos gêneros
+//! das sementes (quando se sabe — importação) e dos das recomendações.
 
 use crate::discover::{Category, is_anime};
 use crate::orchestrator::Orchestrator;
@@ -27,6 +32,8 @@ const RECS_TTL: Duration = Duration::from_secs(24 * 3600);
 const ROW_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SEEDS: usize = 10;
 const ROW_LEN: usize = 20;
+/// quanto o gosto por gênero pesa perto das recomendações (que valem até 1)
+const TASTE_WEIGHT: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Media {
@@ -74,21 +81,84 @@ fn rank(seeds: &HashMap<(Media, i64), f64>, recs: &HashMap<(Media, i64), Vec<Val
     out
 }
 
-/// Peso de cada gênero entre os candidatos (para completar com os populares).
-fn genre_affinity(ranked: &[(Media, Value, f64)]) -> HashMap<i64, f64> {
-    let mut g = HashMap::new();
-    for (_, v, s) in ranked {
-        for id in v["genre_ids"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
-            *g.entry(id).or_insert(0.0) += s;
-        }
+/// Gênero de filme → o de série equivalente (o TMDB tem listas diferentes).
+fn common_genre(id: i64) -> i64 {
+    match id {
+        28 | 12 => 10759,   // Ação, Aventura → Ação e Aventura
+        878 | 14 => 10765,  // Ficção científica, Fantasia → Sci-Fi & Fantasia
+        10752 => 10768,     // Guerra → Guerra e Política
+        10762 => 10751,     // Kids → Família
+        other => other,
+    }
+}
+
+/// O caminho inverso, para buscar no TMDB os populares de um gênero.
+fn native_genres(common: i64, media: Media) -> Vec<i64> {
+    match (media, common) {
+        (Media::Movie, 10759) => vec![28, 12],
+        (Media::Movie, 10765) => vec![878, 14],
+        (Media::Movie, 10768) => vec![10752],
+        (Media::Movie, 10763 | 10764 | 10766 | 10767) => vec![],
+        (Media::Tv, 10751) => vec![10751, 10762],
+        // terror, romance, suspense, história, música, filme de TV: séries não têm
+        (Media::Tv, 27 | 10749 | 53 | 36 | 10402 | 10770) => vec![],
+        (_, g) => vec![g],
+    }
+}
+
+fn genres_of(v: &Value) -> impl Iterator<Item = i64> + '_ {
+    v["genre_ids"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(common_genre)
+}
+
+/// Soma por gênero unificado, com o maior valendo 1.
+fn normalized(mut g: HashMap<i64, f64>) -> HashMap<i64, f64> {
+    let top = g.values().copied().fold(0.0, f64::max);
+    if top > 0.0 {
+        g.values_mut().for_each(|x| *x /= top);
     }
     g
+}
+
+/// Gosto por gênero, sem olhar o tipo: das sementes cujo gênero se sabe e
+/// das recomendações (que dizem o gênero das demais). Meio a meio.
+fn taste(seed_genres: &[(f64, Vec<i64>)], ranked: &[(Media, Value, f64)]) -> HashMap<i64, f64> {
+    let mut from_seeds = HashMap::new();
+    for (w, genres) in seed_genres {
+        for g in genres {
+            *from_seeds.entry(common_genre(*g)).or_insert(0.0) += w;
+        }
+    }
+    let mut from_recs = HashMap::new();
+    for (_, v, s) in ranked {
+        for g in genres_of(v) {
+            *from_recs.entry(g).or_insert(0.0) += s;
+        }
+    }
+    let (a, b) = (normalized(from_seeds), normalized(from_recs));
+    let sources = [!a.is_empty(), !b.is_empty()].iter().filter(|x| **x).count().max(1) as f64;
+    let mut out = HashMap::new();
+    for (g, x) in a.into_iter().chain(b) {
+        *out.entry(g).or_insert(0.0) += x / sources;
+    }
+    out
+}
+
+/// Quanto um título combina com o gosto (0–1): a média dos seus gêneros.
+/// Animação não conta na fileira de animes (todos são).
+fn fit(taste: &HashMap<i64, f64>, v: &Value, cat: Category) -> f64 {
+    let genres: HashSet<i64> = genres_of(v).filter(|g| !(cat == Category::Animes && *g == 16)).collect();
+    if genres.is_empty() {
+        return 0.0;
+    }
+    genres.iter().map(|g| taste.get(g).copied().unwrap_or(0.0)).sum::<f64>() / genres.len() as f64
 }
 
 #[derive(Default)]
 pub struct Cache {
     recs: tokio::sync::Mutex<HashMap<(Media, i64), (Instant, Vec<Value>)>>,
     rows: tokio::sync::Mutex<HashMap<Category, (Instant, Vec<Found>)>>,
+    /// populares dos gêneros preferidos, pelo caminho no TMDB
+    by_genre: tokio::sync::Mutex<HashMap<String, (Instant, Vec<Value>)>>,
 }
 
 impl Cache {
@@ -106,7 +176,7 @@ impl Orchestrator {
         {
             return Ok(row.clone());
         }
-        let seeds = self.seeds().await?;
+        let (seeds, seed_genres) = self.seeds().await?;
         if seeds.is_empty() {
             return Ok(vec![]);
         }
@@ -121,31 +191,76 @@ impl Orchestrator {
         }
         let exclude = self.owned().await;
         let ranked = rank(&seeds, &recs, &exclude);
-        let fits = |m: Media, v: &Value| match cat {
-            Category::Movies => m == Media::Movie,
-            Category::Series => m == Media::Tv && !is_anime(v),
-            Category::Animes => m == Media::Tv && is_anime(v),
+        let known: Vec<(f64, Vec<i64>)> = seed_genres.iter().filter_map(|(k, g)| Some((*seeds.get(k)?, g.clone()))).collect();
+        let taste = taste(&known, &ranked);
+        let media = if cat == Category::Movies { Media::Movie } else { Media::Tv };
+        let fits = |m: Media, v: &Value| {
+            m == media
+                && match cat {
+                    Category::Movies => true,
+                    Category::Series => !is_anime(v),
+                    Category::Animes => is_anime(v),
+                }
         };
-        let mut picked: Vec<Value> = ranked.iter().filter(|(m, v, _)| fits(*m, v) && v["poster_path"].is_string()).map(|(_, v, _)| v.clone()).take(ROW_LEN).collect();
-        // completa com os populares no Brasil, os dos gêneros das sementes primeiro
-        if picked.len() < ROW_LEN {
-            let affinity = genre_affinity(&ranked);
-            let media = if cat == Category::Movies { Media::Movie } else { Media::Tv };
-            let seen: HashSet<i64> = picked.iter().filter_map(|v| v["id"].as_i64()).collect();
-            let mut popular: Vec<Value> = self
-                .showcase_list(cat, "Populares no Brasil")
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|v| v["id"].as_i64().is_some_and(|id| !seen.contains(&id) && !seeds.contains_key(&(media, id)) && !exclude.contains(&(media, id))))
-                .collect();
-            let fit = |v: &Value| v["genre_ids"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|g| affinity.get(&g).copied().unwrap_or(0.0)).sum::<f64>();
-            popular.sort_by(|a, b| fit(b).total_cmp(&fit(a)));
-            picked.extend(popular.into_iter().take(ROW_LEN - picked.len()));
+        // recomendações (0–1, pela mais forte) + os populares, que entram só pelo gosto
+        let mut pool: Vec<(Value, f64)> = ranked.iter().filter(|(m, v, _)| fits(*m, v)).map(|(_, v, s)| (v.clone(), *s)).collect();
+        let strongest = pool.iter().map(|p| p.1).fold(0.0, f64::max);
+        if strongest > 0.0 {
+            pool.iter_mut().for_each(|p| p.1 /= strongest);
         }
+        let mut seen: HashSet<i64> = pool.iter().filter_map(|p| p.0["id"].as_i64()).collect();
+        let mut popular = self.showcase_list(cat, "Populares no Brasil").await.unwrap_or_default();
+        popular.extend(self.popular_in(cat, &taste).await);
+        for v in popular {
+            let Some(id) = v["id"].as_i64() else { continue };
+            if fits(media, &v) && !seeds.contains_key(&(media, id)) && !exclude.contains(&(media, id)) && seen.insert(id) {
+                pool.push((v, 0.0));
+            }
+        }
+        let mut scored: Vec<(Value, f64)> = pool
+            .into_iter()
+            .filter(|(v, _)| v["poster_path"].is_string())
+            .map(|(v, s)| {
+                let f = fit(&taste, &v, cat);
+                (v, s + TASTE_WEIGHT * f)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let picked: Vec<Value> = scored.into_iter().take(ROW_LEN).map(|(v, _)| v).collect();
         let row = self.showcase_cards(cat, &picked).await;
         self.for_you_cache.rows.lock().await.insert(cat, (Instant::now(), row.clone()));
         Ok(row)
+    }
+
+    /// Os populares (2 páginas) dos três gêneros preferidos, no tipo da
+    /// categoria (24 h em memória). Animes: os populares do Japão, que o
+    /// gosto ordena depois.
+    async fn popular_in(&self, cat: Category, taste: &HashMap<i64, f64>) -> Vec<Value> {
+        let media = if cat == Category::Movies { Media::Movie } else { Media::Tv };
+        let mut top: Vec<(&i64, &f64)> = taste.iter().filter(|(g, _)| **g != 16 || cat != Category::Animes).collect();
+        top.sort_by(|a, b| b.1.total_cmp(a.1));
+        let genres: Vec<String> = top.into_iter().take(3).flat_map(|(g, _)| native_genres(*g, media)).map(|g| g.to_string()).collect();
+        let path = match cat {
+            Category::Animes => "discover/tv?language=pt-BR&sort_by=popularity.desc&vote_count.gte=50&with_genres=16&with_origin_country=JP".to_owned(),
+            _ if genres.is_empty() => return vec![],
+            Category::Movies => format!("discover/movie?language=pt-BR&sort_by=popularity.desc&vote_count.gte=200&with_genres={}", genres.join("|")),
+            Category::Series => format!("discover/tv?language=pt-BR&sort_by=popularity.desc&vote_count.gte=100&without_genres=10763|10764|10766|10767&with_genres={}", genres.join("|")),
+        };
+        if let Some((at, v)) = self.for_you_cache.by_genre.lock().await.get(&path)
+            && at.elapsed() < RECS_TTL
+        {
+            return v.clone();
+        }
+        let Some(tmdb) = self.tmdb.as_ref() else { return vec![] };
+        let mut out = vec![];
+        for page in 1..=2 {
+            match tmdb.get(&format!("{path}&page={page}")).await {
+                Ok(v) => out.extend(v["results"].as_array().cloned().unwrap_or_default()),
+                Err(_) => return out,
+            }
+        }
+        self.for_you_cache.by_genre.lock().await.insert(path, (Instant::now(), out.clone()));
+        out
     }
 
     /// Recomendações do TMDB de uma semente (24 h em memória).
@@ -180,7 +295,10 @@ impl Orchestrator {
     }
 
     /// As sementes: histórico e favoritos no Jellyfin + pedidos no Radarr/Sonarr.
-    async fn seeds(&self) -> Result<HashMap<(Media, i64), f64>> {
+    /// As sementes com peso e, das importadas, os gêneros no TMDB.
+    #[allow(clippy::type_complexity)]
+    async fn seeds(&self) -> Result<(HashMap<(Media, i64), f64>, HashMap<(Media, i64), Vec<i64>>)> {
+        let mut genres = HashMap::new();
         let mut seeds: HashMap<(Media, i64), f64> = HashMap::new();
         let mut add = |k: (Media, i64), w: f64| *seeds.entry(k).or_insert(0.0) += w;
 
@@ -245,6 +363,9 @@ impl Orchestrator {
         for e in self.external_seeds().await {
             let days = e.last.map(|d| (chrono::Utc::now().date_naive() - d).num_days() as f64).unwrap_or(90.0);
             add((e.media, e.tmdb), weight(e.base, days, e.favorite));
+            if !e.genres.is_empty() {
+                genres.insert((e.media, e.tmdb), e.genres);
+            }
         }
 
         // pedidos e baixados: intenção, peso baixo (pela data em que entraram)
@@ -256,7 +377,8 @@ impl Orchestrator {
                 add((media, tmdb), weight(1.0, days_since(x["added"].as_str()), false));
             }
         }
-        Ok(seeds)
+        drop(snap);
+        Ok((seeds, genres))
     }
 }
 
@@ -284,6 +406,21 @@ mod tests {
         let ids: Vec<i64> = rank(&seeds, &recs, &exclude).iter().map(|(_, v, _)| v["id"].as_i64().unwrap()).collect();
         // 11 vem das duas sementes; 2 é semente e 12 já está na biblioteca
         assert_eq!(ids, [11, 10]);
-        assert!(genre_affinity(&rank(&seeds, &recs, &exclude))[&16] > 0.0);
+    }
+
+    #[test]
+    fn taste_for_genres_crosses_media() {
+        // só filmes de aventura vistos: a série de "Ação e Aventura" combina mais que o drama
+        let movie = |id: i64, g: i64| (Media::Movie, json!({ "id": id, "genre_ids": [g] }), 1.0);
+        let t = taste(&[(2.0, vec![12]), (2.0, vec![28, 12])], &[movie(1, 12), movie(2, 18)]);
+        let adventure = json!({ "genre_ids": [10759] });
+        let drama = json!({ "genre_ids": [18] });
+        assert!(fit(&t, &adventure, Category::Series) > fit(&t, &drama, Category::Series));
+        assert_eq!(fit(&t, &adventure, Category::Series), 1.0);
+        // na fileira de animes, animação não conta (todos são)
+        let anime = json!({ "genre_ids": [16, 10759] });
+        assert_eq!(fit(&t, &anime, Category::Animes), 1.0);
+        assert_eq!(native_genres(10759, Media::Movie), [28, 12]);
+        assert!(native_genres(10749, Media::Tv).is_empty());
     }
 }

@@ -202,6 +202,20 @@ fn playable(title: &str) -> u8 {
     }
 }
 
+/// O librqbit só aceita o btih em base32 maiúsculo (o padrão); sites como o
+/// Comando mandam minúsculo ("xt=urn:btih:tjlu5dng…"), e o qBittorrent aceita
+/// os dois — por isso o "Baixar" funcionava e o "Assistir" não.
+fn normalize_magnet(m: &str) -> String {
+    let Some(start) = m.find("urn:btih:").map(|i| i + "urn:btih:".len()) else { return m.to_owned() };
+    let end = m[start..].find('&').map_or(m.len(), |i| start + i);
+    let hash = &m[start..end];
+    if hash.len() == 32 {
+        format!("{}{}{}", &m[..start], hash.to_ascii_uppercase(), &m[end..])
+    } else {
+        m.to_owned()
+    }
+}
+
 pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = releases
         .into_iter()
@@ -956,7 +970,7 @@ impl Orchestrator {
     /// para um magnet — é o que o Prowlarr faz com vários indexadores).
     pub(crate) async fn fetch_source(&self, release: &Value) -> Result<TorrentSource> {
         if let Some(m) = release["magnetUrl"].as_str().filter(|m| m.starts_with("magnet:")) {
-            return Ok(TorrentSource::Magnet(m.to_owned()));
+            return Ok(TorrentSource::Magnet(normalize_magnet(m)));
         }
         let mut url = release["downloadUrl"].as_str().context("versão sem link de download")?.to_owned();
         if let Some(cfg) = &self.cfg.stream {
@@ -972,7 +986,7 @@ impl Orchestrator {
             if res.status().is_redirection() {
                 let loc = res.headers().get("location").and_then(|v| v.to_str().ok()).context("redirecionamento sem destino")?.to_owned();
                 if loc.starts_with("magnet:") {
-                    return Ok(TorrentSource::Magnet(loc));
+                    return Ok(TorrentSource::Magnet(normalize_magnet(&loc)));
                 }
                 url = loc;
                 continue;
@@ -1161,6 +1175,15 @@ pub fn limit(r: Box<dyn AsyncRead + Send + Unpin>, len: u64) -> impl AsyncRead +
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lowercase_base32_magnets_become_uppercase() {
+        let m = "magnet:?xt=urn:btih:tjlu5dng3o22xg452s2jbndartkunrw6&dn=Supergirl%2020";
+        assert_eq!(normalize_magnet(m), "magnet:?xt=urn:btih:TJLU5DNG3O22XG452S2JBNDARTKUNRW6&dn=Supergirl%2020");
+        // hex (40) fica como está
+        let hex = "magnet:?xt=urn:btih:1127588e1cb04f16b7cb0f64dcce32edb792d157&dn=x";
+        assert_eq!(normalize_magnet(hex), hex);
+    }
     use super::*;
 
     #[test]

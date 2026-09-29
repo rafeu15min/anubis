@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Anubis · Busca</title>
 <style>
+  /* sem barras de rolagem: a página e os carrosséis rolam do mesmo jeito */
+  * { scrollbar-width: none; }
+  *::-webkit-scrollbar { display: none; }
   :root {
     --bg: #111016; --panel: #1b1a22; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8;
     --accent: #c9a24a; --ok: #5fbf7f; --info: #6fa8ff;
@@ -64,6 +67,13 @@
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
   @media (max-width: 700px) { .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; } .tabs button { flex: 1; } }
   .shelf h2 { margin-top: 20px; }
+  /* setas dos carrosséis: sem barra de rolagem, é por elas que o mouse anda de lado (no toque, arrasta) */
+  .railbox { position: relative; }
+  .railbox .nav { display: none; position: absolute; top: calc(clamp(112px, 30vw, 150px) * .75 - 22px); z-index: 1; width: 44px; height: 44px; min-height: 0; padding: 0; justify-content: center; border-radius: 50%; border-color: var(--line); background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--text); font-size: 26px; line-height: 1; }
+  .railbox .nav:hover { border-color: var(--accent); color: var(--accent); background: var(--bg); }
+  .railbox .nav[data-scroll="-1"] { left: 4px; }
+  .railbox .nav[data-scroll="1"] { right: 4px; }
+  @media (hover: hover) and (pointer: fine) { .railbox:hover .nav { display: inline-flex; } }
   .rail { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(112px, 30vw, 150px); gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 8px; }
   .tile { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; scroll-snap-align: start; }
   .tile:hover { background: none; }
@@ -427,7 +437,9 @@ function tile(it, ready) {
   return `<button class="tile" data-open="${k}">${img}<span class="t">${esc(it.title)}</span><span class="m">${it.year || ''}${badge}</span></button>`;
 }
 const shelf = (title, items, ready) => items.length
-  ? `<section class="shelf"><h2>${esc(title)}</h2><div class="rail">${items.map((it) => tile(it, ready)).join('')}</div></section>` : '';
+  ? `<section class="shelf"><h2>${esc(title)}</h2><div class="railbox">
+      <button class="nav" data-scroll="-1" aria-label="Voltar">‹</button><button class="nav" data-scroll="1" aria-label="Avançar">›</button>
+      <div class="rail">${items.map((it) => tile(it, ready)).join('')}</div></div></section>` : '';
 async function showCategory(cat) {
   currentCat = cat;
   try { localStorage.setItem(CATKEY, cat); } catch {}
@@ -605,6 +617,11 @@ $('#q').addEventListener('input', (e) => {
   if (term.length >= 2) timer = setTimeout(() => search(term), 400);
 });
 document.addEventListener('click', (e) => {
+  const nav = e.target.closest('[data-scroll]');
+  if (nav) {
+    const rail = nav.parentElement.querySelector('.rail');
+    rail.scrollBy({ left: +nav.dataset.scroll * rail.clientWidth * 0.9, behavior: 'smooth' });
+  }
   const b = e.target.closest('[data-req]');
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');

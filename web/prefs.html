@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Anubis · Preferências</title>
 <style>
+  /* sem barras de rolagem: a página e os carrosséis rolam do mesmo jeito */
+  * { scrollbar-width: none; }
+  *::-webkit-scrollbar { display: none; }
   :root { --bg: #111016; --panel: #1b1a22; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8; --accent: #c9a24a; --ok: #5fbf7f; --err: #ff8a8a; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }

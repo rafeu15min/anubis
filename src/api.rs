@@ -38,6 +38,7 @@
 //! token na config. A busca e os pedidos ficam abertos na rede local: pedir um
 //! filme não apaga nada, e as regras de qualidade continuam as do Radarr/Sonarr.
 
+use tracing::warn;
 use crate::disk;
 use crate::orchestrator::{Orchestrator, Report};
 use crate::search::Kind;
@@ -210,7 +211,10 @@ async fn watch(State(s): State<AppState>, Json(b): Json<WatchBody>) -> Response 
         Ok(Started::Ready) => Json(json!({ "player": format!("watch/{}/{}", kind_str(b.kind), b.id) })).into_response(),
         Ok(Started::NoApproved(list)) => (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list }))).into_response(),
         Ok(Started::Better { current, candidates }) => (StatusCode::CONFLICT, Json(json!({ "better": true, "current": current, "candidates": candidates }))).into_response(),
-        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+        Err(e) => {
+            warn!("assistir {}/{}: {e:#}", kind_str(b.kind), b.id);
+            error(StatusCode::BAD_GATEWAY, format!("{e:#}"))
+        }
     }
 }
 

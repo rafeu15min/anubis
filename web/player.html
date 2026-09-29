@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Anubis · Player</title>
 <style>
+  /* sem barras de rolagem: a página e os carrosséis rolam do mesmo jeito */
+  * { scrollbar-width: none; }
+  *::-webkit-scrollbar { display: none; }
   :root { --played: #ff1f3d; --have: rgba(255,255,255,.55); --track: rgba(255,255,255,.18); --text: #f2f2f2; --muted: rgba(255,255,255,.7); }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #000; color: var(--text); font: 15px/1.4 system-ui, sans-serif; overflow: hidden; }

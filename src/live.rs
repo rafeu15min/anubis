@@ -148,7 +148,7 @@ pub async fn run(orch: Arc<Orchestrator>) {
     }
 }
 
-async fn get(arr: Option<&crate::services::Arr>, path: &str) -> anyhow::Result<Vec<Value>> {
+pub(crate) async fn get(arr: Option<&crate::services::Arr>, path: &str) -> anyhow::Result<Vec<Value>> {
     match arr {
         Some(a) => Ok(a.get_json(path).await?.as_array().cloned().unwrap_or_default()),
         None => Ok(vec![]),

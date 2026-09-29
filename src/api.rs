@@ -4,6 +4,7 @@
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
 //! GET  /jellyfin/open?next=/details?id=X — abre o Jellyfin já logado (sessão deste navegador)
+//! GET  /discover/{filmes|series|animes} — vitrine: prontos para assistir, destaques, lançamentos, populares no Brasil
 //! GET  /events?items=movie:ID,series:ID — estado ao vivo (SSE) desses itens
 //! GET  /requests                — pedidos e biblioteca (a lista "Pedidos" da página)
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
@@ -64,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/request", post(request))
         .route("/events", get(events))
+        .route("/discover/{category}", get(discover))
         .route("/jellyfin/open", get(jellyfin_open))
         .route("/requests", get(|State(s): State<AppState>| async move { Json(s.orch.requests().await) }))
         .route("/status/{kind}/{id}", get(status))
@@ -516,6 +518,14 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
         }
     });
     Sse::new(Rx(rx)).keep_alive(KeepAlive::default()).into_response()
+}
+
+async fn discover(State(s): State<AppState>, Path(category): Path<String>) -> Response {
+    let Some(cat) = crate::discover::Category::parse(&category) else { return error(StatusCode::NOT_FOUND, "categoria: filmes, series ou animes") };
+    match s.orch.showcase(cat).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 #[derive(serde::Deserialize)]

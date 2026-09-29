@@ -27,6 +27,17 @@ A checagem roda a cada 30 minutos e também na hora em que um download termina
 (o qBittorrent chama `POST /hooks/torrent-finished`). Com `dry_run = true` ele
 só registra no log o que apagaria.
 
+**Vitrine.** A página abre em abas Filmes · Séries · Animes (a escolhida
+fica lembrada). Cada uma tem, em carrossel de pôsteres: Prontos para
+assistir (o que já está na biblioteca), Destaques (tendências da semana no
+TMDB; em animes, os em exibição mais populares), Lançamentos (filmes lançados
+em digital no Brasil nos últimos 60 dias; séries e animes estreados nos
+últimos 60/90 dias) e Populares no Brasil (o que está nos streamings
+brasileiros). Anime = animação japonesa. Um toque no pôster abre o cartão
+completo (assistir, pedir, episódios, juntar dublagem). As listas ficam 6 h em
+memória; a primeira abertura de séries/animes leva alguns segundos (o id do
+TVDB de cada série vem do TMDB), e a página já pré-carrega as outras abas.
+
 **Busca unificada.** Página em `/` que pesquisa filmes (Radarr/TMDB) e séries
 (Sonarr/TVDB) ao mesmo tempo. "Pedir" adiciona o item ao Radarr/Sonarr com o
 perfil de qualidade configurado (séries com o gênero Anime vão para a pasta de
@@ -148,6 +159,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
 | `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
 | `GET /requests` | pedidos e biblioteca (a lista "Seus filmes e séries", igual em qualquer aparelho) |
+| `GET /discover/{filmes\|series\|animes}` | vitrine: prontos para assistir, destaques, lançamentos, populares no Brasil |
 | `GET /jellyfin/open?next=…` | abre o Jellyfin já logado (sessão deste navegador, pela página-ponte) |
 | `GET /status/{kind}/{id}` | estado do pedido, progresso e link do Jellyfin |
 | `GET /status/{kind}/{id}/versions` | pedido parado: versões encontradas e motivos das recusas |
@@ -205,6 +217,8 @@ src/services.rs      clientes de Sonarr, Radarr, qBittorrent e Jellyfin
 src/disk.rs          uso do sistema de arquivos e inodes
 src/search.rs        busca, pedido e acompanhamento
 src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
+src/discover.rs      vitrine por categoria (TMDB + biblioteca)
+src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
 src/api.rs           rotas HTTP
 web/index.html       página de busca (embutida no binário)

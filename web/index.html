@@ -59,23 +59,44 @@
   .where img { width: 26px; height: 26px; border-radius: 6px; }
   dialog h4 { margin: 16px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
   @media (max-width: 480px) { .card { grid-template-columns: 72px 1fr; } .card img, .noposter { width: 72px; } }
+  .tabs { display: flex; gap: 6px; }
+  .tabs button { min-height: 40px; padding: 6px 14px; border: 1px solid var(--line); color: var(--muted); }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+  @media (max-width: 700px) { .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; } .tabs button { flex: 1; } }
+  .shelf h2 { margin-top: 20px; }
+  .rail { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(112px, 30vw, 150px); gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 8px; }
+  .tile { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; scroll-snap-align: start; }
+  .tile:hover { background: none; }
+  .tile img, .tile .noposter { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; background: var(--line); }
+  .tile:hover img { outline: 2px solid var(--accent); }
+  .tile .t { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tile .m { font-size: 12px; color: var(--muted); }
+  .tile .m .ok { color: var(--ok); }
 </style>
 </head>
 <body>
 <header>
   <div class="bar">
     <h1>ANUBIS</h1>
-    <input id="q" type="search" placeholder="Buscar filme ou série…" autocomplete="off" autofocus>
+    <nav class="tabs" id="tabs">
+      <button data-cat="filmes">Filmes</button><button data-cat="series">Séries</button><button data-cat="animes">Animes</button>
+    </nav>
+    <input id="q" type="search" placeholder="Buscar filme ou série…" autocomplete="off">
     <a class="gear" href="preferencias" title="Preferências" aria-label="Preferências"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.3 7.3 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg></a>
   </div>
 </header>
 <main>
   <section id="tracking" hidden>
-    <h2>Seus filmes e séries</h2>
+    <h2>Pedidos em andamento</h2>
     <div class="grid" id="tracked"></div>
   </section>
-  <div id="results"><p class="msg">Digite o nome de um filme ou série. Os pedidos vão para o Radarr/Sonarr, com as regras de qualidade de sempre.</p></div>
+  <div id="showcase"><p class="msg">Carregando…</p></div>
+  <div id="results" hidden></div>
 </main>
+<dialog id="item">
+  <div id="itembody"></div>
+  <div class="row" style="justify-content:flex-end"><button id="itemclose">Fechar</button></div>
+</dialog>
 <dialog id="pick">
   <h3 id="picktitle"></h3>
   <p class="meta" id="pickmsg"></p>
@@ -221,7 +242,6 @@ async function search(term) {
     const r = await fetch(`search?q=${encodeURIComponent(term)}`);
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
-    lastResults = {};
     for (const it of [...d.movies, ...d.series]) lastResults[keyOf(it)] = it;
     const sec = (title, list) => list.length ? `<h2>${title}</h2><div class="grid">${list.map((it) => card(it)).join('')}</div>` : '';
     box.innerHTML = sec('Filmes', d.movies) + sec('Séries', d.series)
@@ -391,17 +411,72 @@ async function episodes(tvdb, title) {
 }
 $('#epsclose').onclick = () => $('#eps').close();
 
+// vitrine por categoria: prontos para assistir + Destaques, Lançamentos e
+// Populares no Brasil (TMDB), em carrossel; um toque abre o cartão completo
+const CATKEY = 'anubis.categoria';
+let currentCat = 'filmes';
+try { currentCat = localStorage.getItem(CATKEY) || 'filmes'; } catch {}
+function tile(it, ready) {
+  const k = keyOf(it);
+  lastResults[k] = it;
+  const img = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
+  const badge = ready || it.available ? ' · <span class="ok">pronto</span>' : it.requested ? ' · na lista' : '';
+  return `<button class="tile" data-open="${k}">${img}<span class="t">${esc(it.title)}</span><span class="m">${it.year || ''}${badge}</span></button>`;
+}
+const shelf = (title, items, ready) => items.length
+  ? `<section class="shelf"><h2>${esc(title)}</h2><div class="rail">${items.map((it) => tile(it, ready)).join('')}</div></section>` : '';
+async function showCategory(cat) {
+  currentCat = cat;
+  try { localStorage.setItem(CATKEY, cat); } catch {}
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.cat === cat));
+  const box = $('#showcase');
+  box.innerHTML = '<p class="msg">Carregando…</p>';
+  try {
+    const r = await fetch(`discover/${cat}`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    if (cat !== currentCat) return;  // trocou de aba no meio
+    box.innerHTML = shelf('Prontos para assistir', d.ready, true) + d.rows.map((row) => shelf(row.title, row.items, false)).join('')
+      + (d.errors.length ? `<p class="msg err">${d.errors.map(esc).join('<br>')}</p>` : '')
+      || '<p class="msg">Nada por aqui ainda.</p>';
+    // as outras abas já ficam prontas no servidor (a 1ª vez de séries e animes leva segundos)
+    if (!prefetched) { prefetched = true; for (const c of ['filmes', 'series', 'animes']) if (c !== cat) fetch(`discover/${c}`).catch(() => {}); }
+  } catch (e) {
+    box.innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
+  }
+}
+let prefetched = false;
+$('#tabs').onclick = (e) => {
+  const b = e.target.closest('[data-cat]');
+  if (!b) return;
+  // voltar à vitrine limpa a busca
+  $('#q').value = ''; $('#results').hidden = true; $('#showcase').hidden = false;
+  showCategory(b.dataset.cat);
+};
+function openItem(k) {
+  const it = lastResults[k];
+  if (!it) return;
+  $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
+  $('#item').showModal();
+  if (it.requested) refresh(it, false);
+}
+$('#itemclose').onclick = () => $('#item').close();
+
 // atualiza o cartão do item onde ele aparecer (pedidos e resultados)
 function render(it, st) {
   const k = keyOf(it);
   if (tracked[k]) {
-    $('#tracking').hidden = false;
     const list = $('#tracked');
-    const html = card({ ...it, requested: true }, st);
     const old = list.querySelector(`[data-key="${k}"]`);
-    if (old) old.outerHTML = html; else list.insertAdjacentHTML('afterbegin', html);
+    // pronto sai daqui: aparece em "Prontos para assistir"
+    if ((st && st.state === 'available' && !st.mux) || (!st && tracked[k].done)) { if (old) old.remove(); }
+    else {
+      const html = card({ ...it, requested: true }, st);
+      if (old) old.outerHTML = html; else list.insertAdjacentHTML('afterbegin', html);
+    }
+    $('#tracking').hidden = !list.children.length;
   }
-  document.querySelectorAll(`#results [data-key="${k}"] .status`).forEach((el) => { el.innerHTML = statusHtml(st); });
+  document.querySelectorAll(`#results [data-key="${k}"] .status, #itembody [data-key="${k}"] .status`).forEach((el) => { el.innerHTML = statusHtml(st); });
 }
 
 // a busca de versões é lenta (vai aos indexadores): uma por item, refeita a cada 15 min
@@ -507,6 +582,8 @@ let timer;
 $('#q').addEventListener('input', (e) => {
   clearTimeout(timer);
   const term = e.target.value.trim();
+  $('#results').hidden = term.length < 2;
+  $('#showcase').hidden = term.length >= 2;
   if (term.length >= 2) timer = setTimeout(() => search(term), 400);
 });
 document.addEventListener('click', (e) => {
@@ -514,6 +591,8 @@ document.addEventListener('click', (e) => {
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
+  const op = e.target.closest('[data-open]');
+  if (op) openItem(op.dataset.open);
   const mx = e.target.closest('[data-mux]');
   if (mx) muxOptions(mx.dataset.mux, mx.dataset.title);
   const mc = e.target.closest('[data-muxcancel]');
@@ -527,6 +606,7 @@ document.addEventListener('click', (e) => {
 
 prune();
 for (const it of Object.values(tracked)) render(it, null);
+showCategory(currentCat);
 watchLive();
 loadRequests();
 </script>

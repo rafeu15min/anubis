@@ -20,7 +20,7 @@ pub enum Kind {
     Episode,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Found {
     pub kind: Kind,
     /// tmdbId (filme) ou tvdbId (série)
@@ -34,6 +34,8 @@ pub struct Found {
     pub anime: bool,
     /// já está no Radarr/Sonarr
     pub requested: bool,
+    /// já na biblioteca (filme baixado; série com algum episódio)
+    pub available: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -240,7 +242,7 @@ fn offers(country: &Value) -> WhereToWatch {
 
 const LIMIT: usize = 12;
 
-fn found(kind: Kind, v: &Value) -> Option<Found> {
+pub(crate) fn found(kind: Kind, v: &Value) -> Option<Found> {
     let id = v[if kind == Kind::Movie { "tmdbId" } else { "tvdbId" }].as_i64()?;
     let poster = v["remotePoster"].as_str().map(str::to_owned).or_else(|| {
         v["images"].as_array()?.iter().find(|i| i["coverType"] == "poster")?["remoteUrl"].as_str().map(str::to_owned)
@@ -257,6 +259,7 @@ fn found(kind: Kind, v: &Value) -> Option<Found> {
         genres,
         // no Radarr/Sonarr sem monitorar = só assistido pelo "assistir agora", não pedido
         requested: v["id"].as_i64().is_some_and(|i| i > 0) && v["monitored"].as_bool() != Some(false),
+        available: v["hasFile"] == true || v["statistics"]["episodeFileCount"].as_i64().unwrap_or(0) > 0,
     })
 }
 

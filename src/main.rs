@@ -12,6 +12,7 @@
 
 mod api;
 mod config;
+mod discover;
 mod disk;
 mod orchestrator;
 mod live;

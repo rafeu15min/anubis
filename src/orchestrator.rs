@@ -30,6 +30,8 @@ pub struct Orchestrator {
     /// última busca de versões de um pedido parado (evita repetir nos indexadores)
     /// central de estado (pedidos e downloads) que as rotas consultam
     pub(crate) live: crate::live::Live,
+    /// listas do TMDB da vitrine (6 h) e ids do TVDB das séries
+    pub(crate) showcase_cache: crate::discover::Cache,
     pub(crate) versions_cache: Mutex<HashMap<(crate::search::Kind, i64), (std::time::Instant, crate::search::Versions)>>,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
@@ -67,6 +69,7 @@ impl Orchestrator {
             streamer,
             muxes: Mutex::new(HashMap::new()),
             live: crate::live::Live::default(),
+            showcase_cache: crate::discover::Cache::default(),
             versions_cache: Mutex::new(HashMap::new()),
             cfg,
             running: Mutex::new(()),

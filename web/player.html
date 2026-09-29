@@ -330,6 +330,18 @@ async function offerLighter(d, need) {
     : '<small>Nenhuma versão mais leve com fontes suficientes agora.</small>')
     + '<button data-keep>Continuar com esta</button>';
 }
+// ---- tocando da biblioteca em WEB: se há Bluray com fontes, oferece a troca
+// (a busca leva um tempo; o vídeo já está tocando)
+async function offerBetter() {
+  let list = [];
+  try { const r = await fetch(`${base}/better`); if (r.ok) list = await r.json(); } catch {}
+  if (!list.length || !$('slow').hidden) return;
+  $('slow').innerHTML = '<p>Há uma versão melhor desta (Bluray). A troca baixa a nova (dá para continuar assistindo enquanto baixa) e ela substitui a atual na biblioteca.</p>'
+    + list.slice(0, 3).map((c) => `<button data-guid="${c.guid.replace(/"/g, '&quot;')}">Trocar por ${c.quality} · ${mb(c.size)} · ${c.seeders} fontes<br><small>${c.title.replace(/</g, '&lt;')}</small></button>`).join('')
+    + '<button data-keep>Continuar com esta</button>';
+  $('slow').hidden = false;
+}
+
 $('slow').onclick = async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
@@ -355,7 +367,7 @@ async function info() {
     $('release').textContent = d.release;
     have = d.have || []; paintHave();
     // começa quando o formato é conhecido (ou depois de ~20 s sem ffprobe)
-    if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); }
+    if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); if (d.phase === 'done') offerBetter(); }
     if (d.media && d.media.duration) duration = d.media.duration;
     if (d.next && !next) { next = d.next; $('next').textContent = `Próximo: ${d.next[1]} ▶`; $('next').hidden = false; }
     let t = PHASE[d.phase] || d.phase;

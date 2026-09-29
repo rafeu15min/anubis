@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
         .route("/watch/{kind}/{id}/lighter", get(lighter))
+        .route("/watch/{kind}/{id}/better", get(better))
         .route("/watch/{kind}/{id}/stream.mp4", get(converted))
         .route("/watch/{kind}/{id}/subs", get(subs_list))
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
@@ -212,7 +213,6 @@ async fn watch(State(s): State<AppState>, Json(b): Json<WatchBody>) -> Response 
     match s.orch.watch(b.kind, b.id, b.guid.as_deref(), b.keep).await {
         Ok(Started::Ready) => Json(json!({ "player": format!("watch/{}/{}", kind_str(b.kind), b.id) })).into_response(),
         Ok(Started::NoApproved(list)) => (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list }))).into_response(),
-        Ok(Started::Better { current, candidates }) => (StatusCode::CONFLICT, Json(json!({ "better": true, "current": current, "candidates": candidates }))).into_response(),
         Err(e) => {
             warn!("assistir {}/{}: {e:#}", kind_str(b.kind), b.id);
             error(StatusCode::BAD_GATEWAY, format!("{e:#}"))
@@ -258,6 +258,17 @@ async fn lighter(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>)
         Err(r) => return r,
     };
     match s.orch.lighter(&job).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn better(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    match s.orch.better(&job).await {
         Ok(list) => Json(list).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
@@ -663,13 +674,39 @@ struct HookToken {
 /// Webhook do Radarr/Sonarr (versão pega, importada, item adicionado…): a
 /// central refaz as listas agora. O token vai na URL (`?token=`), que é o
 /// que o webhook deles permite configurar.
-async fn arr_event(State(s): State<AppState>, Query(q): Query<HookToken>, headers: HeaderMap) -> Response {
+async fn arr_event(State(s): State<AppState>, Query(q): Query<HookToken>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let by_query = s.orch.cfg.server.token.is_some() && q.token == s.orch.cfg.server.token;
     if !by_query && !authorized(&s, &headers) {
         return error(StatusCode::UNAUTHORIZED, "token inválido");
     }
     s.orch.live.dirty.notify_one();
+    // importou (pelo "Baixar" ou pelo "Assistir"): o Jellyfin varre a biblioteca
+    let ev: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if ev["eventType"] == "Download"
+        && let Some(path) = ev["movie"]["folderPath"].as_str().or(ev["series"]["path"].as_str())
+    {
+        let (orch, path) = (s.orch.clone(), path.to_owned());
+        tokio::spawn(async move {
+            // um pacote de temporada chega como vários avisos: uma varredura por minuto basta
+            if !first_in_a_while(&path).await {
+                return;
+            }
+            if let Err(e) = orch.jellyfin.refresh_library_of(&path).await {
+                warn!("{e:#}");
+            }
+        });
+    }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Verdadeiro na primeira vez em 60 s para a mesma pasta.
+async fn first_in_a_while(key: &str) -> bool {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    static SEEN: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    let mut seen = SEEN.get_or_init(Default::default).lock().await;
+    seen.retain(|_, at| at.elapsed() < Duration::from_secs(60));
+    seen.insert(key.to_owned(), Instant::now()).is_none()
 }
 
 async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Response {

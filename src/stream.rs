@@ -177,9 +177,6 @@ pub enum Started {
     Ready,
     /// nenhuma versão passa no perfil: a página oferece as recusadas
     NoApproved(Vec<Candidate>),
-    /// na biblioteca em segunda opção (Bluray 1080p) e há versão na primeira:
-    /// a página pergunta se troca
-    Better { current: String, candidates: Vec<Candidate> },
 }
 
 /// Troca do arquivo da biblioteca por outra versão.
@@ -732,17 +729,8 @@ impl Orchestrator {
                 replaces = Some(Replace { file_id: lib.file_id, inode: crate::disk::file_id(&host).map(|f| f.inode) });
                 target.candidates = self.releases_of(kind, target.arr_id).await?;
             } else {
-                if !keep && SECOND_OPTION.contains(&lib.quality.as_str()) {
-                    // a busca vai aos indexadores: se demorar, toca o que já está no disco
-                    let found = tokio::time::timeout(Duration::from_secs(8), self.releases_of(kind, target.arr_id)).await;
-                    let better = match found {
-                        Ok(Ok(list)) => better_than(&lib, &list),
-                        _ => vec![],
-                    };
-                    if !better.is_empty() {
-                        return Ok(Started::Better { current: lib.quality, candidates: better });
-                    }
-                }
+                // toca o que já está no disco na hora; se há versão melhor, o
+                // player pergunta depois (GET …/better)
                 target.library = Some(lib);
             }
         }
@@ -843,6 +831,27 @@ impl Orchestrator {
     /// Versões mais leves que a que está baixando (o player oferece quando o
     /// download não acompanha): menores, com fontes suficientes, aceitas (ou
     /// recusadas só porque já existe arquivo) e dubladas se a atual é dublada.
+    /// Tocando da biblioteca em segunda opção (WEB 1080p): as versões na
+    /// primeira (Bluray 1080p) com fontes — o player oferece a troca.
+    pub async fn better(&self, job: &Job) -> Result<Vec<Candidate>> {
+        if job.handle().is_some() {
+            return Ok(vec![]);
+        }
+        let file = match job.info.kind {
+            Kind::Movie => self.radarr.as_ref().context("Radarr não configurado")?.movie(job.info.arr_id).await?["movieFile"].clone(),
+            _ => {
+                let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+                let ep = sonarr.episode(job.info.arr_id).await?;
+                sonarr.episode_file(ep["episodeFileId"].as_i64().unwrap_or(0)).await?
+            }
+        };
+        let lib = Library::from(&file)?;
+        if !SECOND_OPTION.contains(&lib.quality.as_str()) {
+            return Ok(vec![]);
+        }
+        Ok(better_than(&lib, &self.releases_of(job.info.kind, job.info.arr_id).await?))
+    }
+
     pub async fn lighter(&self, job: &Job) -> Result<Vec<Candidate>> {
         let list = self.releases_of(job.info.kind, job.info.arr_id).await?;
         let dubbed = list.iter().find(|c| c.title == job.info.release).is_some_and(|c| c.portuguese());

@@ -525,6 +525,31 @@ impl Jellyfin {
             .header("Authorization", format!("MediaBrowser Token=\"{}\"", self.key))
     }
 
+    /// Pede ao Jellyfin para varrer a biblioteca onde entrou `arr_path` (o
+    /// caminho como o Radarr/Sonarr o vê, ex. "/data/media/series/Vox"). A
+    /// biblioteca é a de pasta com o mesmo nome ("/media/series"); sem
+    /// nenhuma, varre todas. O Jellyfin não vigia pasta que estava vazia
+    /// quando ele subiu, então a primeira série de uma biblioteca só entrava
+    /// na varredura agendada.
+    pub async fn refresh_library_of(&self, arr_path: &str) -> Result<()> {
+        let folders = self.get_json("Library/VirtualFolders").await?;
+        let hit = folders.as_array().into_iter().flatten().find(|f| {
+            f["Locations"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|loc| {
+                let name = loc.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+                !name.is_empty() && format!("{}/", arr_path.trim_end_matches('/')).contains(&format!("/{name}/"))
+            })
+        });
+        let path = match hit.and_then(|f| f["ItemId"].as_str()) {
+            Some(id) => format!("Items/{id}/Refresh?Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default"),
+            None => "Library/Refresh".to_owned(),
+        };
+        let res = self.req(Method::POST, &path).send().await.context("Jellyfin varrer biblioteca")?;
+        if !res.status().is_success() {
+            bail!("Jellyfin varrer biblioteca: HTTP {}", res.status());
+        }
+        Ok(())
+    }
+
     /// Caminhos (como o Jellyfin os vê) do que está tocando agora ou pela
     /// metade para qualquer usuário.
     pub async fn watching(&self) -> Result<Vec<String>> {

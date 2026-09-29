@@ -286,6 +286,43 @@ fn best_named<'a>(list: &'a [Value], title: &str, media: &str) -> Option<&'a Val
         .copied()
 }
 
+/// Um título da Crunchyroll, série ou filme: o de nome igual (sem contar
+/// pontuação), anime primeiro e o mais votado. Sem nome igual, o primeiro
+/// anime com votos: com 3 episódios vistos ou mais, só série (o filme-resumo
+/// de Kabaneri tem o nome em inglês e a série não); com 1 ou 2, filme também
+/// ("Sword Art Online Progressive" → o filme Aria).
+fn anime_named(list: &[Value], title: &str, episodes: u32) -> Option<(Media, i64)> {
+    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let want = norm(title);
+    let media = |r: &Value| match r["media_type"].as_str() {
+        Some("tv") => Some(Media::Tv),
+        Some("movie") => Some(Media::Movie),
+        _ => None,
+    };
+    let anime = |r: &Value| {
+        let animation = r["genre_ids"].as_array().is_some_and(|g| g.iter().any(|x| x == 16));
+        animation && (r["original_language"] == "ja" || r["origin_country"].as_array().is_some_and(|c| c.iter().any(|x| x == "JP")))
+    };
+    let same_name = |r: &Value| ["name", "original_name", "title", "original_title"].iter().any(|f| r[*f].as_str().is_some_and(|n| norm(n) == want));
+    let found: Vec<&Value> = list.iter().filter(|r| media(r).is_some()).collect();
+    found
+        .iter()
+        .take(8)
+        .filter(|r| same_name(r))
+        .max_by_key(|r| (anime(r), r["vote_count"].as_u64().unwrap_or(0)))
+        .or_else(|| {
+            let allowed = |r: &&&Value| episodes <= 2 || media(r) == Some(Media::Tv);
+            let voted = |r: &&&Value| r["vote_count"].as_u64().unwrap_or(0) >= 10;
+            let anime = |r: &&&Value| anime(r);
+            found
+                .iter()
+                .find(|r| allowed(r) && anime(r) && voted(r))
+                .or_else(|| found.iter().find(|r| allowed(r) && anime(r)))
+                .or_else(|| found.iter().find(|r| allowed(r)))
+        })
+        .and_then(|r| Some((media(r)?, r["id"].as_i64()?)))
+}
+
 // ------------------------------------------------------------ AniList
 
 /// Peso de uma entrada do AniList: status, nota (0–10) e episódios vistos.
@@ -438,14 +475,16 @@ impl Orchestrator {
                 Source::Crunchyroll => st.crunchyroll_map.get(&w.key).copied(),
             }
         };
-        if let Some(f) = cached {
-            return f;
+        // não achado da outra vez: tenta de novo (a busca pode ter melhorado)
+        if let Some(Some(f)) = cached {
+            return Some(f);
         }
         let tmdb = self.tmdb.as_ref()?;
         let q = crate::services::url_encode(&w.title);
         let path = match w.want {
             Want::Series | Want::MovieOrSeries => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
-            Want::Anime => format!("search/tv?query={q}&language=pt-BR&include_adult=false"),
+            // a Crunchyroll lista filme como série de um episódio: busca os dois
+            Want::Anime => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
             Want::AnimeMovie => format!("search/movie?query={q}&language=pt-BR&include_adult=false"),
         };
         let mut res = tmdb.get(&path).await;
@@ -475,7 +514,7 @@ impl Orchestrator {
             Want::Series => tv(),
             Want::MovieOrSeries => named("movie").map(|id| (Media::Movie, id)).or_else(tv),
             // na Crunchyroll quase tudo é anime: prefere o resultado que é anime
-            Want::Anime => list.iter().find(|r| crate::discover::is_anime(r)).or(list.first()).and_then(|r| r["id"].as_i64()).map(|id| (Media::Tv, id)),
+            Want::Anime => anime_named(&list, asked, w.count),
             Want::AnimeMovie => list.first().and_then(|r| r["id"].as_i64()).map(|id| (Media::Movie, id)),
         };
         let mut st = self.external.state.lock().await;
@@ -677,6 +716,27 @@ mod tests {
             json!({"media_type": "movie", "id": 553301, "title": "Your Name", "original_title": "Your Name", "vote_count": 0}),
         ];
         assert_eq!(best_named(&your_name, "Your Name", "movie").unwrap()["id"], 372058);
+    }
+
+    #[test]
+    fn crunchyroll_movie_listed_as_series_is_a_movie() {
+        let list = vec![
+            json!({"media_type": "tv", "id": 95479, "name": "Jujutsu Kaisen", "genre_ids": [16], "origin_country": ["JP"], "vote_count": 4000}),
+            json!({"media_type": "movie", "id": 810693, "title": "Jujutsu Kaisen 0", "genre_ids": [16, 28], "original_language": "ja", "vote_count": 1500}),
+        ];
+        assert_eq!(anime_named(&list, "JUJUTSU KAISEN 0", 1), Some((Media::Movie, 810693)));
+        assert_eq!(anime_named(&list, "JUJUTSU KAISEN", 20), Some((Media::Tv, 95479)));
+        // série com nome em japonês e filme-resumo com o nome em inglês
+        let kabaneri = vec![
+            json!({"media_type": "movie", "id": 431803, "title": "Kabaneri of the Iron Fortress: Life That Burns", "genre_ids": [16], "original_language": "ja", "vote_count": 41}),
+            json!({"media_type": "tv", "id": 65945, "name": "Kabaneri da Fortaleza de Ferro", "genre_ids": [16], "origin_country": ["JP"], "vote_count": 900}),
+        ];
+        assert_eq!(anime_named(&kabaneri, "Kabaneri of the Iron Fortress", 5), Some((Media::Tv, 65945)));
+        let sao = vec![
+            json!({"media_type": "person", "id": 1, "name": "Alguém"}),
+            json!({"media_type": "movie", "id": 776655, "title": "Sword Art Online Progressive: Aria of a Starless Night", "genre_ids": [16], "original_language": "ja"}),
+        ];
+        assert_eq!(anime_named(&sao, "Sword Art Online Progressive", 1), Some((Media::Movie, 776655)));
     }
 
     #[test]

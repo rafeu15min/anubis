@@ -23,6 +23,9 @@
 //! GET  /mux/{tmdb}  ·  DELETE   — andamento · desistir (apaga os downloads)
 //! GET  /preferencias            — página de preferências
 //! GET  /prefs  ·  PUT /prefs     — idioma do áudio (filmes/séries) e legendas
+//! GET  /history                 — histórico de outros serviços (Netflix, AniList)
+//! POST /history/netflix  · DELETE — importa o CSV da Netflix (corpo = o arquivo) · apaga
+//! PUT  /history/anilist         — {"user": "nome"} (vazio tira)
 //! GET  /health                  — vivo?
 //! GET  /storage                 — uso do disco, regras e o último ciclo
 //! GET  /storage/plan            — o que seria apagado agora (não apaga)
@@ -64,6 +67,9 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
         .route("/prefs", get(get_prefs).put(put_prefs))
+        .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
+        .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
+        .route("/history/anilist", axum::routing::put(set_anilist))
         .route("/request", post(request))
         .route("/events", get(events))
         .route("/discover/{category}", get(discover))
@@ -382,6 +388,31 @@ async fn sub_raw(State(s): State<AppState>, Path((kind, id, n)): Path<(Kind, i64
     match streamer.subtitle_raw(&job, n).await {
         Ok(b) => ([("content-type", "text/plain; charset=utf-8")], b).into_response(),
         Err(e) => error(StatusCode::NOT_FOUND, format!("{e:#}")),
+    }
+}
+
+async fn import_netflix(State(s): State<AppState>, body: String) -> Response {
+    match s.orch.import_netflix(&body).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+async fn clear_netflix(State(s): State<AppState>) -> Response {
+    s.orch.clear_netflix().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct AnilistBody {
+    #[serde(default)]
+    user: String,
+}
+
+async fn set_anilist(State(s): State<AppState>, Json(b): Json<AnilistBody>) -> Response {
+    match s.orch.set_anilist(&b.user).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
 

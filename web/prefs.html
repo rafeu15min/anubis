@@ -49,6 +49,18 @@
     <p class="help">Vale para os pedidos e para o "Assistir". No "Assistir", uma versão com poucas fontes perde para uma bem semeada, e o player sugere uma versão mais leve se o download não acompanhar.</p>
     <div id="quality"></div>
   </section>
+  <section>
+    <h2>Histórico de outros serviços</h2>
+    <p class="help">Alimenta o "Para você" com o que você assiste fora daqui.</p>
+    <div class="row"><b>Netflix</b><div>
+      <p class="help">Na Netflix, em <a href="https://www.netflix.com/viewingactivity" target="_blank" rel="noopener">Conta → Perfil → Atividade de visualização</a>, use "Baixar tudo" e envie o arquivo aqui. Pode enviar de novo quando quiser atualizar (substitui o anterior).</p>
+      <input type="file" id="nfx" accept=".csv,text/csv"> <span id="nfxmsg" class="help"></span>
+    </div></div>
+    <div class="row"><b>Crunchyroll</b><div>
+      <p class="help">Pelo AniList: crie uma conta em <a href="https://anilist.co" target="_blank" rel="noopener">anilist.co</a> e instale a extensão <a href="https://malsync.moe" target="_blank" rel="noopener">MAL-Sync</a> no navegador, ligada ao AniList. Ela registra sozinha o que você assiste na Crunchyroll. Aqui, só o nome de usuário do AniList (a lista precisa ser pública).</p>
+      <input id="anilist" placeholder="usuário do AniList" style="min-height:40px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"> <button id="alsave" type="button">Ligar</button> <span id="almsg" class="help"></span>
+    </div></div>
+  </section>
   <section id="subsbox">
     <h2>Legendas</h2>
     <p class="help">O Bazarr procura sozinho legendas nestes idiomas para tudo o que entra na biblioteca.</p>
@@ -118,6 +130,38 @@ $('#save').onclick = async () => {
   $('#save').disabled = false;
 };
 load();
+
+// histórico de outros serviços
+async function loadHistory() {
+  try {
+    const d = await (await fetch('history')).json();
+    $('#nfxmsg').textContent = d.netflix_titles ? `${d.netflix_titles} títulos importados (${d.netflix_at})` : 'nada importado ainda';
+    $('#anilist').value = d.anilist_user || '';
+    $('#almsg').textContent = d.anilist_user ? `ligado${d.anilist_entries != null ? ` · ${d.anilist_entries} títulos usados` : ''}` : '';
+  } catch {}
+}
+$('#nfx').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $('#nfxmsg').textContent = 'Importando… (acha cada título no TMDB)';
+  try {
+    const r = await fetch('history/netflix', { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: await f.text() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    $('#nfxmsg').textContent = `${d.lines} exibições, ${d.titles} títulos, ${d.matched} achados` + (d.unmatched.length ? ` · não achados: ${d.unmatched.join(', ')}` : '');
+  } catch (err) { $('#nfxmsg').textContent = `Falhou: ${err.message}`; }
+  e.target.value = '';
+};
+$('#alsave').onclick = async () => {
+  $('#almsg').textContent = 'Lendo a lista…';
+  try {
+    const r = await fetch('history/anilist', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user: $('#anilist').value }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    $('#almsg').textContent = d.anilist_user ? `ligado · ${d.anilist_entries ?? 0} títulos usados` : 'desligado';
+  } catch (err) { $('#almsg').textContent = `Falhou: ${err.message}`; }
+};
+loadHistory();
 </script>
 </body>
 </html>

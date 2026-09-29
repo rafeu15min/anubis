@@ -28,7 +28,7 @@ const ROW_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SEEDS: usize = 10;
 const ROW_LEN: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Media {
     Movie,
     Tv,
@@ -89,6 +89,13 @@ fn genre_affinity(ranked: &[(Media, Value, f64)]) -> HashMap<i64, f64> {
 pub struct Cache {
     recs: tokio::sync::Mutex<HashMap<(Media, i64), (Instant, Vec<Value>)>>,
     rows: tokio::sync::Mutex<HashMap<Category, (Instant, Vec<Found>)>>,
+}
+
+impl Cache {
+    /// Histórico mudou (importação da Netflix, AniList): refazer as fileiras.
+    pub async fn clear(&self) {
+        self.rows.lock().await.clear();
+    }
 }
 
 impl Orchestrator {
@@ -232,6 +239,12 @@ impl Orchestrator {
             if let Some(tmdb) = series_tmdb.get(&sid) {
                 add((Media::Tv, *tmdb), weight((1.0 + 0.25 * n).min(3.0), days, false));
             }
+        }
+
+        // outros serviços: Netflix (CSV importado) e AniList (Crunchyroll)
+        for e in self.external_seeds().await {
+            let days = e.last.map(|d| (chrono::Utc::now().date_naive() - d).num_days() as f64).unwrap_or(90.0);
+            add((e.media, e.tmdb), weight(e.base, days, e.favorite));
         }
 
         // pedidos e baixados: intenção, peso baixo (pela data em que entraram)

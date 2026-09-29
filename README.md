@@ -47,6 +47,12 @@ candidatos são as recomendações do TMDB das sementes mais fortes (quem aparec
 em várias listas sobe); sai o que já foi visto, baixado ou pedido. Para
 funcionar desde o primeiro dia, completa com os Populares no Brasil dos
 gêneros das sementes. Recomendações 24 h e a fileira 10 min em memória.
+Também entra o histórico de fora (Preferências → Histórico de outros
+serviços): o CSV da Netflix ("Atividade de visualização" → Baixar tudo;
+episódios viram a série, cada título é achado no TMDB uma vez) e a lista do
+AniList — com a extensão MAL-Sync, o que se assiste na Crunchyroll vai sozinho
+para o AniList (status, nota e favoritos pesam; ids pela lista pública
+Fribb/anime-lists). Fica em `state_dir/externo.json`.
 
 **Busca unificada.** Página em `/` que pesquisa filmes (Radarr/TMDB) e séries
 (Sonarr/TVDB) ao mesmo tempo. "Pedir" adiciona o item ao Radarr/Sonarr com o
@@ -189,6 +195,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
 | `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |
 | `GET /preferencias` | página de preferências |
+| `GET /history` · `POST`/`DELETE /history/netflix` · `PUT /history/anilist` | histórico de outros serviços (Netflix, AniList) |
 | `GET /prefs` · `PUT /prefs` | idioma do áudio (filmes/séries) e legendas |
 | `GET /health` | versão e estado |
 | `GET /storage` | uso do disco, regras e o último ciclo executado |
@@ -235,6 +242,7 @@ src/search.rs        busca, pedido e acompanhamento
 src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
 src/discover.rs      vitrine por categoria (TMDB + biblioteca)
 src/foryou.rs        "Para você": sementes do Jellyfin/Radarr/Sonarr + recomendações do TMDB
+src/external.rs      histórico de fora: CSV da Netflix e lista do AniList (Crunchyroll)
 src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
 src/api.rs           rotas HTTP

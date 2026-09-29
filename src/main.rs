@@ -14,6 +14,7 @@ mod api;
 mod config;
 mod discover;
 mod disk;
+mod external;
 mod foryou;
 mod orchestrator;
 mod live;

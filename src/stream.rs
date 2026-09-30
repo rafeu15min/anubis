@@ -80,6 +80,9 @@ pub struct JobInfo {
     /// substitui o arquivo que já estava na biblioteca
     #[serde(default)]
     replaces: Option<Replace>,
+    /// legendas que vêm no torrent (caminhos no disco), baixadas antes do vídeo
+    #[serde(default)]
+    subs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -111,6 +114,8 @@ pub struct Job {
     last_access: StdMutex<Instant>,
     media: StdMutex<Option<MediaInfo>>,
     probing: StdMutex<bool>,
+    /// legendas do torrent já completas no disco (antes disso, não aparecem)
+    subs_ready: StdMutex<HashSet<PathBuf>>,
 }
 
 impl Job {
@@ -122,6 +127,7 @@ impl Job {
             last_access: StdMutex::new(Instant::now()),
             media: StdMutex::new(None),
             probing: StdMutex::new(false),
+            subs_ready: StdMutex::new(HashSet::new()),
         })
     }
     pub fn phase(&self) -> (Phase, Option<String>) {
@@ -278,6 +284,31 @@ fn is_episode(name: &str, s: i64, e: i64) -> bool {
 fn is_this_episode(release: &Value, s: i64, e: i64) -> bool {
     release["seasonNumber"].as_i64() == Some(s)
         && release["episodeNumbers"].as_array().is_some_and(|n| n.iter().any(|x| x.as_i64() == Some(e)))
+}
+
+/// Legendas do torrent que são deste vídeo (índices em `paths`): ao lado
+/// dele ou numa pasta Subs/Legendas; num pacote, só as do episódio (pelo
+/// nome do vídeo ou pelo SxxEyy).
+fn subs_for(paths: &[PathBuf], video: &Path, episode: Option<(i64, i64)>) -> Vec<usize> {
+    let has_ext = |p: &Path, list: &[&str]| p.extension().and_then(|e| e.to_str()).is_some_and(|e| list.contains(&e.to_lowercase().as_str()));
+    let videos = paths.iter().filter(|p| has_ext(p, &VIDEO_EXT)).count();
+    let stem = video.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_lowercase();
+    paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| has_ext(p, &["srt", "vtt", "ass", "ssa"]))
+        .filter(|(_, p)| {
+            let in_subs_dir = p.components().any(|c| {
+                matches!(c.as_os_str().to_str().map(str::to_lowercase).as_deref(), Some("subs" | "sub" | "subtitles" | "legendas" | "legenda"))
+            });
+            if p.parent() != video.parent() && !in_subs_dir {
+                return false;
+            }
+            let name = p.to_string_lossy().to_lowercase();
+            videos <= 1 || name.contains(&stem) || episode.is_some_and(|(s, e)| is_episode(&name, s, e))
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// O vídeo a tocar: o maior, ou (episódio) o do episódio pedido.
@@ -539,8 +570,19 @@ impl Streamer {
     /// completo, as embutidas (extraí-las lê o vídeo inteiro).
     pub fn subtitles(&self, job: &Job) -> Vec<crate::subs::Sub> {
         use crate::subs::{Sub, SubSource, external, language};
-        let mut out = external(&job.info.host_file);
         let complete = job.handle().is_none() || job.phase().0 != Phase::Downloading;
+        let ready = job.subs_ready.lock().unwrap().clone();
+        let usable = |p: &PathBuf| complete || ready.contains(p) || !job.info.subs.contains(p);
+        let mut out: Vec<Sub> = external(&job.info.host_file).into_iter().filter(|s| !matches!(&s.source, SubSource::File(p) if !usable(p))).collect();
+        // as de uma pasta Subs/ ("Subs/2_Portuguese.srt")
+        for p in job.info.subs.iter().filter(|p| usable(p)) {
+            if out.iter().any(|s| matches!(&s.source, SubSource::File(q) if q == p)) {
+                continue;
+            }
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let (label, lang) = language(stem.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_' || c == '.' || c == ' '));
+            out.push(Sub { label, lang, source: SubSource::File(p.clone()) });
+        }
         if complete && let Some(m) = job.media() {
             for (i, lang, title) in m.subs {
                 // o título costuma dizer mais que a tag ("Portuguese (Brazil) [SDH]")
@@ -760,6 +802,7 @@ impl Orchestrator {
                     next: target.next,
                     phase: Phase::Done,
                     replaces: None,
+                    subs: vec![],
                 },
                 None,
             );
@@ -779,14 +822,20 @@ impl Orchestrator {
         let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
         let source = self.fetch_source(&pick.raw).await?;
         let folder = stream_cfg.download_dir.join(folder_name(&pick.title));
+        let job_folder = folder.clone();
         info!("assistir agora: {} — {} ({} MB)", target.title, pick.title, pick.size >> 20);
         let handle = self.add_torrent(&source, &folder).await?;
         let (file_id, file_len, rel) = handle.with_metadata(|m| video_file(&m.file_infos, target.episode))?.context("o torrent não tem o vídeo")?;
         let many_files = handle.with_metadata(|m| m.file_infos.len())? > 1;
-        // pacote: só o arquivo deste episódio
+        let sub_files: Vec<(usize, PathBuf)> = handle.with_metadata(|m| {
+            let paths: Vec<PathBuf> = m.file_infos.iter().map(|f| f.relative_filename.clone()).collect();
+            subs_for(&paths, &rel, target.episode).into_iter().map(|i| (i, paths[i].clone())).collect()
+        })?;
+        // pacote: só o arquivo deste episódio (e as legendas dele)
         let only_file = kind == Kind::Episode && many_files;
         if only_file {
-            streamer.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(handle.id()), &HashSet::from([file_id])).await?;
+            let keep: HashSet<usize> = std::iter::once(file_id).chain(sub_files.iter().map(|(i, _)| *i)).collect();
+            streamer.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(handle.id()), &keep).await?;
         }
 
         let info_hash = handle.info_hash().as_string();
@@ -818,9 +867,28 @@ impl Orchestrator {
                 next: target.next,
                 phase: Phase::Downloading,
                 replaces,
+                subs: sub_files.iter().map(|(_, r)| job_folder.join(r)).collect(),
             },
-            Some(handle),
+            Some(handle.clone()),
         );
+        // legendas antes do vídeo: ler pelo librqbit prioriza as peças delas
+        // (são poucos KB); completas, o player já as oferece
+        if !sub_files.is_empty() {
+            let job = job.clone();
+            tokio::spawn(async move {
+                for (i, r) in sub_files {
+                    let mut buf = Vec::new();
+                    match handle.clone().stream(i).await {
+                        Ok(mut st) => {
+                            if st.read_to_end(&mut buf).await.is_ok() {
+                                job.subs_ready.lock().unwrap().insert(job.info.folder.join(&r));
+                            }
+                        }
+                        Err(e) => warn!("legenda {}: {e:#}", r.display()),
+                    }
+                }
+            });
+        }
         streamer.jobs.lock().await.insert((kind, id), job.clone());
         streamer.save().await;
         streamer.probe(&job);
@@ -1184,6 +1252,23 @@ pub fn limit(r: Box<dyn AsyncRead + Send + Unpin>, len: u64) -> impl AsyncRead +
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn subtitles_of_this_video_only() {
+        let p = |x: &str| PathBuf::from(x);
+        // filme: ao lado e numa pasta Subs
+        let movie = [p("F/Filme.mkv"), p("F/Filme.pt-BR.srt"), p("F/Subs/2_Portuguese.srt"), p("F/sample.txt")];
+        assert_eq!(subs_for(&movie, &movie[0], None), [1, 2]);
+        // pacote: só as do episódio 2
+        let pack = [
+            p("S/Show.S01E01.mkv"),
+            p("S/Show.S01E02.mkv"),
+            p("S/Subs/Show.S01E01/3_Portuguese.srt"),
+            p("S/Subs/Show.S01E02/3_Portuguese.srt"),
+            p("S/Show.S01E02.por.srt"),
+        ];
+        assert_eq!(subs_for(&pack, &pack[1], Some((1, 2))), [3, 4]);
+    }
 
     #[test]
     fn lowercase_base32_magnets_become_uppercase() {

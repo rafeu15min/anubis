@@ -271,6 +271,19 @@ impl Candidate {
     }
 }
 
+/// O idioma original de um filme ou série do Radarr/Sonarr.
+fn original_language(item: &Value) -> Option<&str> {
+    item["originalLanguage"]["name"].as_str().filter(|l| !l.is_empty() && *l != "Unknown")
+}
+
+/// Sem português, só o idioma original: tira as versões dubladas num
+/// terceiro idioma (um anime dublado em inglês). Nome sem idioma conta como
+/// original — é o que o Radarr e o Sonarr fazem. Sem saber o original, nada sai.
+fn original_or_portuguese(list: &mut Vec<Candidate>, original: Option<&str>) {
+    let Some(original) = original else { return };
+    list.retain(|c| c.portuguese() || c.languages.iter().all(|l| l == "Unknown") || c.languages.iter().any(|l| l == original));
+}
+
 /// O nome do arquivo é do episódio `s`x`e`? (S01E05, s1e05, 1x05)
 fn is_episode(name: &str, s: i64, e: i64) -> bool {
     let n = name.to_lowercase();
@@ -320,6 +333,8 @@ struct Wanted {
     series_id: i64,
     /// nomes da série (normalizados): o do Sonarr e o em português
     names: Vec<String>,
+    /// idioma original da série no Sonarr ("Japanese")
+    original: Option<String>,
     episode_id: i64,
     season: i64,
     episode: i64,
@@ -377,7 +392,17 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value
     let rank = order.iter().position(|(q, _)| q == quality);
     let scores: HashMap<i64, i64> =
         profile["formatItems"].as_array().into_iter().flatten().filter_map(|f| Some((f["format"].as_i64()?, f["score"].as_i64().unwrap_or(0)))).collect();
-    let score: i64 = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| scores.get(&c["id"].as_i64()?)).sum();
+    let mut score: i64 = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| scores.get(&c["id"].as_i64()?)).sum();
+    // série que o Sonarr não reconheceu (nome em português): sem ela, ele não
+    // sabe o idioma original e não marca o formato do original — marca aqui,
+    // tomando o nome sem idioma como original, como ele faria
+    if parsed["series"].is_null() {
+        let langs: Vec<&str> = pe["languages"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
+        if langs.iter().all(|l| *l == "Unknown") || w.original.as_deref().is_some_and(|o| langs.contains(&o)) {
+            let original = profile["formatItems"].as_array().into_iter().flatten().find(|f| f["name"] == crate::prefs::ORIGINAL_FORMAT);
+            score += original.and_then(|f| f["score"].as_i64()).unwrap_or(0);
+        }
+    }
     let min = profile["minFormatScore"].as_i64().unwrap_or(0);
     let mut reasons: Vec<String> = vec![];
     if !rank.is_some_and(|i| order[i].1) {
@@ -1123,12 +1148,22 @@ impl Orchestrator {
         Ok(out)
     }
 
-    /// Versões de um filme ou episódio já no Radarr/Sonarr (id deles).
+    /// Versões de um filme ou episódio já no Radarr/Sonarr (id deles), só em
+    /// português ou no idioma original.
     async fn releases_of(&self, kind: Kind, arr_id: i64) -> Result<Vec<Candidate>> {
-        Ok(candidates(match kind {
-            Kind::Movie => self.radarr.as_ref().context("Radarr não configurado")?.releases(&format!("movieId={arr_id}")).await?,
-            _ => self.sonarr.as_ref().context("Sonarr não configurado")?.releases(&format!("episodeId={arr_id}")).await?,
-        }))
+        let (mut list, item) = match kind {
+            Kind::Movie => {
+                let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
+                (candidates(radarr.releases(&format!("movieId={arr_id}")).await?), radarr.get_json(&format!("movie/{arr_id}")).await?)
+            }
+            _ => {
+                let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+                let ep = sonarr.episode(arr_id).await?;
+                (candidates(sonarr.releases(&format!("episodeId={arr_id}")).await?), sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?)
+            }
+        };
+        original_or_portuguese(&mut list, original_language(&item));
+        Ok(list)
     }
 
     /// Depois de uma troca: o torrent que semeava o arquivo antigo sai do
@@ -1183,7 +1218,8 @@ impl Orchestrator {
             let library = Some(Library::from(&movie["movieFile"])?);
             return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library, candidates: vec![] });
         }
-        let candidates = if search { candidates(radarr.releases(&format!("movieId={movie_id}")).await?) } else { vec![] };
+        let mut candidates = if search { candidates(radarr.releases(&format!("movieId={movie_id}")).await?) } else { vec![] };
+        original_or_portuguese(&mut candidates, original_language(&movie));
         Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
     }
 
@@ -1223,7 +1259,8 @@ impl Orchestrator {
         }
         // com o Prowlarr: busca direta, rápida e com o nome em português
         if let Some(p) = &self.prowlarr {
-            let list = self.prowlarr_episode(p, &series, episode_id, s, e).await?;
+            let mut list = self.prowlarr_episode(p, &series, episode_id, s, e).await?;
+            original_or_portuguese(&mut list, original_language(&series));
             return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list });
         }
         // versões do episódio; sem nenhuma aprovada, também a busca da
@@ -1236,6 +1273,7 @@ impl Orchestrator {
             list.extend(season.into_iter().filter(|c| !seen.contains(&c.guid) && (c.pack || is_this_episode(&c.raw, s, e))));
             sort_candidates(&mut list);
         }
+        original_or_portuguese(&mut list, original_language(&series));
         Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list })
     }
 
@@ -1278,7 +1316,14 @@ impl Orchestrator {
             }
         }
         let profile = sonarr.get_json(&format!("qualityprofile/{}", series["qualityProfileId"])).await?;
-        let wanted = Wanted { series_id: series["id"].as_i64().unwrap_or(0), names: [Some(name), pt].into_iter().flatten().map(|n| norm(&n)).collect(), episode_id, season: s, episode: e };
+        let wanted = Wanted {
+            series_id: series["id"].as_i64().unwrap_or(0),
+            names: [Some(name), pt].into_iter().flatten().map(|n| norm(&n)).collect(),
+            original: original_language(series).map(str::to_owned),
+            episode_id,
+            season: s,
+            episode: e,
+        };
         let mut out = vec![];
         for r in found {
             let title = r["title"].as_str().unwrap_or_default();
@@ -1545,7 +1590,14 @@ mod tests {
             ],
             "formatItems": [{ "format": 7, "score": 100 }, { "format": 8, "score": 10 }],
         });
-        let w = Wanted { series_id: 5, names: vec![norm("The Legend of Vox Machina"), norm("A Lenda de Vox Machina")], episode_id: 333, season: 3, episode: 2 };
+        let w = Wanted {
+            series_id: 5,
+            names: vec![norm("The Legend of Vox Machina"), norm("A Lenda de Vox Machina")],
+            original: Some("English".into()),
+            episode_id: 333,
+            season: 3,
+            episode: 2,
+        };
         let r = |t: &str| json!({ "title": t, "guid": t, "seeders": 9, "size": 1 });
         let parsed = |series: Value, season: i64, eps: Value, pack: bool, q: &str, cfs: Value| json!({
             "series": series, "episodes": [],
@@ -1568,6 +1620,49 @@ mod tests {
         assert!(judge(&r("Outra.Serie.S03E02"), &parsed(json!({ "id": 9 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
         assert!(judge(&r("Outra Serie S03E02"), &parsed(Value::Null, 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
         assert_eq!(series_name("Doctor Who (2005)"), "Doctor Who");
+
+        // perfil sem dublagem: mínimo no idioma original (formato 9, por nome)
+        let mut fallback = profile.clone();
+        fallback["minFormatScore"] = json!(50);
+        fallback["formatItems"] = json!([{ "format": 7, "score": 100 }, { "format": 8, "score": 10 }, { "format": 9, "name": crate::prefs::ORIGINAL_FORMAT, "score": 50 }]);
+        let with_langs = |series: Value, langs: &[&str], cfs: Value| {
+            let mut p = parsed(series, 3, json!([2]), false, "WEBDL-1080p", cfs);
+            p["parsedEpisodeInfo"]["languages"] = langs.iter().map(|l| json!({ "name": l })).collect();
+            p
+        };
+        // nome em português, legendado, sem idioma no nome: o Sonarr não marca o original, o Anubis marca
+        let br = judge(&r("A Lenda de Vox Machina S03E02 LEGENDADO"), &with_langs(Value::Null, &["Unknown"], json!([{ "id": 8 }])), &fallback, &w).unwrap();
+        assert_eq!((br["rejected"].as_bool(), br["customFormatScore"].as_i64()), (Some(false), Some(60)));
+        // dublado em espanhol, com legenda em português: terceiro idioma, recusado
+        let es = judge(&r("A Lenda de Vox Machina S03E02 Latino LEGENDADO"), &with_langs(Value::Null, &["Spanish"], json!([{ "id": 8 }])), &fallback, &w).unwrap();
+        assert_eq!(es["rejected"], true);
+        // série reconhecida: vale só o que o Sonarr marcou
+        let fr = judge(&r("The.Legend.of.Vox.Machina.S03E02.FRENCH"), &with_langs(json!({ "id": 5 }), &["French"], json!([])), &fallback, &w).unwrap();
+        assert_eq!(fr["rejected"], true);
+        let en = judge(&r("The.Legend.of.Vox.Machina.S03E02"), &with_langs(json!({ "id": 5 }), &["Unknown"], json!([{ "id": 9 }])), &fallback, &w).unwrap();
+        assert_eq!(en["rejected"], false);
+    }
+
+    #[test]
+    fn without_portuguese_only_the_original_language() {
+        let rel = |title: &str, langs: &[&str]| json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": 5, "rejected": true, "languages": langs.iter().map(|l| json!({ "name": l })).collect::<Vec<_>>() });
+        let all = || candidates(vec![
+            rel("Frieren.S01E01.English.Dub", &["English"]),
+            rel("[SubsPlease] Frieren - 01", &["Unknown"]),
+            rel("Frieren.S01E01.JAP", &["Japanese"]),
+            rel("Frieren.S01E01.DUAL", &["Portuguese (Brazil)", "Japanese"]),
+            rel("Frieren.S01E01.Latino", &["Spanish"]),
+        ]);
+        let titles = |l: &[Candidate]| l.iter().map(|c| c.title.clone()).collect::<Vec<_>>();
+        let mut anime = all();
+        original_or_portuguese(&mut anime, Some("Japanese"));
+        assert_eq!(titles(&anime), ["Frieren.S01E01.DUAL", "[SubsPlease] Frieren - 01", "Frieren.S01E01.JAP"]);
+        // sem saber o idioma original, nada sai
+        let mut unknown = all();
+        original_or_portuguese(&mut unknown, None);
+        assert_eq!(unknown.len(), 5);
+        assert_eq!(original_language(&json!({ "originalLanguage": { "id": 8, "name": "Japanese" } })), Some("Japanese"));
+        assert_eq!(original_language(&json!({ "originalLanguage": { "id": 0, "name": "Unknown" } })), None);
     }
 
     #[test]

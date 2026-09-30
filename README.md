@@ -168,6 +168,13 @@ usuário.
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de
 legenda do Bazarr. O Anubis grava direto no Radarr/Sonarr (formato
 personalizado "Anubis · Português (BR)" pontuado no perfil) e no Bazarr.
+Sem português, só o idioma original: o formato "Anubis · Idioma original"
+(idioma "Original" do Radarr/Sonarr, que tomam o nome sem idioma como
+original) vale 50, o dublado 100, e o mínimo do perfil fica em 50 — dublagem
+num terceiro idioma (anime em inglês) é recusada. O "Assistir" também tira
+essas versões da lista, e na busca direta pelo Prowlarr (série com nome em
+português, que o Sonarr não reconhece) o Anubis marca o original sozinho. Na
+inicialização a regra é regravada nos perfis (os antigos ganham o formato).
 Série ou anime em "obrigatório" sem versão dublada em nenhuma fonte (a busca
 acha versões com fontes, nenhuma em português): o cartão avisa "Dublagem não
 encontrada em nenhuma fonte" e oferece "Instalar legendado" — aquela série

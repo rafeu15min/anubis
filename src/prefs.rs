@@ -6,7 +6,10 @@
 //! pontuado no perfil de qualidade dos pedidos:
 //! - obrigatório: pontuação mínima = a do formato (o resto é recusado);
 //! - preferido: aceita qualquer um e troca pela versão em PT-BR quando surgir;
-//! - tanto faz: sem pontuação.
+//! - tanto faz: português ou o idioma original, sem preferência.
+//!
+//! Sem português, só o idioma original (formato "Anubis · Idioma original"):
+//! nunca a dublagem num terceiro idioma (um anime dublado em inglês).
 
 use crate::orchestrator::Orchestrator;
 use crate::services::{Arr, Method};
@@ -16,6 +19,12 @@ use serde_json::{Value, json};
 
 const FORMAT: &str = "Anubis · Português (BR)";
 const SCORE: i64 = 100;
+/// áudio no idioma original do título; vale menos que o dublado. O Radarr e
+/// o Sonarr tomam o nome sem idioma como original ("[SubsPlease] Frieren - 01")
+pub const ORIGINAL_FORMAT: &str = "Anubis · Idioma original";
+const ORIGINAL_SCORE: i64 = 50;
+/// id do idioma "Original" nos formatos do Radarr e do Sonarr
+const ORIGINAL_LANGUAGE: i64 = -2;
 /// legenda em português pelo nome da versão; vale menos que o dublado
 const SUBS_FORMAT: &str = "Anubis · Legenda PT-BR";
 const SUBS_SCORE: i64 = 10;
@@ -32,20 +41,23 @@ pub struct ProfileIds {
     pub movies: Option<i64>,
 }
 
-/// A regra de idioma num perfil: pontos do dublado (e da legenda em
-/// português, onde o legendado é aceito), mínimo e alvo.
-fn apply_audio(profile: &mut Value, dub: i64, subs: Option<i64>, rule: AudioRule) -> Result<()> {
-    let score = if rule == AudioRule::Any { 0 } else { SCORE };
+/// A regra de idioma num perfil: pontos do dublado, do idioma original e da
+/// legenda em português (onde o legendado é aceito), mínimo e alvo. O mínimo
+/// fica no ponto do original: o que não é dublado nem original é recusado.
+fn apply_audio(profile: &mut Value, dub: i64, original: i64, subs: Option<i64>, rule: AudioRule) -> Result<()> {
+    let score = if rule == AudioRule::Any { ORIGINAL_SCORE } else { SCORE };
+    let original_score = if rule == AudioRule::Required { 0 } else { ORIGINAL_SCORE };
     let items = profile["formatItems"].as_array_mut().context("perfil sem formatItems")?;
     let mut set = |fid: i64, name: &str, score: i64| match items.iter_mut().find(|i| i["format"].as_i64() == Some(fid)) {
         Some(i) => i["score"] = json!(score),
         None => items.push(json!({ "format": fid, "name": name, "score": score })),
     };
     set(dub, FORMAT, score);
+    set(original, ORIGINAL_FORMAT, original_score);
     if let Some(s) = subs {
         set(s, SUBS_FORMAT, SUBS_SCORE);
     }
-    profile["minFormatScore"] = json!(if rule == AudioRule::Required { SCORE } else { 0 });
+    profile["minFormatScore"] = json!(if rule == AudioRule::Required { SCORE } else { ORIGINAL_SCORE });
     // preferido: continua trocando até achar a versão em PT-BR
     profile["cutoffFormatScore"] = json!(score);
     profile["upgradeAllowed"] = json!(true);
@@ -54,6 +66,28 @@ fn apply_audio(profile: &mut Value, dub: i64, subs: Option<i64>, rule: AudioRule
         profile["language"] = json!({ "id": -1, "name": "Any" });
     }
     Ok(())
+}
+
+/// A regra de idioma que um perfil tem hoje (`formats`: os formatos do Arr).
+fn rule_in(profile: &Value, formats: &Value) -> AudioRule {
+    let score_of = |name: &str| {
+        let fid = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).and_then(|f| f["id"].as_i64());
+        fid.and_then(|id| profile["formatItems"].as_array()?.iter().find(|i| i["format"].as_i64() == Some(id)).and_then(|i| i["score"].as_i64()))
+            .unwrap_or(0)
+    };
+    let (dub, original) = (score_of(FORMAT), score_of(ORIGINAL_FORMAT));
+    let min = profile["minFormatScore"].as_i64().unwrap_or(0);
+    // o campo de idioma do perfil (só no Radarr) também pode exigir PT-BR
+    let legacy = profile["language"]["name"].as_str() == Some("Portuguese (Brazil)");
+    // dublado valendo mais que o original: obrigatório ou preferido; os dois
+    // iguais (ou sem pontos): tanto faz
+    if (dub > original && min >= dub) || legacy {
+        AudioRule::Required
+    } else if dub > original {
+        AudioRule::Preferred
+    } else {
+        AudioRule::Any
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +213,14 @@ impl Orchestrator {
         Self::format_id(arr, FORMAT, spec).await
     }
 
+    async fn original_format(arr: &Arr) -> Result<i64> {
+        let spec = json!({
+            "name": "Idioma original", "implementation": "LanguageSpecification", "negate": false, "required": true,
+            "fields": [{ "name": "value", "value": ORIGINAL_LANGUAGE }, { "name": "exceptLanguage", "value": false }]
+        });
+        Self::format_id(arr, ORIGINAL_FORMAT, spec).await
+    }
+
     /// Legenda em português pelo nome da versão: entre as não dubladas, estas
     /// vêm primeiro (o Bazarr continua buscando legenda para as outras).
     async fn subs_format(arr: &Arr) -> Result<i64> {
@@ -197,20 +239,7 @@ impl Orchestrator {
     async fn rule_of(&self, arr: &Arr, profile_name: &str) -> Result<AudioRule> {
         let profile = Self::profile(arr, profile_name).await?;
         let formats = arr.get_json("customformat").await?;
-        let fid = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == FORMAT)).and_then(|f| f["id"].as_i64());
-        let score = fid
-            .and_then(|id| profile["formatItems"].as_array()?.iter().find(|i| i["format"].as_i64() == Some(id)).and_then(|i| i["score"].as_i64()))
-            .unwrap_or(0);
-        let min = profile["minFormatScore"].as_i64().unwrap_or(0);
-        // o campo de idioma do perfil (só no Radarr) também pode exigir PT-BR
-        let legacy = profile["language"]["name"].as_str() == Some("Portuguese (Brazil)");
-        Ok(if (score > 0 && min >= score) || legacy {
-            AudioRule::Required
-        } else if score > 0 {
-            AudioRule::Preferred
-        } else {
-            AudioRule::Any
-        })
+        Ok(rule_in(&profile, &formats))
     }
 
     async fn set_audio_rule(&self, which: &str, rule: AudioRule) -> Result<()> {
@@ -220,21 +249,24 @@ impl Orchestrator {
 
     async fn set_rule_of(&self, arr: &Arr, profile_name: &str, lang_id: i64, rule: AudioRule) -> Result<()> {
         let fid = Self::dub_format(arr, lang_id).await?;
+        let original = Self::original_format(arr).await?;
         // legenda em português só conta onde o legendado é aceito
         let subs = if rule == AudioRule::Required { None } else { Some(Self::subs_format(arr).await?) };
         // o perfil já traz formatItems de todos os formatos (score 0 nos novos)
         let mut profile = Self::profile(arr, profile_name).await?;
         let pid = profile["id"].as_i64().context("perfil sem id")?;
-        apply_audio(&mut profile, fid, subs, rule)?;
+        apply_audio(&mut profile, fid, original, subs, rule)?;
         arr.send_json(Method::PUT, &format!("qualityprofile/{pid}"), &profile).await?;
         Ok(())
     }
 
     /// Perfil do Anubis no Radarr/Sonarr (cópia do perfil dos pedidos),
-    /// criando na primeira vez com a regra `rule`. Devolve o id.
+    /// criando na primeira vez; a regra `rule` é aplicada sempre (perfis de
+    /// versões antigas ganham o que mudou). Devolve o id.
     async fn ensure_profile(&self, which: &str, name: &str, rule: AudioRule) -> Result<i64> {
         let (arr, base, lang_id) = self.arr_named(which)?;
         if let Some(p) = Self::find_profile(arr, name).await? {
+            self.set_rule_of(arr, name, lang_id, rule).await?;
             return p["id"].as_i64().context("perfil sem id");
         }
         let mut p = Self::profile(arr, &base).await?;
@@ -249,9 +281,16 @@ impl Orchestrator {
     }
 
     /// Prepara o Radarr e o Sonarr: o perfil do que não tem dublagem em
-    /// nenhuma fonte (cópia do perfil dos pedidos, em "preferido"). Pode rodar
-    /// de novo sem efeito.
+    /// nenhuma fonte (cópia do perfil dos pedidos, em "preferido") e a regra
+    /// de idioma de cada perfil regravada (o formato do idioma original entra
+    /// nos perfis de antes dele). Pode rodar de novo sem efeito.
     pub async fn setup_profiles(&self) -> Result<()> {
+        for which in ["radarr", "sonarr"] {
+            if self.arr_named(which).is_ok() {
+                let rule = self.audio_rule(which).await?;
+                self.set_audio_rule(which, rule).await?;
+            }
+        }
         let series = match self.sonarr {
             Some(_) => Some(self.ensure_profile("sonarr", FALLBACK_PROFILE, AudioRule::Preferred).await?),
             None => None,
@@ -370,6 +409,36 @@ mod tests {
         apply_quality(&mut sonarr, &QualityPrefs { bluray_first: true, no_cinema: None }).unwrap();
         assert_eq!(order(&sonarr), ["Bluray-720p", "WEBRip-1080p", "WEBDL-1080p", "Bluray-1080p", "Bluray-1080p Remux✗"]);
         assert_eq!(sonarr["cutoff"], 3);
+    }
+
+    #[test]
+    fn audio_rule_refuses_a_third_language_and_reads_back() {
+        let formats = json!([{ "id": 1, "name": FORMAT }, { "id": 2, "name": ORIGINAL_FORMAT }, { "id": 3, "name": SUBS_FORMAT }]);
+        // pontos de uma versão: dublado 1, original 2, legenda PT-BR 3
+        let score = |p: &Value, cfs: &[i64]| -> i64 {
+            p["formatItems"].as_array().unwrap().iter().filter(|i| cfs.contains(&i["format"].as_i64().unwrap())).map(|i| i["score"].as_i64().unwrap()).sum()
+        };
+        let passes = |p: &Value, cfs: &[i64]| score(p, cfs) >= p["minFormatScore"].as_i64().unwrap();
+        for rule in [AudioRule::Required, AudioRule::Preferred, AudioRule::Any] {
+            let mut p = json!({ "formatItems": [], "minFormatScore": 0 });
+            apply_audio(&mut p, 1, 2, (rule != AudioRule::Required).then_some(3), rule).unwrap();
+            assert_eq!(rule_in(&p, &formats), rule);
+            // dublado passa sempre; terceiro idioma (mesmo com legenda PT-BR) nunca
+            assert!(passes(&p, &[1]));
+            assert!(!passes(&p, &[]));
+            assert!(!passes(&p, &[3]));
+            // original: só onde o legendado é aceito
+            assert_eq!(passes(&p, &[2]), rule != AudioRule::Required);
+        }
+        // preferido: dublado acima do original, e o original legendado acima do sem legenda
+        let mut p = json!({ "formatItems": [] });
+        apply_audio(&mut p, 1, 2, Some(3), AudioRule::Preferred).unwrap();
+        assert!(score(&p, &[1]) > score(&p, &[2, 3]) && score(&p, &[2, 3]) > score(&p, &[2]));
+        // perfis de antes do formato do original continuam lidos como eram
+        let old = |dub: i64, min: i64| json!({ "formatItems": [{ "format": 1, "score": dub }], "minFormatScore": min });
+        assert_eq!(rule_in(&old(100, 100), &formats), AudioRule::Required);
+        assert_eq!(rule_in(&old(100, 0), &formats), AudioRule::Preferred);
+        assert_eq!(rule_in(&old(0, 0), &formats), AudioRule::Any);
     }
 
     #[test]

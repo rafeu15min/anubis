@@ -46,7 +46,7 @@
 <main>
   <section>
     <h2>Idioma do áudio</h2>
-    <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries e animes), com estas regras. Série ou anime em "obrigatório" sem versão dublada em nenhuma fonte: o cartão pergunta se pode instalar o legendado (e troca pelo dublado se ele surgir). Entre as legendadas, as com legenda em português vêm primeiro.</p>
+    <p class="help">Vale para os pedidos e para o "Assistir". A decisão fica com o Radarr (filmes) e o Sonarr (séries e animes), com estas regras. Série ou anime em "obrigatório" sem versão dublada em nenhuma fonte: o cartão pergunta se pode instalar o legendado (e troca pelo dublado se ele surgir). Sem português, só o idioma original do título (legendado), nunca a dublagem em outro idioma. Entre as legendadas, as com legenda em português vêm primeiro.</p>
     <div id="audio"></div>
   </section>
   <section>
@@ -87,8 +87,8 @@
 const $ = (s) => document.querySelector(s);
 const RULES = [
   ['required', 'Obrigatório (dublado)', 'Só aceita versões em português do Brasil. O que não tiver versão dublada fica esperando.'],
-  ['preferred', 'Preferido', 'Baixa o que houver agora e troca sozinho pela versão dublada quando ela aparecer.'],
-  ['any', 'Tanto faz', 'Qualquer idioma, sem preferência.'],
+  ['preferred', 'Preferido', 'Baixa no idioma original agora e troca sozinho pela versão dublada quando ela aparecer.'],
+  ['any', 'Tanto faz', 'Português ou o idioma original, sem preferência entre os dois.'],
 ];
 const LANGS = [['pb', 'Português (BR)'], ['pt', 'Português (PT)'], ['en', 'Inglês'], ['es', 'Espanhol']];
 let current = null;

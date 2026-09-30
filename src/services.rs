@@ -309,10 +309,12 @@ impl Prowlarr {
 
     /// Busca por texto nas categorias (o Prowlarr consulta os indexadores ao
     /// mesmo tempo). Cada resultado traz title, guid, size, seeders,
-    /// downloadUrl/magnetUrl, indexer.
-    pub async fn search(&self, query: &str, categories: &[u32]) -> Result<Vec<Value>> {
+    /// downloadUrl/magnetUrl, indexer. `limit` também é quantas páginas o
+    /// Prowlarr pede a cada site (o 1337x tem 20 por página): mais que 20
+    /// multiplica as consultas — e o Cloudflare dele bloqueia o IP (erro 1006).
+    pub async fn search(&self, query: &str, categories: &[u32], limit: u32) -> Result<Vec<Value>> {
         let cats: String = categories.iter().map(|c| format!("&categories={c}")).collect();
-        let url = format!("{}/api/v1/search?query={}&type=search&limit=100{cats}", self.base, url_encode(query));
+        let url = format!("{}/api/v1/search?query={}&type=search&limit={limit}{cats}", self.base, url_encode(query));
         send(counted(self.http.get(url).header("X-Api-Key", &self.key).timeout(Duration::from_secs(90))), "Prowlarr busca").await
     }
 

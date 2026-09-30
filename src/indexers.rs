@@ -45,9 +45,10 @@ fn down_in_health(health: &Value) -> (Vec<String>, bool) {
     (names, all)
 }
 
-/// Fora do ar segundo o Prowlarr: castigo (`disabledTill`) ainda valendo.
+/// Fora do ar segundo o Prowlarr: castigo (`disabledTill`) ainda valendo, só
+/// dos ligados (o desativado guarda o castigo antigo).
 fn down_in_prowlarr(status: &Value, indexers: &Value, now: DateTime<Utc>) -> Vec<String> {
-    let name_of = |id: i64| indexers.as_array()?.iter().find(|i| i["id"].as_i64() == Some(id))?["name"].as_str().map(str::to_owned);
+    let name_of = |id: i64| indexers.as_array()?.iter().find(|i| i["id"].as_i64() == Some(id) && i["enable"] != false)?["name"].as_str().map(str::to_owned);
     status
         .as_array()
         .into_iter()
@@ -176,9 +177,11 @@ mod tests {
     #[test]
     fn reads_the_indexers_down_from_prowlarr() {
         let now: DateTime<Utc> = "2026-09-30T12:00:00Z".parse().unwrap();
-        let indexers = json!([{ "id": 1, "name": "1337x" }, { "id": 3, "name": "Comando Torrents (BR)" }, { "id": 6, "name": "bitmagnet (DHT)" }]);
+        let indexers = json!([{ "id": 1, "name": "1337x" }, { "id": 3, "name": "Comando Torrents (BR)" }, { "id": 6, "name": "bitmagnet (DHT)" }, { "id": 7, "name": "Desligado", "enable": false }]);
         let status = json!([
             { "indexerId": 1, "disabledTill": "2026-09-30T12:30:00Z" },
+            // desativado de propósito: o castigo antigo não conta
+            { "indexerId": 7, "disabledTill": "2026-09-30T12:30:00Z" },
             // castigo que já acabou
             { "indexerId": 3, "disabledTill": "2026-09-30T11:00:00Z" },
             { "indexerId": 6, "mostRecentFailure": "2026-09-30T11:59:00Z" },

@@ -6,6 +6,7 @@
 //! As listas do TMDB ficam 6 h em memória; séries precisam do id do TVDB (o
 //! que o Sonarr usa), que o TMDB informa item a item — guardado para sempre.
 
+use crate::avail::{Avail, Want};
 use crate::orchestrator::Orchestrator;
 use crate::search::{Found, Kind};
 use anyhow::{Context, Result, bail};
@@ -50,6 +51,8 @@ pub struct Showcase {
     pub rows: Vec<Row>,
     /// lista do TMDB que não respondeu (as outras seguem)
     pub errors: Vec<String>,
+    /// títulos esperando a busca nos indexadores (aparecem quando ela acha torrent)
+    pub checking: usize,
 }
 
 #[derive(Default)]
@@ -107,6 +110,7 @@ fn from_tmdb(kind: Kind, id: i64, v: &Value) -> Option<Found> {
         anime: kind == Kind::Series && is_anime(v),
         requested: false,
         available: false,
+        subbed_only: false,
     })
 }
 
@@ -114,7 +118,7 @@ impl Orchestrator {
     /// A vitrine de uma categoria.
     pub async fn showcase(self: &Arc<Self>, cat: Category) -> Result<Showcase> {
         self.live.touch();
-        let mut out = Showcase { ready: self.ready(cat).await, rows: vec![], errors: vec![] };
+        let mut out = Showcase { ready: self.ready(cat).await, rows: vec![], errors: vec![], checking: 0 };
         if self.tmdb.is_none() {
             return Ok(out);
         }
@@ -141,6 +145,7 @@ impl Orchestrator {
                 Err(e) => out.errors.push(format!("{title}: {e:#}")),
             }
         }
+        out.checking = self.availability.pending().await;
         Ok(out)
     }
 
@@ -179,7 +184,9 @@ impl Orchestrator {
     }
 
     /// Cartões com o estado no Radarr/Sonarr; séries sem id do TVDB ficam de
-    /// fora (o Sonarr não teria como pedi-las).
+    /// fora (o Sonarr não teria como pedi-las). O que não está pedido nem na
+    /// biblioteca só aparece depois que a busca nos indexadores acha torrent
+    /// (só no idioma original: `subbed_only`); o resto vai para a fila dela.
     async fn cards(self: &Arc<Self>, cat: Category, list: &[Value]) -> Vec<Found> {
         let kind = if cat == Category::Movies { Kind::Movie } else { Kind::Series };
         // ids do TVDB que faltam, buscados juntos
@@ -205,23 +212,41 @@ impl Orchestrator {
         }
         let tvdb = self.showcase_cache.tvdb.lock().await.clone();
         let hidden: HashSet<(Kind, i64)> = self.hidden().await.into_iter().map(|h| (h.kind, h.id)).collect();
-        let snap = self.live.arr.lock().await;
-        list.iter()
-            .filter_map(|v| {
-                let tmdb = v["id"].as_i64()?;
-                let id = if kind == Kind::Movie { tmdb } else { (*tvdb.get(&tmdb)?)? };
-                if hidden.contains(&(kind, id)) {
-                    return None;
+        let cards: Vec<(Found, &Value)> = {
+            let snap = self.live.arr.lock().await;
+            list.iter()
+                .filter_map(|v| {
+                    let tmdb = v["id"].as_i64()?;
+                    let id = if kind == Kind::Movie { tmdb } else { (*tvdb.get(&tmdb)?)? };
+                    if hidden.contains(&(kind, id)) {
+                        return None;
+                    }
+                    let mut f = from_tmdb(kind, id, v)?;
+                    // pedido ou na biblioteca (a central sabe, se estiver em dia)
+                    if let Some((x, _)) = snap.item(kind, id) {
+                        f.available = x["hasFile"] == true || x["statistics"]["episodeFileCount"].as_i64().unwrap_or(0) > 0;
+                        f.requested = x["monitored"] == true || f.available;
+                    }
+                    Some((f, v))
+                })
+                .collect()
+        };
+        let mut shown = vec![];
+        for (mut f, v) in cards {
+            if !f.requested && !f.available {
+                // nunca checado ou vencido: para a fila (o que já se sabia continua valendo)
+                if let Some(w) = Want::from_tmdb(kind, f.id, v) {
+                    self.availability.want(w).await;
                 }
-                let mut f = from_tmdb(kind, id, v)?;
-                // pedido ou na biblioteca (a central sabe, se estiver em dia)
-                if let Some((x, _)) = snap.item(kind, id) {
-                    f.available = x["hasFile"] == true || x["statistics"]["episodeFileCount"].as_i64().unwrap_or(0) > 0;
-                    f.requested = x["monitored"] == true || f.available;
+                match self.availability.get(kind, f.id).await {
+                    Some(Avail::Dubbed) => {}
+                    Some(Avail::Subbed) => f.subbed_only = true,
+                    _ => continue,
                 }
-                Some(f)
-            })
-            .collect()
+            }
+            shown.push(f);
+        }
+        shown
     }
 
     /// Já na biblioteca, da categoria, mais recentes primeiro.

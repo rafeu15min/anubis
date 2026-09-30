@@ -36,6 +36,9 @@ pub struct Found {
     pub requested: bool,
     /// já na biblioteca (filme baixado; série com algum episódio)
     pub available: bool,
+    /// vitrine: os indexadores só têm no idioma original (aviso amarelo)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub subbed_only: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -270,6 +273,7 @@ pub(crate) fn found(kind: Kind, v: &Value) -> Option<Found> {
         // no Radarr/Sonarr sem monitorar = só assistido pelo "assistir agora", não pedido
         requested: v["id"].as_i64().is_some_and(|i| i > 0) && v["monitored"].as_bool() != Some(false),
         available: v["hasFile"] == true || v["statistics"]["episodeFileCount"].as_i64().unwrap_or(0) > 0,
+        subbed_only: false,
     })
 }
 

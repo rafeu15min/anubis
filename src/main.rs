@@ -11,6 +11,7 @@
 //! Config padrão: $ANUBIS_CONFIG ou ~/.config/anubis/anubis.toml.
 
 mod api;
+mod avail;
 mod config;
 mod discover;
 mod disk;
@@ -105,6 +106,7 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let wake = Arc::new(Notify::new());
     tokio::spawn(scheduler(orch.clone(), wake.clone()));
     tokio::spawn(live::run(orch.clone()));
+    tokio::spawn(avail::run(orch.clone()));
     // perfil do Sonarr para séries sem dublagem (quando se aceita o legendado)
     {
         let orch = orch.clone();

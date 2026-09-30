@@ -83,6 +83,8 @@
   .tile .t { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .tile .m { font-size: 12px; color: var(--muted); }
   .tile .m .ok { color: var(--ok); }
+  .tile .m .sub, .tag.sub { color: #ffb36b; }
+  .tag.sub { border-color: #ffb36b; }
 </style>
 </head>
 <body>
@@ -232,7 +234,8 @@ function card(it, st) {
   const k = keyOf(it);
   const poster = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
   const year = it.year ? ` (${it.year})` : '';
-  const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ');
+  const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ')
+    + (it.subbed_only ? ' <span class="tag sub" title="Os indexadores só têm no idioma original, com legenda">somente legendado</span>' : '');
   // filmes: assistir agora (padrão) ou só baixar; séries: episódios (assistir
   // um de cada vez) ou pedir a série inteira
   const watch = it.kind === 'movie'
@@ -454,7 +457,7 @@ function tile(it, ready) {
   const k = keyOf(it);
   lastResults[k] = it;
   const img = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
-  const badge = ready || it.available ? ' · <span class="ok">pronto</span>' : it.requested ? ' · na lista' : '';
+  const badge = ready || it.available ? ' · <span class="ok">pronto</span>' : it.requested ? ' · na lista' : it.subbed_only ? ' · <span class="sub">só legendado</span>' : '';
   return `<button class="tile" data-open="${k}">${img}<span class="t">${esc(it.title)}</span><span class="m">${it.year || ''}${badge}</span></button>`;
 }
 const shelf = (title, items, ready) => items.length
@@ -472,9 +475,11 @@ async function showCategory(cat) {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
     if (cat !== currentCat) return;  // trocou de aba no meio
-    box.innerHTML = shelf('Prontos para assistir', d.ready, true) + d.rows.map((row) => shelf(row.title, row.items, false)).join('')
+    // a vitrine só mostra o que os indexadores têm; o resto está sendo buscado
+    const checking = d.checking ? `<p class="msg">Buscando nas fontes ${d.checking} ${d.checking === 1 ? 'título' : 'títulos'} da vitrine — aparecem aqui quando houver torrent. <button data-recheck>Atualizar</button></p>` : '';
+    box.innerHTML = (shelf('Prontos para assistir', d.ready, true) + d.rows.map((row) => shelf(row.title, row.items, false)).join('')
       + (d.errors.length ? `<p class="msg err">${d.errors.map(esc).join('<br>')}</p>` : '')
-      || '<p class="msg">Nada por aqui ainda.</p>';
+      || (checking ? '' : '<p class="msg">Nada por aqui ainda.</p>')) + checking;
     // as outras abas já ficam prontas no servidor (a 1ª vez de séries e animes leva segundos)
     if (!prefetched) { prefetched = true; for (const c of ['filmes', 'series', 'animes']) if (c !== cat) fetch(`discover/${c}`).catch(() => {}); }
   } catch (e) {
@@ -663,6 +668,7 @@ document.addEventListener('click', (e) => {
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
+  if (e.target.closest('[data-recheck]')) { showCategory(currentCat); return; }
   const rt = e.target.closest('[data-retest]');
   if (rt) { retestIndexers(rt); return; }
   const sb = e.target.closest('[data-subbed]');

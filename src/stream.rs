@@ -1294,11 +1294,11 @@ impl Orchestrator {
         const TV: [u32; 2] = [5000, 5070];
         let (q_ep, q_season) = (format!("{name} S{s:02}E{e:02}"), format!("{name} S{s:02}"));
         let (a, b, c) = tokio::join!(
-            p.search(&q_ep, &TV),
-            p.search(&q_season, &TV),
+            p.search(&q_ep, &TV, 100),
+            p.search(&q_season, &TV, 100),
             async {
                 match &pt {
-                    Some(pt) => p.search(pt, &TV).await,
+                    Some(pt) => p.search(pt, &TV, 100).await,
                     None => Ok(vec![]),
                 }
             }

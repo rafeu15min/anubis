@@ -163,6 +163,24 @@ item — pelo mesmo caminho (cabo, rede local, Tailscale) que o navegador usou.
 A senha fica só no servidor. Quem alcança o Anubis entra no Jellyfin como esse
 usuário.
 
+**Vitrine pela disponibilidade** (`src/avail.rs`): um título do TMDB só
+aparece na vitrine (todas as fileiras, inclusive "Para você" e a temporada)
+depois que uma busca prévia no Prowlarr acha torrent dele com fontes; pedidos
+e a biblioteca aparecem sempre. Busca pelo nome em português (sem pontuação
+nem ano — é o que a busca dos sites brasileiros acha) e pelo original com o
+ano (o inglês, se o original não é em alfabeto latino); o ano filtra os
+resultados (±1). Áudio: sites brasileiros pelo nome ("brazilian", DUAL,
+DUBLADO, NACIONAL); os outros pelo `parse` do Radarr/Sonarr. Português =
+dublado; só o idioma original = aviso amarelo "somente legendado"; terceiro
+idioma não conta. Nada achado com indexador fora do ar = "não sei" (não
+aparece, checa de novo em 1 h, e o que se sabia antes continua valendo).
+Vale 7 dias (dublado), 3 (legendado), 1 (nada); fica em
+`state_dir/disponibilidade.json`. Ritmo: um título por vez, 45 s entre eles,
+uma página de cada site (`limit=20`), e pausa de 15 min com indexador fora —
+com duas checagens juntas e 100 resultados, o Cloudflare do 1337x bloqueou o
+IP do servidor (erro 1006) em minutos. A primeira passada leva horas; a
+página diz quantos títulos faltam.
+
 **Indexadores fora do ar**: o Radarr, o Sonarr e o Prowlarr põem de castigo
 o indexador que falha e param de consultá-lo por horas. O Anubis junta os que
 estão fora (Prowlarr `indexerstatus` + `/health` do Radarr/Sonarr, 1 min de

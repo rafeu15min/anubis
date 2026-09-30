@@ -127,6 +127,13 @@ impl Arr {
         send::<Value>(self.req(Method::PUT, "episode/monitor").json(&body), &format!("{} monitorar", self.name)).await?;
         Ok(())
     }
+    /// Sonarr: liga/desliga o monitoramento de episódios.
+    pub async fn set_episodes_monitored(&self, ids: &[i64], monitored: bool) -> Result<()> {
+        let body = json!({ "episodeIds": ids, "monitored": monitored });
+        send::<Value>(self.req(Method::PUT, "episode/monitor").json(&body), &format!("{} monitorar", self.name)).await?;
+        Ok(())
+    }
+
     /// Sonarr: muda o perfil de qualidade de séries.
     pub async fn set_series_profile(&self, series_ids: &[i64], profile_id: i64) -> Result<()> {
         let body = json!({ "seriesIds": series_ids, "qualityProfileId": profile_id });
@@ -328,6 +335,11 @@ pub struct TorrentInfo {
     pub hash: String,
     pub name: String,
     pub save_path: String,
+    /// onde os arquivos estão agora (a pasta do torrent, ou o arquivo)
+    #[serde(default)]
+    pub content_path: String,
+    #[serde(default)]
+    pub magnet_uri: String,
     pub progress: f64,
     #[serde(default)]
     pub size: f64,
@@ -454,6 +466,26 @@ impl QBittorrent {
             }
             bail!("o qBittorrent não obteve a lista de arquivos do pacote");
         }
+        Ok(())
+    }
+
+    /// O .torrent de um torrent (qBittorrent 4.5+).
+    pub async fn export(&self, hash: &str) -> Result<bytes::Bytes> {
+        let res = counted(self.req(Method::GET, &format!("torrents/export?hash={}", hash.to_lowercase()))).send().await.context("qBittorrent: sem resposta")?;
+        if !res.status().is_success() {
+            bail!("qBittorrent exportar: HTTP {}", res.status());
+        }
+        let body = res.bytes().await?;
+        if body.first() != Some(&b'd') {
+            bail!("qBittorrent exportar: não veio um .torrent");
+        }
+        Ok(body)
+    }
+
+    /// Tira o torrent do qBittorrent e deixa os arquivos no disco.
+    pub async fn remove_keep_files(&self, hash: &str) -> Result<()> {
+        let form = [("hashes", hash.to_lowercase()), ("deleteFiles", "false".into())];
+        send::<Value>(self.req(Method::POST, "torrents/delete").form(&form), "qBittorrent tirar").await?;
         Ok(())
     }
 

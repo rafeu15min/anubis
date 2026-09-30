@@ -83,6 +83,10 @@ pub struct JobInfo {
     /// legendas que vêm no torrent (caminhos no disco), baixadas antes do vídeo
     #[serde(default)]
     subs: Vec<PathBuf>,
+    /// download assumido do qBittorrent: episódios (do pacote) que deixaram de
+    /// ser monitorados enquanto o Anubis cuida — voltam depois da importação
+    #[serde(default)]
+    remonitor: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -309,6 +313,13 @@ fn subs_for(paths: &[PathBuf], video: &Path, episode: Option<(i64, i64)>) -> Vec
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// A pasta do torrent nos nomes de arquivo do qBittorrent ("Pasta/a.mkv",
+/// "Pasta/Subs/b.srt" → "Pasta"); sem pasta comum (um arquivo só), None.
+fn torrent_root<'a>(names: &[&'a str]) -> Option<&'a str> {
+    let first = names.first()?.split_once('/')?.0;
+    names.iter().all(|n| n.split_once('/').is_some_and(|(d, _)| d == first)).then_some(first)
 }
 
 /// O vídeo a tocar: o maior, ou (episódio) o do episódio pedido.
@@ -757,9 +768,15 @@ impl Orchestrator {
             streamer.probe(&job);
             return Ok(Started::Ready);
         }
+        // já baixando pelo "Baixar" (qBittorrent): assume esse download
+        if guid.is_none()
+            && let Some(started) = self.adopt_download(kind, id).await?
+        {
+            return Ok(started);
+        }
         let mut target = match kind {
-            Kind::Movie => self.movie_target(id).await?,
-            Kind::Episode => self.episode_target(id).await?,
+            Kind::Movie => self.movie_target(id, true).await?,
+            Kind::Episode => self.episode_target(id, true).await?,
             Kind::Series => bail!("escolha um episódio"),
         };
 
@@ -803,6 +820,7 @@ impl Orchestrator {
                     phase: Phase::Done,
                     replaces: None,
                     subs: vec![],
+                    remonitor: vec![],
                 },
                 None,
             );
@@ -822,8 +840,91 @@ impl Orchestrator {
         let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
         let source = self.fetch_source(&pick.raw).await?;
         let folder = stream_cfg.download_dir.join(folder_name(&pick.title));
-        let job_folder = folder.clone();
         info!("assistir agora: {} — {} ({} MB)", target.title, pick.title, pick.size >> 20);
+        self.start_torrent(kind, id, target, pick.title.clone(), source, folder, true, replaces, vec![]).await
+    }
+
+    /// O "Assistir" de algo que o "Baixar" já está baixando no qBittorrent:
+    /// o torrent sai do qBittorrent (os arquivos ficam) e entra no librqbit
+    /// na mesma pasta — ele confere o que já foi baixado e continua dali,
+    /// priorizando o trecho que o player pede. Enquanto isso, o Radarr/Sonarr
+    /// deixa de monitorar (senão pegaria outra versão); a importação religa.
+    async fn adopt_download(self: &Arc<Self>, kind: Kind, id: i64) -> Result<Option<Started>> {
+        let (arr, filter, arr_id) = match kind {
+            Kind::Movie => {
+                let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
+                let Some(m) = radarr.find("movie", "tmdbId", id).await? else { return Ok(None) };
+                if m["hasFile"] == true {
+                    return Ok(None);
+                }
+                let mid = m["id"].as_i64().context("filme sem id")?;
+                (radarr, format!("movieId={mid}"), mid)
+            }
+            Kind::Episode => {
+                let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+                let ep = sonarr.episode(id).await?;
+                if ep["hasFile"] == true {
+                    return Ok(None);
+                }
+                (sonarr, format!("seriesId={}", ep["seriesId"]), id)
+            }
+            Kind::Series => return Ok(None),
+        };
+        let queue = arr.queue(&filter).await?;
+        let Some(item) = queue.iter().find(|q| {
+            q["protocol"] == "torrent" && q["downloadId"].is_string() && (kind == Kind::Movie || q["episodeId"].as_i64() == Some(arr_id))
+        }) else {
+            return Ok(None);
+        };
+        let hash = item["downloadId"].as_str().unwrap_or_default().to_lowercase();
+        let Some(t) = self.qbit.by_hashes(std::slice::from_ref(&hash)).await?.into_iter().next() else { return Ok(None) };
+        let files = self.qbit.files(&hash).await?;
+        // o librqbit quer a pasta do torrent (arquivos relativos a ela)
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        let content = t.content_path.trim_end_matches('/');
+        let folder_container = match torrent_root(&names) {
+            Some(_) => content.to_owned(),
+            None => content.rsplit_once('/').map_or(t.save_path.clone(), |(dir, _)| dir.to_owned()),
+        };
+        let folder = self.cfg.host_path(&folder_container);
+        let source = match self.qbit.export(&hash).await {
+            Ok(b) => TorrentSource::File(b),
+            Err(_) if t.magnet_uri.starts_with("magnet:") => TorrentSource::Magnet(normalize_magnet(&t.magnet_uri)),
+            Err(e) => return Err(e),
+        };
+        let target = match kind {
+            Kind::Movie => self.movie_target(id, false).await?,
+            _ => self.episode_target(id, false).await?,
+        };
+        let episodes: Vec<i64> = queue.iter().filter(|q| q["downloadId"] == item["downloadId"]).filter_map(|q| q["episodeId"].as_i64()).collect();
+        match kind {
+            Kind::Movie => arr.set_movie_monitored(target.arr_id, false).await?,
+            _ => arr.set_episodes_monitored(&episodes, false).await?,
+        }
+        self.qbit.remove_keep_files(&hash).await?;
+        info!("assistir agora: {} — assumindo o download do qBittorrent ({:.0}%, {})", target.title, t.progress * 100.0, t.name);
+        let remonitor = if kind == Kind::Movie { vec![] } else { episodes };
+        self.start_torrent(kind, id, target, t.name, source, folder, false, None, remonitor).await.map(Some)
+    }
+
+    /// Põe o torrent no librqbit (arquivos em `folder`, que já podem ter parte
+    /// baixada) e abre o "assistir" nele. `pack_select`: num pacote, baixar só
+    /// o episódio — não num download assumido, que a pessoa pediu inteiro.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_torrent(
+        self: &Arc<Self>,
+        kind: Kind,
+        id: i64,
+        target: Target,
+        release: String,
+        source: TorrentSource,
+        folder: PathBuf,
+        pack_select: bool,
+        replaces: Option<Replace>,
+        remonitor: Vec<i64>,
+    ) -> Result<Started> {
+        let streamer = self.streamer()?.clone();
+        let job_folder = folder.clone();
         let handle = self.add_torrent(&source, &folder).await?;
         let (file_id, file_len, rel) = handle.with_metadata(|m| video_file(&m.file_infos, target.episode))?.context("o torrent não tem o vídeo")?;
         let many_files = handle.with_metadata(|m| m.file_infos.len())? > 1;
@@ -832,7 +933,7 @@ impl Orchestrator {
             subs_for(&paths, &rel, target.episode).into_iter().map(|i| (i, paths[i].clone())).collect()
         })?;
         // pacote: só o arquivo deste episódio (e as legendas dele)
-        let only_file = kind == Kind::Episode && many_files;
+        let only_file = pack_select && kind == Kind::Episode && many_files;
         if only_file {
             let keep: HashSet<usize> = std::iter::once(file_id).chain(sub_files.iter().map(|(i, _)| *i)).collect();
             streamer.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(handle.id()), &keep).await?;
@@ -852,7 +953,7 @@ impl Orchestrator {
                 kind,
                 id,
                 title: target.title,
-                release: pick.title.clone(),
+                release,
                 arr_id: target.arr_id,
                 series_id: target.series_id,
                 file_id,
@@ -868,6 +969,7 @@ impl Orchestrator {
                 phase: Phase::Downloading,
                 replaces,
                 subs: sub_files.iter().map(|(_, r)| job_folder.join(r)).collect(),
+                remonitor,
             },
             Some(handle.clone()),
         );
@@ -986,7 +1088,7 @@ impl Orchestrator {
         radarr.add("movie", item).await
     }
 
-    async fn movie_target(&self, tmdb: i64) -> Result<Target> {
+    async fn movie_target(&self, tmdb: i64, search: bool) -> Result<Target> {
         let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
         let movie = self.ensure_movie(tmdb).await?;
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
@@ -995,11 +1097,11 @@ impl Orchestrator {
             let library = Some(Library::from(&movie["movieFile"])?);
             return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library, candidates: vec![] });
         }
-        let candidates = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
+        let candidates = if search { candidates(radarr.releases(&format!("movieId={movie_id}")).await?) } else { vec![] };
         Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
     }
 
-    async fn episode_target(&self, episode_id: i64) -> Result<Target> {
+    async fn episode_target(&self, episode_id: i64, search: bool) -> Result<Target> {
         let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
         let ep = sonarr.episode(episode_id).await?;
         let series_id = ep["seriesId"].as_i64().context("episódio sem série")?;
@@ -1029,6 +1131,9 @@ impl Orchestrator {
             let f = sonarr.episode_file(ep["episodeFileId"].as_i64().unwrap_or(0)).await?;
             let library = Some(Library::from(&f)?);
             return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library, candidates: vec![] });
+        }
+        if !search {
+            return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: vec![] });
         }
         // versões do episódio; sem nenhuma aprovada, também a busca da
         // temporada — que traz pacotes e episódios avulsos que a busca do
@@ -1205,6 +1310,9 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
                 Kind::Movie => arr.set_movie_monitored(job.info.arr_id, true).await?,
                 _ => arr.monitor_episodes(&[job.info.arr_id]).await?,
             }
+            if !job.info.remonitor.is_empty() {
+                arr.monitor_episodes(&job.info.remonitor).await?;
+            }
             if let Some(inode) = job.info.replaces.as_ref().and_then(|r| r.inode)
                 && let Err(e) = orch.drop_replaced_torrent(inode).await
             {
@@ -1252,6 +1360,13 @@ pub fn limit(r: Box<dyn AsyncRead + Send + Unpin>, len: u64) -> impl AsyncRead +
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn qbittorrent_folder_of_the_torrent() {
+        assert_eq!(torrent_root(&["Filme (2026)/Filme.mkv", "Filme (2026)/Subs/pt.srt"]), Some("Filme (2026)"));
+        assert_eq!(torrent_root(&["Filme.2026.mkv"]), None);
+        assert_eq!(torrent_root(&["A/x.mkv", "B/y.mkv"]), None);
+    }
 
     #[test]
     fn subtitles_of_this_video_only() {

@@ -39,7 +39,7 @@ impl Category {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Row {
-    pub title: &'static str,
+    pub title: String,
     pub items: Vec<Found>,
 }
 
@@ -120,15 +120,23 @@ impl Orchestrator {
         }
         // "Para você" primeiro (sem histórico nenhum, não aparece)
         match self.for_you(cat).await {
-            Ok(items) if !items.is_empty() => out.rows.push(Row { title: "Para você", items }),
+            Ok(items) if !items.is_empty() => out.rows.push(Row { title: "Para você".into(), items }),
             Ok(_) => {}
             Err(e) => out.errors.push(format!("Para você: {e:#}")),
+        }
+        // animes: os da temporada, pelo gosto
+        if cat == Category::Animes {
+            match self.season_row().await {
+                Ok((title, items)) if !items.is_empty() => out.rows.push(Row { title, items }),
+                Ok(_) => {}
+                Err(e) => out.errors.push(format!("Temporada: {e:#}")),
+            }
         }
         for (title, path) in lists(cat) {
             match self.tmdb_list(cat, title, path).await {
                 Ok(list) => {
                     let items = self.cards(cat, &list).await;
-                    out.rows.push(Row { title, items });
+                    out.rows.push(Row { title: title.into(), items });
                 }
                 Err(e) => out.errors.push(format!("{title}: {e:#}")),
             }

@@ -145,12 +145,23 @@ fn taste(seed_genres: &[(f64, Vec<i64>)], ranked: &[(Media, Value, f64)]) -> Has
 
 /// Quanto um título combina com o gosto (0–1): a média dos seus gêneros.
 /// Animação não conta na fileira de animes (todos são).
-fn fit(taste: &HashMap<i64, f64>, v: &Value, cat: Category) -> f64 {
+pub(crate) fn fit(taste: &HashMap<i64, f64>, v: &Value, cat: Category) -> f64 {
     let genres: HashSet<i64> = genres_of(v).filter(|g| !(cat == Category::Animes && *g == 16)).collect();
     if genres.is_empty() {
         return 0.0;
     }
     genres.iter().map(|g| taste.get(g).copied().unwrap_or(0.0)).sum::<f64>() / genres.len() as f64
+}
+
+/// O perfil de quem assiste (ver `viewer_profile`).
+pub(crate) struct Profile {
+    pub seeds: HashMap<(Media, i64), f64>,
+    /// pedido ou na biblioteca
+    pub exclude: HashSet<(Media, i64)>,
+    /// recomendações do TMDB das sementes, da mais forte para a mais fraca
+    pub ranked: Vec<(Media, Value, f64)>,
+    /// gosto por gênero unificado (0–1)
+    pub taste: HashMap<i64, f64>,
 }
 
 #[derive(Default)]
@@ -159,12 +170,14 @@ pub struct Cache {
     rows: tokio::sync::Mutex<HashMap<Category, (Instant, Vec<Found>)>>,
     /// populares dos gêneros preferidos, pelo caminho no TMDB
     by_genre: tokio::sync::Mutex<HashMap<String, (Instant, Vec<Value>)>>,
+    profile: tokio::sync::Mutex<Option<(Instant, Arc<Profile>)>>,
 }
 
 impl Cache {
     /// Histórico mudou (importação da Netflix, AniList): refazer as fileiras.
     pub async fn clear(&self) {
         self.rows.lock().await.clear();
+        *self.profile.lock().await = None;
     }
 }
 
@@ -176,23 +189,8 @@ impl Orchestrator {
         {
             return Ok(row.clone());
         }
-        let (seeds, seed_genres) = self.seeds().await?;
-        if seeds.is_empty() {
-            return Ok(vec![]);
-        }
-        // as sementes mais fortes de cada tipo
-        let mut strongest: Vec<(&(Media, i64), &f64)> = seeds.iter().collect();
-        strongest.sort_by(|a, b| b.1.total_cmp(a.1));
-        let mut recs = HashMap::new();
-        for (seed, _) in strongest.into_iter().take(MAX_SEEDS * 2) {
-            if let Ok(list) = self.recommendations(*seed).await {
-                recs.insert(*seed, list);
-            }
-        }
-        let exclude = self.owned().await;
-        let ranked = rank(&seeds, &recs, &exclude);
-        let known: Vec<(f64, Vec<i64>)> = seed_genres.iter().filter_map(|(k, g)| Some((*seeds.get(k)?, g.clone()))).collect();
-        let taste = taste(&known, &ranked);
+        let Some(p) = self.viewer_profile().await? else { return Ok(vec![]) };
+        let Profile { seeds, exclude, ranked, taste } = &*p;
         let media = if cat == Category::Movies { Media::Movie } else { Media::Tv };
         let fits = |m: Media, v: &Value| {
             m == media
@@ -210,7 +208,7 @@ impl Orchestrator {
         }
         let mut seen: HashSet<i64> = pool.iter().filter_map(|p| p.0["id"].as_i64()).collect();
         let mut popular = self.showcase_list(cat, "Populares no Brasil").await.unwrap_or_default();
-        popular.extend(self.popular_in(cat, &taste).await);
+        popular.extend(self.popular_in(cat, taste).await);
         for v in popular {
             let Some(id) = v["id"].as_i64() else { continue };
             if fits(media, &v) && !seeds.contains_key(&(media, id)) && !exclude.contains(&(media, id)) && seen.insert(id) {
@@ -221,7 +219,7 @@ impl Orchestrator {
             .into_iter()
             .filter(|(v, _)| v["poster_path"].is_string())
             .map(|(v, s)| {
-                let f = fit(&taste, &v, cat);
+                let f = fit(taste, &v, cat);
                 (v, s + TASTE_WEIGHT * f)
             })
             .collect();
@@ -230,6 +228,37 @@ impl Orchestrator {
         let row = self.showcase_cards(cat, &picked).await;
         self.for_you_cache.rows.lock().await.insert(cat, (Instant::now(), row.clone()));
         Ok(row)
+    }
+
+    /// O perfil de quem assiste: sementes, o que já tem, as recomendações do
+    /// TMDB ordenadas e o gosto por gênero (10 min em memória; None sem
+    /// histórico nenhum).
+    pub(crate) async fn viewer_profile(&self) -> Result<Option<Arc<Profile>>> {
+        if let Some((at, p)) = &*self.for_you_cache.profile.lock().await
+            && at.elapsed() < ROW_TTL
+        {
+            return Ok(Some(p.clone()));
+        }
+        let (seeds, seed_genres) = self.seeds().await?;
+        if seeds.is_empty() {
+            return Ok(None);
+        }
+        // as sementes mais fortes de cada tipo
+        let mut strongest: Vec<(&(Media, i64), &f64)> = seeds.iter().collect();
+        strongest.sort_by(|a, b| b.1.total_cmp(a.1));
+        let mut recs = HashMap::new();
+        for (seed, _) in strongest.into_iter().take(MAX_SEEDS * 2) {
+            if let Ok(list) = self.recommendations(*seed).await {
+                recs.insert(*seed, list);
+            }
+        }
+        let exclude = self.owned().await;
+        let ranked = rank(&seeds, &recs, &exclude);
+        let known: Vec<(f64, Vec<i64>)> = seed_genres.iter().filter_map(|(k, g)| Some((*seeds.get(k)?, g.clone()))).collect();
+        let taste = taste(&known, &ranked);
+        let p = Arc::new(Profile { seeds, exclude, ranked, taste });
+        *self.for_you_cache.profile.lock().await = Some((Instant::now(), p.clone()));
+        Ok(Some(p))
     }
 
     /// Os populares (2 páginas) dos três gêneros preferidos, no tipo da

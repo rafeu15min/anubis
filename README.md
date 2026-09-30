@@ -56,6 +56,14 @@ AniList — com a extensão MAL-Sync, o que se assiste na Crunchyroll vai sozinh
 para o AniList (status, nota e favoritos pesam; ids pela lista pública
 Fribb/anime-lists). Fica em `state_dir/externo.json`.
 
+**Temporada de … para você** (aba Animes, depois do Para você): os animes da
+temporada (lista do AniList: TV, curtos e ONA do Japão; nas duas últimas
+semanas de uma temporada, já as estreias da próxima), na ordem do mesmo
+perfil do Para você — continuação de algo já visto sobe, depois recomendado
+pelas sementes e o gosto por gênero; a popularidade no AniList só desempata.
+O que já está pedido ou na biblioteca sai. A lista fica 12 h em memória (a
+antiga vale enquanto a nova é montada).
+
 **Busca unificada.** Página em `/` que pesquisa filmes (Radarr/TMDB) e séries
 (Sonarr/TVDB) ao mesmo tempo. "Pedir" adiciona o item ao Radarr/Sonarr com o
 perfil de qualidade configurado (séries com o gênero Anime vão para a pasta de
@@ -244,6 +252,7 @@ src/search.rs        busca, pedido e acompanhamento
 src/stream.rs        assistir agora (librqbit, import, entrega ao qBittorrent)
 src/discover.rs      vitrine por categoria (TMDB + biblioteca)
 src/foryou.rs        "Para você": sementes do Jellyfin/Radarr/Sonarr + recomendações do TMDB
+src/season.rs        "Temporada de … para você": animes da temporada (AniList) pelo gosto
 src/external.rs      histórico de fora: CSV da Netflix e lista do AniList (Crunchyroll)
 src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)

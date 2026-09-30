@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-const ANILIST: &str = "https://graphql.anilist.co";
+pub(crate) const ANILIST: &str = "https://graphql.anilist.co";
 const ANIME_MAP_URL: &str = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json";
 const ANIME_MAP_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const ANILIST_TTL: Duration = Duration::from_secs(3600);
@@ -86,8 +86,8 @@ pub struct External {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct AnimeIds {
-    tmdb_tv: Option<i64>,
+pub(crate) struct AnimeIds {
+    pub(crate) tmdb_tv: Option<i64>,
     tmdb_movie: Option<i64>,
     tvdb: Option<i64>,
 }
@@ -638,7 +638,7 @@ impl Orchestrator {
     }
 
     /// AniList → TMDB/TVDB, da lista pública (baixada a cada 7 dias).
-    async fn anime_map(&self) -> Result<HashMap<i64, AnimeIds>> {
+    pub(crate) async fn anime_map(&self) -> Result<HashMap<i64, AnimeIds>> {
         if let Some(m) = &*self.external.anime_map.lock().await {
             return Ok(m.clone());
         }

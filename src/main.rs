@@ -22,6 +22,7 @@ mod mux;
 mod planner;
 mod prefs;
 mod search;
+mod season;
 mod services;
 mod stream;
 mod subs;

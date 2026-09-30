@@ -4,7 +4,10 @@
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
 //! GET  /jellyfin/open?next=/details?id=X — abre o Jellyfin já logado (sessão deste navegador)
-//! GET  /discover/{filmes|series|animes} — vitrine: prontos para assistir, destaques, lançamentos, populares no Brasil
+//! GET  /discover/{filmes|series|animes}[?bg=1] — vitrine: prontos para assistir, destaques, lançamentos, populares no Brasil
+//!                                 (bg=1: pré-carga, sem passar a aba na frente da checagem)
+//! GET  /availability            — o que as fontes têm de cada título checado + fila e estimativa
+//! POST /availability/{kind}/{id} — checa esse título antes dos outros e devolve o resultado (até 90 s)
 //! GET  /events?items=movie:ID,series:ID — estado ao vivo (SSE) desses itens
 //! GET  /requests                — pedidos e biblioteca (a lista "Pedidos" da página)
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
@@ -81,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/request", post(request))
         .route("/events", get(events))
         .route("/discover/{category}", get(discover))
+        .route("/availability", get(availability))
+        .route("/availability/{kind}/{id}", post(availability_now))
         .route("/indexers", get(indexers))
         .route("/indexers/test", post(indexers_test))
         .route("/jellyfin/open", get(jellyfin_open))
@@ -636,12 +641,28 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
     Sse::new(Rx(rx)).keep_alive(KeepAlive::default()).into_response()
 }
 
-async fn discover(State(s): State<AppState>, Path(category): Path<String>) -> Response {
+#[derive(serde::Deserialize)]
+struct DiscoverQuery {
+    #[serde(default)]
+    bg: u8,
+}
+
+async fn discover(State(s): State<AppState>, Path(category): Path<String>, Query(q): Query<DiscoverQuery>) -> Response {
     let Some(cat) = crate::discover::Category::parse(&category) else { return error(StatusCode::NOT_FOUND, "categoria: filmes, series ou animes") };
-    match s.orch.showcase(cat).await {
+    match s.orch.showcase(cat, q.bg == 0).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
+}
+
+async fn availability(State(s): State<AppState>) -> Response {
+    let a = &s.orch.availability;
+    Json(json!({ "states": a.states().await, "pending": a.pending().await, "eta": a.eta().await })).into_response()
+}
+
+async fn availability_now(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    let avail = s.orch.availability.check_now(kind, id, std::time::Duration::from_secs(90)).await;
+    Json(json!({ "avail": avail.unwrap_or(crate::avail::Avail::Unknown) })).into_response()
 }
 
 #[derive(serde::Deserialize)]

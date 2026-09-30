@@ -51,8 +51,10 @@ pub struct Showcase {
     pub rows: Vec<Row>,
     /// lista do TMDB que não respondeu (as outras seguem)
     pub errors: Vec<String>,
-    /// títulos esperando a busca nos indexadores (aparecem quando ela acha torrent)
+    /// títulos esperando a busca nos indexadores (de todas as abas)
     pub checking: usize,
+    /// quanto falta para a fila acabar, em segundos
+    pub checking_eta: u64,
 }
 
 #[derive(Default)]
@@ -110,15 +112,16 @@ fn from_tmdb(kind: Kind, id: i64, v: &Value) -> Option<Found> {
         anime: kind == Kind::Series && is_anime(v),
         requested: false,
         available: false,
-        subbed_only: false,
+        avail: None,
     })
 }
 
 impl Orchestrator {
-    /// A vitrine de uma categoria.
-    pub async fn showcase(self: &Arc<Self>, cat: Category) -> Result<Showcase> {
+    /// A vitrine de uma categoria. `focus`: é a aba aberta (os títulos dela
+    /// passam na frente da fila de checagem); falso na pré-carga das outras.
+    pub async fn showcase(self: &Arc<Self>, cat: Category, focus: bool) -> Result<Showcase> {
         self.live.touch();
-        let mut out = Showcase { ready: self.ready(cat).await, rows: vec![], errors: vec![], checking: 0 };
+        let mut out = Showcase { ready: self.ready(cat).await, rows: vec![], errors: vec![], checking: 0, checking_eta: 0 };
         if self.tmdb.is_none() {
             return Ok(out);
         }
@@ -145,8 +148,33 @@ impl Orchestrator {
                 Err(e) => out.errors.push(format!("{title}: {e:#}")),
             }
         }
+        for row in &mut out.rows {
+            self.tag_avail(&mut row.items).await;
+        }
+        if focus {
+            // coluna por coluna: o começo de cada fileira (o que está na tela) primeiro
+            let longest = out.rows.iter().map(|r| r.items.len()).max().unwrap_or(0);
+            let keys: Vec<(Kind, i64)> = (0..longest).flat_map(|i| out.rows.iter().filter_map(move |r| r.items.get(i))).map(|f| (f.kind, f.id)).collect();
+            self.availability.prioritize(&keys).await;
+        }
         out.checking = self.availability.pending().await;
+        out.checking_eta = self.availability.eta().await;
         Ok(out)
+    }
+
+    /// Põe em cada cartão o que as fontes têm e ordena a fileira: primeiro o
+    /// que dá para baixar (ou já está pedido), depois o que falta conferir,
+    /// no fim o que não tem fonte. Na hora de montar (as fileiras do "Para
+    /// você" ficam guardadas um tempo, e a checagem anda nesse meio-tempo).
+    async fn tag_avail(&self, items: &mut [Found]) {
+        for f in items.iter_mut() {
+            f.avail = if f.requested || f.available { None } else { Some(self.availability.get(f.kind, f.id).await.unwrap_or(Avail::Unknown)) };
+        }
+        items.sort_by_key(|f| match f.avail {
+            None | Some(Avail::Dubbed) | Some(Avail::Subbed) => 0,
+            Some(Avail::Unknown) => 1,
+            Some(Avail::Nothing) => 2,
+        });
     }
 
     /// Uma das listas da vitrine, pelo título (para o "Para você" completar).
@@ -185,8 +213,8 @@ impl Orchestrator {
 
     /// Cartões com o estado no Radarr/Sonarr; séries sem id do TVDB ficam de
     /// fora (o Sonarr não teria como pedi-las). O que não está pedido nem na
-    /// biblioteca só aparece depois que a busca nos indexadores acha torrent
-    /// (só no idioma original: `subbed_only`); o resto vai para a fila dela.
+    /// biblioteca vai para a fila da checagem nos indexadores (`tag_avail`
+    /// põe o resultado).
     async fn cards(self: &Arc<Self>, cat: Category, list: &[Value]) -> Vec<Found> {
         let kind = if cat == Category::Movies { Kind::Movie } else { Kind::Series };
         // ids do TVDB que faltam, buscados juntos
@@ -232,17 +260,13 @@ impl Orchestrator {
                 .collect()
         };
         let mut shown = vec![];
-        for (mut f, v) in cards {
-            if !f.requested && !f.available {
-                // nunca checado ou vencido: para a fila (o que já se sabia continua valendo)
-                if let Some(w) = Want::from_tmdb(kind, f.id, v) {
-                    self.availability.want(w).await;
-                }
-                match self.availability.get(kind, f.id).await {
-                    Some(Avail::Dubbed) => {}
-                    Some(Avail::Subbed) => f.subbed_only = true,
-                    _ => continue,
-                }
+        for (f, v) in cards {
+            // nunca checado ou vencido: para a fila (o que já se sabia continua valendo)
+            if !f.requested
+                && !f.available
+                && let Some(w) = Want::from_tmdb(kind, f.id, v)
+            {
+                self.availability.want(w).await;
             }
             shown.push(f);
         }

@@ -85,6 +85,11 @@
   .tile .m .ok { color: var(--ok); }
   .tile .m .sub, .tag.sub { color: #ffb36b; }
   .tag.sub { border-color: #ffb36b; }
+  /* sem fonte: apagado (continua clicável) */
+  .tile.none img, .tile.none .noposter { opacity: .35; filter: grayscale(1); }
+  .tile.none .t { color: var(--muted); }
+  .summary { padding: 12px 0 0; }
+  .summary b { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -235,13 +240,17 @@ function card(it, st) {
   const poster = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
   const year = it.year ? ` (${it.year})` : '';
   const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ')
-    + (it.subbed_only ? ' <span class="tag sub" title="Os indexadores só têm no idioma original, com legenda">somente legendado</span>' : '');
+    + (it.avail === 'subbed' ? ' <span class="tag sub" title="Os indexadores só têm no idioma original, com legenda">somente legendado</span>'
+      : it.avail === 'nothing' ? ' <span class="tag">sem fonte</span>'
+      : it.avail === 'unknown' ? ` <span class="tag">${it.uncertain ? 'não deu para conferir agora — tento de novo em 1 h' : 'conferindo as fontes…'}</span>` : '');
   // filmes: assistir agora (padrão) ou só baixar; séries: episódios (assistir
   // um de cada vez) ou pedir a série inteira
   const watch = it.kind === 'movie'
     ? `<button class="primary" data-watch="${k}">Assistir</button>`
     : `<button class="primary" data-eps="${it.id}" data-title="${esc(it.title)}">Episódios</button>`;
-  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${it.kind === 'movie' ? 'Só baixar' : 'Baixar a série'}</button>`;
+  const none = it.avail === 'nothing' && !it.requested && !tracked[k];
+  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${none ? 'Pedir quando aparecer' : it.kind === 'movie' ? 'Só baixar' : 'Baixar a série'}</button>`;
+  const why = none ? `<small class="meta" style="flex-basis:100%">Nenhuma das fontes conferidas tem este título agora. Pedindo, o ${it.kind === 'movie' ? 'Radarr' : 'Sonarr'} fica de olho e baixa quando ele aparecer.</small>` : '';
   const mux = it.kind === 'movie' ? `<button data-mux="${it.id}" data-title="${esc(it.title)}">Juntar dublagem</button>` : '';
   const action = watch + req + mux;
   return `<article class="card" data-key="${k}">
@@ -250,7 +259,7 @@ function card(it, st) {
       <h3>${esc(it.title)}<span class="meta">${year}</span></h3>
       <div class="row">${tags}</div>
       <p class="ov">${esc(it.overview)}</p>
-      <div class="row">${action}</div>
+      <div class="row">${action}${why}</div>
       <div class="row status">${statusHtml(st)}</div>
     </div>
   </article>`;
@@ -457,11 +466,65 @@ function tile(it, ready) {
   const k = keyOf(it);
   lastResults[k] = it;
   const img = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
-  const badge = ready || it.available ? ' · <span class="ok">pronto</span>' : it.requested ? ' · na lista' : it.subbed_only ? ' · <span class="sub">só legendado</span>' : '';
-  return `<button class="tile" data-open="${k}">${img}<span class="t">${esc(it.title)}</span><span class="m">${it.year || ''}${badge}</span></button>`;
+  const none = !ready && it.avail === 'nothing';
+  return `<button class="tile${none ? ' none' : ''}" data-open="${k}">${img}<span class="t">${esc(it.title)}</span><span class="m">${tileMeta(it, ready)}</span></button>`;
+}
+function tileMeta(it, ready) {
+  const badge = ready || it.available ? ' · <span class="ok">pronto</span>' : it.requested ? ' · na lista'
+    : it.avail === 'subbed' ? ' · <span class="sub">só legendado</span>'
+    : it.avail === 'nothing' ? ' · sem fonte'
+    : it.avail === 'unknown' ? ' · a conferir' : '';
+  return `${it.year || ''}${badge}`;
+}
+// o que as fontes têm, contado na aba (cada título uma vez; fora os já pedidos)
+const CATNAME = { filmes: 'Filmes', series: 'Séries', animes: 'Animes' };
+function eta(s) {
+  if (s < 60) return 'menos de 1 min';
+  const m = Math.round(s / 60);
+  if (m < 60) return `cerca de ${m} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return `cerca de ${h} h${r >= 5 ? ` ${r} min` : ''}`;
+}
+function summary(cat, pending, secs) {
+  const seen = new Set(), n = { dubbed: 0, subbed: 0, nothing: 0, unknown: 0 };
+  document.querySelectorAll('#showcase .shelf:not(.ready) [data-open]').forEach((t) => {
+    const k = t.dataset.open, it = lastResults[k];
+    if (seen.has(k) || !it || !it.avail) return;
+    seen.add(k);
+    n[it.avail]++;
+  });
+  const parts = [[n.dubbed, 'dublado', 'dublados'], [n.subbed, 'só legendado', 'só legendados'], [n.nothing, 'sem fonte', 'sem fonte'], [n.unknown, 'a conferir', 'a conferir']]
+    .filter(([c]) => c).map(([c, one, many]) => `${c} ${c === 1 ? one : many}`);
+  const line = parts.length ? `<b>${CATNAME[cat]}:</b> ${parts.join(' · ')}` : '';
+  const queue = pending ? `<br>Conferindo as fontes: ${pending} ${pending === 1 ? 'título' : 'títulos'} na fila, ${eta(secs)}. As etiquetas se atualizam sozinhas.` : '';
+  return line || queue ? `<p class="msg summary">${line}${queue}</p>` : '';
+}
+// enquanto há fila, a cada 30 s: etiquetas e resumo da aba aberta, sem reordenar
+let availTimer = null;
+function watchAvailability(pending) {
+  clearTimeout(availTimer);
+  if (pending) availTimer = setTimeout(pollAvailability, 30000);
+}
+async function pollAvailability() {
+  const box = $('#showcase');
+  if (box.hidden || document.hidden) { watchAvailability(1); return; }
+  try {
+    const d = await (await fetch('availability')).json();
+    box.querySelectorAll('.shelf:not(.ready) [data-open]').forEach((t) => {
+      const it = lastResults[t.dataset.open];
+      if (!it || !it.avail || !d.states[t.dataset.open]) return;
+      it.avail = d.states[t.dataset.open];
+      t.classList.toggle('none', it.avail === 'nothing');
+      t.querySelector('.m').innerHTML = tileMeta(it, false);
+    });
+    const old = box.querySelector('.summary');
+    const now = summary(currentCat, d.pending, d.eta);
+    if (old) old.outerHTML = now || ''; else if (now) box.insertAdjacentHTML('afterbegin', now);
+    watchAvailability(d.pending);
+  } catch { watchAvailability(1); }
 }
 const shelf = (title, items, ready) => items.length
-  ? `<section class="shelf"><h2>${esc(title)}</h2><div class="railbox">
+  ? `<section class="shelf${ready ? ' ready' : ''}"><h2>${esc(title)}</h2><div class="railbox">
       <button class="nav" data-scroll="-1" aria-label="Voltar">‹</button><button class="nav" data-scroll="1" aria-label="Avançar">›</button>
       <div class="rail">${items.map((it) => tile(it, ready)).join('')}</div></div></section>` : '';
 async function showCategory(cat) {
@@ -475,13 +538,15 @@ async function showCategory(cat) {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
     if (cat !== currentCat) return;  // trocou de aba no meio
-    // a vitrine só mostra o que os indexadores têm; o resto está sendo buscado
-    const checking = d.checking ? `<p class="msg">Buscando nas fontes ${d.checking} ${d.checking === 1 ? 'título' : 'títulos'} da vitrine — aparecem aqui quando houver torrent. <button data-recheck>Atualizar</button></p>` : '';
-    box.innerHTML = (shelf('Prontos para assistir', d.ready, true) + d.rows.map((row) => shelf(row.title, row.items, false)).join('')
+    box.innerHTML = shelf('Prontos para assistir', d.ready, true) + d.rows.map((row) => shelf(row.title, row.items, false)).join('')
       + (d.errors.length ? `<p class="msg err">${d.errors.map(esc).join('<br>')}</p>` : '')
-      || (checking ? '' : '<p class="msg">Nada por aqui ainda.</p>')) + checking;
-    // as outras abas já ficam prontas no servidor (a 1ª vez de séries e animes leva segundos)
-    if (!prefetched) { prefetched = true; for (const c of ['filmes', 'series', 'animes']) if (c !== cat) fetch(`discover/${c}`).catch(() => {}); }
+      || '<p class="msg">Nada por aqui ainda.</p>';
+    // resumo do que as fontes têm, no topo (conta pelos cartões já na página)
+    box.insertAdjacentHTML('afterbegin', summary(cat, d.checking, d.checking_eta));
+    watchAvailability(d.checking);
+    // as outras abas já ficam prontas no servidor (a 1ª vez de séries e animes leva segundos),
+    // sem passar na frente da checagem da aba aberta
+    if (!prefetched) { prefetched = true; for (const c of ['filmes', 'series', 'animes']) if (c !== cat) fetch(`discover/${c}?bg=1`).catch(() => {}); }
   } catch (e) {
     box.innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
   }
@@ -513,6 +578,23 @@ function openItem(k) {
   $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
   $('#item').showModal();
   if (it.requested) refresh(it, false);
+  if (it.avail === 'unknown') checkNow(k);
+}
+// título ainda não conferido: passa na frente da fila e o cartão mostra o resultado
+async function checkNow(k) {
+  const [kind, id] = k.split(':');
+  try {
+    const d = await (await fetch(`availability/${kind}/${id}`, { method: 'POST' })).json();
+    const it = lastResults[k];
+    if (!it || !d.avail) return;
+    it.avail = d.avail;
+    it.uncertain = d.avail === 'unknown';
+    if (openKey === k && $('#item').open) $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
+    document.querySelectorAll(`#showcase [data-open="${k}"]`).forEach((t) => {
+      t.classList.toggle('none', it.avail === 'nothing');
+      t.querySelector('.m').innerHTML = tileMeta(it, false);
+    });
+  } catch {}
 }
 $('#itemclose').onclick = () => $('#item').close();
 // "não quero ver": sai da vitrine (e o que se parece com ele aparece menos)
@@ -668,7 +750,6 @@ document.addEventListener('click', (e) => {
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
-  if (e.target.closest('[data-recheck]')) { showCategory(currentCat); return; }
   const rt = e.target.closest('[data-retest]');
   if (rt) { retestIndexers(rt); return; }
   const sb = e.target.closest('[data-subbed]');

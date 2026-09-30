@@ -317,8 +317,14 @@ impl Prowlarr {
     /// Prowlarr pede a cada site (o 1337x tem 20 por página): mais que 20
     /// multiplica as consultas — e o Cloudflare dele bloqueia o IP (erro 1006).
     pub async fn search(&self, query: &str, categories: &[u32], limit: u32) -> Result<Vec<Value>> {
+        self.search_in(query, categories, limit, &[]).await
+    }
+
+    /// O mesmo, só nesses indexadores (ids do Prowlarr; vazio = todos).
+    pub async fn search_in(&self, query: &str, categories: &[u32], limit: u32, indexers: &[i64]) -> Result<Vec<Value>> {
         let cats: String = categories.iter().map(|c| format!("&categories={c}")).collect();
-        let url = format!("{}/api/v1/search?query={}&type=search&limit={limit}{cats}", self.base, url_encode(query));
+        let ids: String = indexers.iter().map(|i| format!("&indexerIds={i}")).collect();
+        let url = format!("{}/api/v1/search?query={}&type=search&limit={limit}{cats}{ids}", self.base, url_encode(query));
         send(counted(self.http.get(url).header("X-Api-Key", &self.key).timeout(Duration::from_secs(90))), "Prowlarr busca").await
     }
 

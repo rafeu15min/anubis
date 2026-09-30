@@ -56,6 +56,12 @@ AniList — com a extensão MAL-Sync, o que se assiste na Crunchyroll vai sozinh
 para o AniList (status, nota e favoritos pesam; ids pela lista pública
 Fribb/anime-lists). Fica em `state_dir/externo.json`.
 
+**Não quero ver** (no cartão de um título da vitrine): ele sai de todas as
+fileiras da vitrine e vira sinal contra no Para você — o que o TMDB recomenda
+a partir dele desce, e os gêneros dele pesam menos (cada um vale −2; um
+favorito vale 3). A busca continua achando. Preferências → Ocultos da vitrine
+lista os ocultos, com "Mostrar de novo".
+
 **Temporada de … para você** (aba Animes, depois do Para você): os animes da
 temporada (lista do AniList: TV, curtos e ONA do Japão; nas duas últimas
 semanas de uma temporada, já as estreias da próxima), na ordem do mesmo

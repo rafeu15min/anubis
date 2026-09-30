@@ -69,6 +69,23 @@ struct State {
     /// "Movie:123"/"Tv:123" → gêneros, vindos da busca na importação
     #[serde(default)]
     genres: HashMap<String, Vec<i64>>,
+    /// "não quero ver": fora da vitrine, e o que se parece com eles desce
+    #[serde(default)]
+    hidden: Vec<Hidden>,
+}
+
+/// Um título que a pessoa não quer ver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hidden {
+    /// como a página o identifica (filme: id do TMDB; série: do TVDB)
+    pub kind: crate::search::Kind,
+    pub id: i64,
+    pub media: Media,
+    pub tmdb: i64,
+    pub title: String,
+    #[serde(default)]
+    pub genres: Vec<i64>,
+    pub at: String,
 }
 
 fn genre_key(media: Media, id: i64) -> String {
@@ -625,6 +642,48 @@ impl Orchestrator {
         self.external.save().await; // guarda os ids do TMDB achados
         *self.external.anilist.lock().await = Some((Instant::now(), seeds.clone()));
         Ok(seeds)
+    }
+
+    /// "Não quero ver": sai da vitrine e vira sinal contra (o que o TMDB
+    /// recomenda a partir dele desce, e os gêneros dele pesam menos).
+    pub async fn hide(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
+        use crate::search::Kind;
+        let (media, tmdb_id) = match kind {
+            Kind::Movie => (Media::Movie, id),
+            _ => (Media::Tv, self.tmdb_of_tvdb(id).await.context("série sem id no TMDB")?),
+        };
+        let tmdb = self.tmdb.as_ref().context("TMDB não configurado")?;
+        let path = if media == Media::Movie { "movie" } else { "tv" };
+        let v = tmdb.get(&format!("{path}/{tmdb_id}?language=pt-BR")).await?;
+        let h = Hidden {
+            kind,
+            id,
+            media,
+            tmdb: tmdb_id,
+            title: v["title"].as_str().or(v["name"].as_str()).unwrap_or_default().to_owned(),
+            genres: v["genres"].as_array().into_iter().flatten().filter_map(|g| g["id"].as_i64()).collect(),
+            at: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        };
+        {
+            let mut st = self.external.state.lock().await;
+            st.hidden.retain(|x| (x.kind, x.id) != (kind, id));
+            st.hidden.push(h.clone());
+        }
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+        info!("não quero ver: {}", h.title);
+        Ok(h)
+    }
+
+    pub async fn unhide(&self, kind: crate::search::Kind, id: i64) {
+        self.external.state.lock().await.hidden.retain(|x| (x.kind, x.id) != (kind, id));
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+    }
+
+    /// Os ocultos, do mais antigo ao mais recente.
+    pub async fn hidden(&self) -> Vec<Hidden> {
+        self.external.state.lock().await.hidden.clone()
     }
 
     /// Id do TMDB de uma série pelo do TVDB (guardado).

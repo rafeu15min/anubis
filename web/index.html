@@ -40,6 +40,7 @@
   .tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
   .msg { color: var(--muted); padding: 24px 0; }
   button.primary { background: var(--accent); color: #111; font-weight: 600; }
+  button.quiet { border-color: var(--line); color: var(--muted); }
   button.primary:hover { background: color-mix(in srgb, var(--accent) 85%, white); }
   dialog { max-width: min(720px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 18px; }
   dialog::backdrop { background: rgba(0,0,0,.6); }
@@ -105,7 +106,7 @@
 </main>
 <dialog id="item">
   <div id="itembody"></div>
-  <div class="row" style="justify-content:flex-end"><button id="itemclose">Fechar</button></div>
+  <div class="row" style="justify-content:flex-end"><button id="itemhide" class="quiet" style="margin-right:auto">Não quero ver</button><button id="itemclose">Fechar</button></div>
 </dialog>
 <dialog id="pick">
   <h3 id="picktitle"></h3>
@@ -473,14 +474,29 @@ async function acceptSubbed(btn, key) {
   if (it) apply(it, d, false);
 }
 
+let openKey = null;
 function openItem(k) {
   const it = lastResults[k];
   if (!it) return;
+  openKey = k;
   $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
   $('#item').showModal();
   if (it.requested) refresh(it, false);
 }
 $('#itemclose').onclick = () => $('#item').close();
+// "não quero ver": sai da vitrine (e o que se parece com ele aparece menos)
+$('#itemhide').onclick = async () => {
+  const k = openKey, b = $('#itemhide');
+  if (!k) return;
+  const [kind, id] = k.split(':');
+  b.disabled = true;
+  try {
+    const r = await fetch(`hidden/${kind}/${id}`, { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).error);
+    document.querySelectorAll(`#showcase [data-open="${k}"]`).forEach((t) => t.remove());
+    $('#item').close();
+  } catch (e) { alert(`Não deu: ${e.message}`); } finally { b.disabled = false; }
+};
 
 // atualiza o cartão do item onde ele aparecer (pedidos e resultados)
 function render(it, st) {

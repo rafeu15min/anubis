@@ -19,6 +19,8 @@
   section { margin: 0 0 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
   h2 { margin: 0 0 4px; font-size: 16px; }
   .help { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .hid { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .hid button { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
   .choice { display: grid; gap: 8px; }
   .row { display: grid; grid-template-columns: 7em 1fr; gap: 12px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line); }
   .row:first-of-type { border-top: 0; }
@@ -66,6 +68,12 @@
       <input type="file" id="crfile" accept=".json,application/json"> <span id="crmsg" class="help"></span>
       <p class="help" style="margin-top:12px"><b>Daqui para a frente (opcional):</b> com a extensão <a href="https://malsync.moe" target="_blank" rel="noopener">MAL-Sync</a> ligada a uma conta do <a href="https://anilist.co" target="_blank" rel="noopener">AniList</a>, o que você assiste na Crunchyroll pelo navegador vai sozinho para o AniList. Aqui, o nome de usuário do AniList (lista pública).</p>
       <input id="anilist" placeholder="usuário do AniList" style="min-height:40px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"> <button id="alsave" type="button">Ligar</button> <span id="almsg" class="help"></span>
+    </div></div>
+  </section>
+  <section>
+    <h2>Ocultos da vitrine</h2>
+    <p class="help">O que você marcou como "Não quero ver". Não aparece mais na vitrine, e o que se parece com eles aparece menos no "Para você". A busca continua achando.</p>
+    <div id="hidden"><p class="help">Nada oculto.</p></div>
   </section>
   <section id="subsbox">
     <h2>Legendas</h2>
@@ -186,6 +194,26 @@ $('#alsave').onclick = async () => {
   } catch (err) { $('#almsg').textContent = `Falhou: ${err.message}`; }
 };
 loadHistory();
+
+// ocultos da vitrine ("Não quero ver")
+const escH = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+async function loadHidden() {
+  try {
+    const list = await (await fetch('hidden')).json();
+    $('#hidden').innerHTML = list.length
+      ? list.slice().reverse().map((h) => `<div class="hid"><span>${escH(h.title)} <small class="help">· ${h.kind === 'movie' ? 'filme' : 'série'}, ${escH(h.at)}</small></span>
+          <button type="button" data-unhide="${h.kind}/${h.id}">Mostrar de novo</button></div>`).join('')
+      : '<p class="help">Nada oculto.</p>';
+  } catch {}
+}
+$('#hidden').onclick = async (e) => {
+  const b = e.target.closest('[data-unhide]');
+  if (!b) return;
+  b.disabled = true;
+  await fetch(`hidden/${b.dataset.unhide}`, { method: 'DELETE' });
+  loadHidden();
+};
+loadHidden();
 
 // o favorito da Crunchyroll: roda no crunchyroll.com, com a sessão de quem
 // está logado, e baixa o histórico de exibição (o mesmo que o site mostra)

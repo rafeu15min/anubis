@@ -11,7 +11,7 @@ use crate::search::{Found, Kind};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -204,11 +204,15 @@ impl Orchestrator {
             }
         }
         let tvdb = self.showcase_cache.tvdb.lock().await.clone();
+        let hidden: HashSet<(Kind, i64)> = self.hidden().await.into_iter().map(|h| (h.kind, h.id)).collect();
         let snap = self.live.arr.lock().await;
         list.iter()
             .filter_map(|v| {
                 let tmdb = v["id"].as_i64()?;
                 let id = if kind == Kind::Movie { tmdb } else { (*tvdb.get(&tmdb)?)? };
+                if hidden.contains(&(kind, id)) {
+                    return None;
+                }
                 let mut f = from_tmdb(kind, id, v)?;
                 // pedido ou na biblioteca (a central sabe, se estiver em dia)
                 if let Some((x, _)) = snap.item(kind, id) {

@@ -18,6 +18,7 @@
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! POST /movie/{tmdb}/subbed      — o mesmo para filmes
+//! GET /hidden · POST/DELETE /hidden/{kind}/{id} — "não quero ver" (fora da vitrine)
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
@@ -73,6 +74,8 @@ pub fn router(state: AppState) -> Router {
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/history/anilist", axum::routing::put(set_anilist))
+        .route("/hidden", get(|State(s): State<AppState>| async move { Json(s.orch.hidden().await) }))
+        .route("/hidden/{kind}/{id}", post(hide).delete(unhide))
         .route("/history/crunchyroll", post(import_crunchyroll).delete(clear_crunchyroll).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/request", post(request))
         .route("/events", get(events))
@@ -428,6 +431,18 @@ async fn import_crunchyroll(State(s): State<AppState>, body: String) -> Response
 
 async fn clear_crunchyroll(State(s): State<AppState>) -> Response {
     s.orch.clear_crunchyroll().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn hide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.hide(kind, id).await {
+        Ok(h) => Json(h).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn unhide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    s.orch.unhide(kind, id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 

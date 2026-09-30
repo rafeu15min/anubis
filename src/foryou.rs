@@ -31,6 +31,8 @@ const RECS_TTL: Duration = Duration::from_secs(24 * 3600);
 /// a fileira pronta, por categoria (o histórico muda devagar)
 const ROW_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SEEDS: usize = 10;
+/// peso (contra) de um "não quero ver" — um favorito vale 3
+const DISLIKE: f64 = 2.0;
 const ROW_LEN: usize = 20;
 /// quanto o gosto por gênero pesa perto das recomendações (que valem até 1)
 const TASTE_WEIGHT: f64 = 0.5;
@@ -252,9 +254,24 @@ impl Orchestrator {
                 recs.insert(*seed, list);
             }
         }
-        let exclude = self.owned().await;
-        let ranked = rank(&seeds, &recs, &exclude);
-        let known: Vec<(f64, Vec<i64>)> = seed_genres.iter().filter_map(|(k, g)| Some((*seeds.get(k)?, g.clone()))).collect();
+        let mut exclude = self.owned().await;
+        // "não quero ver": fora, e sementes com peso contra (o que o TMDB
+        // recomenda a partir deles desce; os gêneros deles pesam menos)
+        let hidden = self.hidden().await;
+        let mut weights = seeds.clone();
+        let mut known: Vec<(f64, Vec<i64>)> = seed_genres.iter().filter_map(|(k, g)| Some((*seeds.get(k)?, g.clone()))).collect();
+        for (i, h) in hidden.iter().rev().enumerate() {
+            let key = (h.media, h.tmdb);
+            exclude.insert(key);
+            weights.insert(key, -DISLIKE);
+            known.push((-DISLIKE, h.genres.clone()));
+            if i < MAX_SEEDS
+                && let Ok(list) = self.recommendations(key).await
+            {
+                recs.insert(key, list);
+            }
+        }
+        let ranked = rank(&weights, &recs, &exclude);
         let taste = taste(&known, &ranked);
         let p = Arc::new(Profile { seeds, exclude, ranked, taste });
         *self.for_you_cache.profile.lock().await = Some((Instant::now(), p.clone()));
@@ -435,6 +452,23 @@ mod tests {
         let ids: Vec<i64> = rank(&seeds, &recs, &exclude).iter().map(|(_, v, _)| v["id"].as_i64().unwrap()).collect();
         // 11 vem das duas sementes; 2 é semente e 12 já está na biblioteca
         assert_eq!(ids, [11, 10]);
+    }
+
+    #[test]
+    fn a_dislike_pushes_its_genres_down() {
+        // aventura vista, drama marcado "não quero ver"
+        let t = taste(&[(2.0, vec![12]), (-DISLIKE, vec![18])], &[]);
+        let drama = json!({ "genre_ids": [18] });
+        let adventure = json!({ "genre_ids": [10759] });
+        assert!(fit(&t, &drama, Category::Series) < 0.0);
+        assert!(fit(&t, &adventure, Category::Series) > fit(&t, &drama, Category::Series));
+        // o que só um oculto recomenda fica com peso negativo
+        let r = |id: i64| json!({ "id": id, "genre_ids": [18] });
+        let weights = HashMap::from([((Media::Tv, 1), 2.0), ((Media::Tv, 2), -DISLIKE)]);
+        let recs = HashMap::from([((Media::Tv, 1), vec![r(10)]), ((Media::Tv, 2), vec![r(11)])]);
+        let ranked = rank(&weights, &recs, &HashSet::new());
+        assert_eq!(ranked.first().map(|x| x.1["id"].clone()), Some(json!(10)));
+        assert!(ranked.iter().any(|x| x.1["id"] == 11 && x.2 < 0.0));
     }
 
     #[test]

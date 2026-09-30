@@ -25,11 +25,8 @@ use tracing::{info, warn};
 /// Ritmo: um título por vez, com pausa entre eles, e só uma página de cada
 /// site — duas checagens juntas com 100 resultados (5 páginas do 1337x por
 /// busca) fizeram o Cloudflare do 1337x bloquear o IP do servidor em minutos.
-const PAGE: u32 = 20;
 const GAP: std::time::Duration = std::time::Duration::from_secs(45);
-/// com indexador fora do ar, espera antes de continuar (não insiste num site
-/// que acabou de bloquear; e as checagens dariam "não sei")
-const BACKOFF: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+// indexador de castigo não precisa de pausa aqui: o Prowlarr já não o consulta
 /// versões de fora do Brasil conferidas pelo `parse` do Radarr/Sonarr, no máximo
 const MAX_PARSE: usize = 30;
 
@@ -280,9 +277,9 @@ impl Orchestrator {
         queries.dedup();
         let mut found: Vec<Value> = vec![];
         let mut failed = false;
-        let (a, b) = tokio::join!(p.search(&queries[0], cats, PAGE), async {
+        let (a, b) = tokio::join!(p.search(&queries[0], cats, crate::services::ONE_PAGE), async {
             match queries.get(1) {
-                Some(q) => p.search(q, cats, PAGE).await,
+                Some(q) => p.search(q, cats, crate::services::ONE_PAGE).await,
                 None => Ok(vec![]),
             }
         });
@@ -339,11 +336,6 @@ fn is_br(r: &Value) -> bool {
 /// Checagens em segundo plano, uma por vez, na ordem em que a vitrine pediu.
 pub async fn run(orch: Arc<Orchestrator>) {
     loop {
-        if !orch.indexers_down().await.is_empty() {
-            tokio::time::sleep(BACKOFF).await;
-            orch.refresh_indexers().await;
-            continue;
-        }
         let next = orch.availability.queue.lock().await.pop_front();
         let Some(w) = next else {
             orch.availability.wake.notified().await;

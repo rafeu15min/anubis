@@ -176,7 +176,7 @@ idioma não conta. Nada achado com indexador fora do ar = "não sei" (não
 aparece, checa de novo em 1 h, e o que se sabia antes continua valendo).
 Vale 7 dias (dublado), 3 (legendado), 1 (nada); fica em
 `state_dir/disponibilidade.json`. Ritmo: um título por vez, 45 s entre eles,
-uma página de cada site (`limit=20`), e pausa de 15 min com indexador fora —
+uma página de cada site (`limit=20`; indexador de castigo o Prowlarr já pula) —
 com duas checagens juntas e 100 resultados, o Cloudflare do 1337x bloqueou o
 IP do servidor (erro 1006) em minutos. A primeira passada leva horas; a
 página diz quantos títulos faltam.

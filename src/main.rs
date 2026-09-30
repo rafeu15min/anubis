@@ -16,6 +16,7 @@ mod discover;
 mod disk;
 mod external;
 mod foryou;
+mod indexers;
 mod orchestrator;
 mod live;
 mod mux;

@@ -163,6 +163,14 @@ item — pelo mesmo caminho (cabo, rede local, Tailscale) que o navegador usou.
 A senha fica só no servidor. Quem alcança o Anubis entra no Jellyfin como esse
 usuário.
 
+**Indexadores fora do ar**: o Radarr, o Sonarr e o Prowlarr põem de castigo
+o indexador que falha e param de consultá-lo por horas. O Anubis junta os que
+estão fora (Prowlarr `indexerstatus` + `/health` do Radarr/Sonarr, 1 min de
+cache) e avisa no "nenhuma versão" do "Assistir" e no cartão parado em
+"procurando" — a busca pode ter deixado versões de fora. "Testar de novo"
+(`POST /indexers/test`) testa esses indexadores em todos os programas; o que
+responde sai do castigo, e a busca roda de novo.
+
 **Preferências** (`/preferencias`, ícone de engrenagem na busca): idioma do
 áudio para filmes e séries — obrigatório (só dublado), preferido (baixa o que
 houver e troca pela dublada quando surgir) ou tanto faz — e os idiomas de

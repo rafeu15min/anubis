@@ -19,6 +19,7 @@
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! POST /movie/{tmdb}/subbed      — o mesmo para filmes
 //! GET /hidden · POST/DELETE /hidden/{kind}/{id} — "não quero ver" (fora da vitrine)
+//! GET  /indexers · POST /indexers/test — indexadores fora do ar · testar de novo (tira do castigo)
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
@@ -80,6 +81,8 @@ pub fn router(state: AppState) -> Router {
         .route("/request", post(request))
         .route("/events", get(events))
         .route("/discover/{category}", get(discover))
+        .route("/indexers", get(indexers))
+        .route("/indexers/test", post(indexers_test))
         .route("/jellyfin/open", get(jellyfin_open))
         .route("/requests", get(|State(s): State<AppState>| async move { Json(s.orch.requests().await) }))
         .route("/status/{kind}/{id}", get(status))
@@ -197,7 +200,12 @@ async fn status(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) 
 
 async fn versions(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     match s.orch.versions(kind, id).await {
-        Ok(v) => Json(v).into_response(),
+        // os fora do ar agora (as versões ficam guardadas 15 min; eles, 1 min)
+        Ok(v) => {
+            let mut v = json!(v);
+            v["indexers_down"] = json!(s.orch.indexers_down().await);
+            Json(v).into_response()
+        }
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
@@ -215,12 +223,24 @@ struct WatchBody {
 async fn watch(State(s): State<AppState>, Json(b): Json<WatchBody>) -> Response {
     match s.orch.watch(b.kind, b.id, b.guid.as_deref(), b.keep).await {
         Ok(Started::Ready) => Json(json!({ "player": format!("watch/{}/{}", kind_str(b.kind), b.id) })).into_response(),
-        Ok(Started::NoApproved(list)) => (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list }))).into_response(),
+        Ok(Started::NoApproved(list)) => {
+            // consultados agora: a busca que acabou pode ter derrubado algum
+            let down = s.orch.refresh_indexers().await;
+            (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list, "indexers_down": down }))).into_response()
+        }
         Err(e) => {
             warn!("assistir {}/{}: {e:#}", kind_str(b.kind), b.id);
             error(StatusCode::BAD_GATEWAY, format!("{e:#}"))
         }
     }
+}
+
+async fn indexers(State(s): State<AppState>) -> Response {
+    Json(json!({ "down": s.orch.indexers_down().await })).into_response()
+}
+
+async fn indexers_test(State(s): State<AppState>) -> Response {
+    Json(json!({ "down": s.orch.retest_indexers().await })).into_response()
 }
 
 fn kind_str(k: Kind) -> &'static str {

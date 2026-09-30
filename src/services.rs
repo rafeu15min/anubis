@@ -199,6 +199,15 @@ impl Arr {
         send(self.req(method, path).json(body), &format!("{} {path}", self.name)).await
     }
 
+    /// Testa um indexador (o corpo é o do `GET indexer`). Se passar, o
+    /// Radarr/Sonarr tira ele do castigo das falhas na hora. Sites atrás do
+    /// Cloudflare levam ~30 s.
+    pub async fn test_indexer(&self, indexer: &Value) -> Result<()> {
+        let req = self.req(Method::POST, "indexer/test").json(indexer).timeout(Duration::from_secs(120));
+        send::<Value>(req, &format!("{} teste do indexador", self.name)).await?;
+        Ok(())
+    }
+
     /// Versões encontradas nos indexadores, já com a decisão do Radarr/Sonarr
     /// (`rejected` + motivos). Demora alguns segundos: é uma busca de verdade.
     pub async fn releases(&self, filter: &str) -> Result<Vec<Value>> {
@@ -305,6 +314,17 @@ impl Prowlarr {
         let cats: String = categories.iter().map(|c| format!("&categories={c}")).collect();
         let url = format!("{}/api/v1/search?query={}&type=search&limit=100{cats}", self.base, url_encode(query));
         send(counted(self.http.get(url).header("X-Api-Key", &self.key).timeout(Duration::from_secs(90))), "Prowlarr busca").await
+    }
+
+    pub async fn get_json(&self, path: &str) -> Result<Value> {
+        send(self.http.get(format!("{}/api/v1/{path}", self.base)).header("X-Api-Key", &self.key), &format!("Prowlarr GET {path}")).await
+    }
+
+    /// Testa um indexador (corpo do `GET indexer`); passando, sai do castigo.
+    pub async fn test_indexer(&self, indexer: &Value) -> Result<()> {
+        let req = self.http.post(format!("{}/api/v1/indexer/test", self.base)).header("X-Api-Key", &self.key).json(indexer);
+        send::<Value>(req.timeout(Duration::from_secs(120)), "Prowlarr teste do indexador").await?;
+        Ok(())
     }
 }
 

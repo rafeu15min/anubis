@@ -111,6 +111,7 @@
 <dialog id="pick">
   <h3 id="picktitle"></h3>
   <p class="meta" id="pickmsg"></p>
+  <p class="meta" id="pickdown" style="color:#ffb36b"></p>
   <div id="rels"></div>
   <div id="pickwhere"></div>
   <div class="row" style="justify-content:flex-end"><button id="pickclose">Fechar</button></div>
@@ -207,12 +208,16 @@ function versionsText(v) {
   if (v.no_seeders) why.push(`${v.no_seeders} sem fontes`);
   return `Nenhuma versão aceita: ${v.found} encontradas — ${why.join(', ')}`;
 }
+function versionsDown(v) {
+  const t = versionsText(v);
+  return v.approved > 0 || !v.indexers_down?.length ? t : `${t} · fora do ar: ${v.indexers_down.map(esc).join(', ')}`;
+}
 
 function statusHtml(st) {
   if (!st) return '';
   if (st.mux) return muxHtml(st.mux);
   let txt = STATE[st.state] || st.state;
-  if (st.state === 'searching' && st.versions) txt = versionsText(st.versions);
+  if (st.state === 'searching' && st.versions) txt = versionsDown(st.versions);
   if (st.state === 'downloading' && st.progress != null) txt += ` ${Math.round(st.progress * 100)}%` + (st.eta ? ` · falta ${esc(st.eta)}` : '');
   if (st.episodes) txt += ` · ${st.episodes[0]}/${st.episodes[1]} episódios`;
   const bar = st.progress != null && st.state !== 'available' ? `<div class="progress"><i style="width:${(st.progress * 100).toFixed(1)}%"></i></div>` : '';
@@ -307,6 +312,12 @@ async function watch(k, guid, keep = false) {
         : some
           ? 'Todas as versões encontradas foram recusadas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
           : 'As fontes não têm nenhuma versão com gente compartilhando agora.';
+      // fontes fora do ar: a busca pode ter deixado versões de fora
+      const down = d.indexers_down || [];
+      $('#pickdown').dataset.k = k;
+      $('#pickdown').innerHTML = down.length
+        ? `Fora do ar agora: <b>${down.map(esc).join(', ')}</b> — a busca pode ter deixado versões de fora. <button data-retest="${down.length}">Testar de novo</button>`
+        : '';
       // episódio: o "onde assistir" é da série
       if (kind === 'episode') loadWhere($('#pickwhere'), 'series', currentTvdb);
       else loadWhere($('#pickwhere'), kind, id);
@@ -318,6 +329,21 @@ async function watch(k, guid, keep = false) {
   }
 }
 $('#pickclose').onclick = () => $('#pick').close();
+
+// testa de novo as fontes fora do ar; alguma voltou: busca de novo
+async function retestIndexers(btn) {
+  const before = +btn.dataset.retest, k = $('#pickdown').dataset.k;
+  btn.disabled = true;
+  btn.textContent = 'Testando (até 1–2 min)…';
+  try {
+    const d = await (await fetch('indexers/test', { method: 'POST' })).json();
+    if (d.down.length < before) { $('#pick').close(); watch(k); return; }
+    $('#pickdown').innerHTML = `Continuam fora do ar: <b>${d.down.map(esc).join(', ')}</b>.`;
+  } catch {
+    btn.disabled = false;
+    btn.textContent = 'Testar de novo';
+  }
+}
 
 // onde o título passa oficialmente no Brasil (sem [tmdb] na config, some)
 async function loadWhere(el, kind, id) {
@@ -637,6 +663,8 @@ document.addEventListener('click', (e) => {
   if (b) request(b.dataset.req);
   const ep = e.target.closest('[data-eps]');
   if (ep) episodes(ep.dataset.eps, ep.dataset.title);
+  const rt = e.target.closest('[data-retest]');
+  if (rt) { retestIndexers(rt); return; }
   const sb = e.target.closest('[data-subbed]');
   if (sb) acceptSubbed(sb, sb.dataset.subbed);
   const op = e.target.closest('[data-open]');

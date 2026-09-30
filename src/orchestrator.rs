@@ -40,6 +40,8 @@ pub struct Orchestrator {
     /// perfis do Sonarr que o Anubis usa (o dos pedidos e o sem dublagem)
     pub(crate) profile_ids: Mutex<Option<crate::prefs::ProfileIds>>,
     pub(crate) versions_cache: Mutex<HashMap<(crate::search::Kind, i64), (std::time::Instant, crate::search::Versions)>>,
+    /// indexadores fora do ar (1 min)
+    pub(crate) indexers: crate::indexers::Cache,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -82,6 +84,7 @@ impl Orchestrator {
             external: crate::external::External::load(cfg.stream.as_ref().map_or_else(|| std::path::PathBuf::from("/var/lib/anubis"), |s| s.state_dir.clone())),
             profile_ids: Mutex::new(None),
             versions_cache: Mutex::new(HashMap::new()),
+            indexers: crate::indexers::Cache::default(),
             cfg,
             running: Mutex::new(()),
             last: Mutex::new(None),

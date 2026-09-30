@@ -97,3 +97,12 @@ api_key = ""  # Bazarr → Settings → General → API Key
 [tmdb]
 api_key = ""  # themoviedb.org → Configurações → API: a chave (v3) ou o token de leitura
 region = "BR"
+
+# Opcional: busca direta nos indexadores pelo Prowlarr. O "assistir" de um
+# episódio procura o episódio, a temporada e o nome em português ao mesmo
+# tempo (a busca do Sonarr faz uma consulta por variação do nome, uma de cada
+# vez, e não reconhece os nomes dos sites brasileiros); o Sonarr só julga os
+# nomes (parse), com o perfil da série. A chave: Prowlarr → Settings → General.
+# [prowlarr]
+# url = "http://10.10.10.2:9696"
+# api_key = ""

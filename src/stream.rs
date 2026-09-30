@@ -315,6 +315,92 @@ fn subs_for(paths: &[PathBuf], video: &Path, episode: Option<(i64, i64)>) -> Vec
         .collect()
 }
 
+/// O episódio procurado (para `judge`).
+struct Wanted {
+    series_id: i64,
+    /// nomes da série (normalizados): o do Sonarr e o em português
+    names: Vec<String>,
+    episode_id: i64,
+    season: i64,
+    episode: i64,
+}
+
+/// Letras e números, minúsculos: "The Legend of Vox Machina" = "the.legend.of.vox.machina".
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// Nome da série para buscar: sem o ano entre parênteses ("Doctor Who (2005)").
+fn series_name(t: &str) -> String {
+    match t.rsplit_once(" (") {
+        Some((n, y)) if y.trim_end_matches(')').chars().all(|c| c.is_ascii_digit()) => n.to_owned(),
+        _ => t.to_owned(),
+    }
+}
+
+/// Um resultado do Prowlarr, julgado como o Sonarr julgaria: é desta série e
+/// deste episódio (ou da temporada inteira)? A qualidade está no perfil? Os
+/// formatos personalizados (dublagem, legenda) somam o mínimo do perfil?
+/// Devolve a versão no formato das do Sonarr (com `rejected`/`rejections`),
+/// ou None se não é deste episódio.
+fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value> {
+    let title = r["title"].as_str().unwrap_or_default();
+    let pe = &parsed["parsedEpisodeInfo"];
+    // da série: o Sonarr reconheceu, ou o nome (inglês ou português) está no título
+    let same_series = match parsed["series"]["id"].as_i64() {
+        Some(id) => id == w.series_id,
+        None => w.names.iter().any(|n| !n.is_empty() && norm(title).contains(n.as_str())),
+    };
+    if !same_series {
+        return None;
+    }
+    let episodes: Vec<i64> = pe["episodeNumbers"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect();
+    let pack = pe["fullSeason"] == true;
+    let this = parsed["episodes"].as_array().into_iter().flatten().any(|x| x["id"].as_i64() == Some(w.episode_id))
+        || (pe["seasonNumber"].as_i64() == Some(w.season) && (pack || episodes.contains(&w.episode)));
+    if !this {
+        return None;
+    }
+    // qualidades do perfil, na ordem (da pior para a melhor), e as aceitas
+    let mut order: Vec<(String, bool)> = vec![];
+    for it in profile["items"].as_array().into_iter().flatten() {
+        match it["quality"]["name"].as_str() {
+            Some(q) => order.push((q.to_owned(), it["allowed"] == true)),
+            None => {
+                for sub in it["items"].as_array().into_iter().flatten() {
+                    order.push((sub["quality"]["name"].as_str().unwrap_or_default().to_owned(), it["allowed"] == true && sub["allowed"] != false));
+                }
+            }
+        }
+    }
+    let quality = pe["quality"]["quality"]["name"].as_str().unwrap_or("Unknown");
+    let rank = order.iter().position(|(q, _)| q == quality);
+    let scores: HashMap<i64, i64> =
+        profile["formatItems"].as_array().into_iter().flatten().filter_map(|f| Some((f["format"].as_i64()?, f["score"].as_i64().unwrap_or(0)))).collect();
+    let score: i64 = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| scores.get(&c["id"].as_i64()?)).sum();
+    let min = profile["minFormatScore"].as_i64().unwrap_or(0);
+    let mut reasons: Vec<String> = vec![];
+    if !rank.is_some_and(|i| order[i].1) {
+        reasons.push(format!("Qualidade {quality} fora do perfil"));
+    }
+    if score < min {
+        reasons.push(format!("Custom Formats: pontuação {score}, abaixo do mínimo {min} do perfil"));
+    }
+    // sites só de magnet (os brasileiros): o magnet vem no guid, e o
+    // magnetUrl é um link do Prowlarr que redireciona para ele
+    let magnet = [&r["magnetUrl"], &r["guid"]].into_iter().find(|v| v.as_str().is_some_and(|m| m.starts_with("magnet:"))).cloned().unwrap_or(Value::Null);
+    let download = if r["downloadUrl"].is_string() { r["downloadUrl"].clone() } else { r["magnetUrl"].clone() };
+    Some(json!({
+        "guid": r["guid"], "title": title, "size": r["size"], "seeders": r["seeders"], "protocol": "torrent", "indexer": r["indexer"],
+        "magnetUrl": magnet, "downloadUrl": download,
+        "rejected": !reasons.is_empty(), "rejections": reasons,
+        "fullSeason": pack, "seasonNumber": w.season, "episodeNumbers": episodes,
+        "languages": pe["languages"], "quality": pe["quality"], "customFormatScore": score,
+        // menor = melhor: pontuação dos formatos, depois a qualidade
+        "releaseWeight": -(score * 100 + rank.unwrap_or(0) as i64),
+    }))
+}
+
 /// A pasta do torrent nos nomes de arquivo do qBittorrent ("Pasta/a.mkv",
 /// "Pasta/Subs/b.srt" → "Pasta"); sem pasta comum (um arquivo só), None.
 fn torrent_root<'a>(names: &[&'a str]) -> Option<&'a str> {
@@ -1135,6 +1221,11 @@ impl Orchestrator {
         if !search {
             return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: vec![] });
         }
+        // com o Prowlarr: busca direta, rápida e com o nome em português
+        if let Some(p) = &self.prowlarr {
+            let list = self.prowlarr_episode(p, &series, episode_id, s, e).await?;
+            return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list });
+        }
         // versões do episódio; sem nenhuma aprovada, também a busca da
         // temporada — que traz pacotes e episódios avulsos que a busca do
         // episódio às vezes não acha (fica só o que é deste episódio)
@@ -1146,6 +1237,57 @@ impl Orchestrator {
             sort_candidates(&mut list);
         }
         Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list })
+    }
+
+    /// As versões de um episódio pelo Prowlarr: o episódio e a temporada com o
+    /// nome da série, e o nome em português (os sites brasileiros usam esse),
+    /// tudo ao mesmo tempo. Cada nome passa pelo `parse` do Sonarr (temporada,
+    /// episódios, qualidade, formatos), e a decisão segue o perfil da série —
+    /// a busca do Sonarr fazia uma consulta por variação do nome (inclusive em
+    /// espanhol e italiano), uma de cada vez, e não reconhecia o português.
+    async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64) -> Result<Vec<Candidate>> {
+        let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+        let name = series_name(series["title"].as_str().unwrap_or_default());
+        let pt = match (&self.tmdb, series["tmdbId"].as_i64().filter(|id| *id > 0)) {
+            (Some(t), Some(id)) => t.get(&format!("tv/{id}?language=pt-BR")).await.ok().and_then(|v| v["name"].as_str().map(series_name)),
+            _ => None,
+        }
+        .filter(|pt| norm(pt) != norm(&name));
+        const TV: [u32; 2] = [5000, 5070];
+        let (q_ep, q_season) = (format!("{name} S{s:02}E{e:02}"), format!("{name} S{s:02}"));
+        let (a, b, c) = tokio::join!(
+            p.search(&q_ep, &TV),
+            p.search(&q_season, &TV),
+            async {
+                match &pt {
+                    Some(pt) => p.search(pt, &TV).await,
+                    None => Ok(vec![]),
+                }
+            }
+        );
+        let mut found: Vec<Value> = vec![];
+        let mut seen = HashSet::new();
+        for list in [a, b, c] {
+            for r in list.unwrap_or_else(|e| {
+                warn!("Prowlarr: {e:#}");
+                vec![]
+            }) {
+                if r["protocol"] == "torrent" && seen.insert(r["guid"].as_str().unwrap_or_default().to_owned()) {
+                    found.push(r);
+                }
+            }
+        }
+        let profile = sonarr.get_json(&format!("qualityprofile/{}", series["qualityProfileId"])).await?;
+        let wanted = Wanted { series_id: series["id"].as_i64().unwrap_or(0), names: [Some(name), pt].into_iter().flatten().map(|n| norm(&n)).collect(), episode_id, season: s, episode: e };
+        let mut out = vec![];
+        for r in found {
+            let title = r["title"].as_str().unwrap_or_default();
+            let Ok(parsed) = sonarr.parse(title).await else { continue };
+            if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
+                out.push(v);
+            }
+        }
+        Ok(candidates(out))
     }
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar
@@ -1298,8 +1440,17 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
     };
     arr.command(json!({ "name": cmd, "path": container, "importMode": "Copy" })).await?;
     let old = job.info.replaces.as_ref().map(|r| r.file_id);
-    for _ in 0..60 {
+    for round in 0..60 {
         tokio::time::sleep(Duration::from_secs(5)).await;
+        // nome que o Sonarr não reconhece (o dos sites brasileiros): depois de
+        // 30 s, importação manual dizendo qual é a série
+        if round == 6
+            && job.info.kind != Kind::Movie
+            && let Some(series_id) = job.info.series_id
+            && let Err(e) = manual_import_episodes(arr, &container, series_id).await
+        {
+            warn!("{}: importação manual: {e:#}", job.info.title);
+        }
         // o arquivo atual no Radarr/Sonarr (numa troca, precisa ser outro)
         let file = match job.info.kind {
             Kind::Movie => arr.movie(job.info.arr_id).await?["movieFile"]["id"].as_i64(),
@@ -1322,6 +1473,29 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
         }
     }
     bail!("o import não aconteceu em 5 min (veja Activity → Queue no Radarr/Sonarr)")
+}
+
+/// Importa os episódios da pasta dizendo ao Sonarr de que série são (os
+/// episódios ele tira do SxxEyy do nome de cada arquivo).
+async fn manual_import_episodes(sonarr: &crate::services::Arr, folder: &str, series_id: i64) -> Result<()> {
+    let items = sonarr.get_json(&format!("manualimport?folder={}&seriesId={series_id}&filterExistingFiles=true", crate::services::url_encode(folder))).await?;
+    let files: Vec<Value> = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let eps: Vec<i64> = i["episodes"].as_array()?.iter().filter_map(|e| e["id"].as_i64()).collect();
+            (!eps.is_empty()).then(|| {
+                json!({ "path": i["path"], "seriesId": series_id, "episodeIds": eps, "quality": i["quality"], "languages": i["languages"],
+                        "releaseGroup": i["releaseGroup"], "indexerFlags": 0, "releaseType": i["releaseType"] })
+            })
+        })
+        .collect();
+    if files.is_empty() {
+        bail!("o Sonarr não reconheceu episódios na pasta");
+    }
+    sonarr.send_json(reqwest::Method::POST, "command", &json!({ "name": "ManualImport", "files": files, "importMode": "copy" })).await?;
+    Ok(())
 }
 
 async fn hand_off(orch: &Arc<Orchestrator>, job: &Arc<Job>, h: &Arc<ManagedTorrent>) -> Result<()> {
@@ -1360,6 +1534,41 @@ pub fn limit(r: Box<dyn AsyncRead + Send + Unpin>, len: u64) -> impl AsyncRead +
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn prowlarr_results_are_judged_like_sonarr() {
+        let profile = json!({
+            "minFormatScore": 100,
+            "items": [
+                { "quality": { "name": "WEBDL-720p" }, "allowed": false },
+                { "name": "WEB 1080p", "allowed": true, "items": [{ "quality": { "name": "WEBRip-1080p" }, "allowed": true }, { "quality": { "name": "WEBDL-1080p" }, "allowed": true }] },
+            ],
+            "formatItems": [{ "format": 7, "score": 100 }, { "format": 8, "score": 10 }],
+        });
+        let w = Wanted { series_id: 5, names: vec![norm("The Legend of Vox Machina"), norm("A Lenda de Vox Machina")], episode_id: 333, season: 3, episode: 2 };
+        let r = |t: &str| json!({ "title": t, "guid": t, "seeders": 9, "size": 1 });
+        let parsed = |series: Value, season: i64, eps: Value, pack: bool, q: &str, cfs: Value| json!({
+            "series": series, "episodes": [],
+            "parsedEpisodeInfo": { "seasonNumber": season, "episodeNumbers": eps, "fullSeason": pack, "quality": { "quality": { "name": q } }, "languages": [] },
+            "customFormats": cfs,
+        });
+        // nome em português (o Sonarr não reconhece a série), dublado: aceito
+        let dub = judge(&r("A Lenda de Vox Machina S03E01-02-03 WEB-DL 1080p DUAL"), &parsed(Value::Null, 3, json!([1, 2, 3]), false, "WEBDL-1080p", json!([{ "id": 7 }])), &profile, &w).unwrap();
+        assert_eq!(dub["rejected"], false);
+        // em inglês, sem dublagem: recusado pelos formatos (a página oferece o legendado)
+        let eng = judge(&r("The.Legend.of.Vox.Machina.S03E02.1080p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).unwrap();
+        assert!(eng["rejections"][0].as_str().unwrap().contains("Custom Formats"));
+        // qualidade fora do perfil
+        let low = judge(&r("The.Legend.of.Vox.Machina.S03E02.720p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-720p", json!([{ "id": 7 }])), &profile, &w).unwrap();
+        assert!(low["rejections"][0].as_str().unwrap().starts_with("Qualidade"));
+        // pacote da temporada serve; outro episódio, outra temporada ou outra série, não
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S03.1080p"), &parsed(json!({ "id": 5 }), 3, json!([]), true, "WEBDL-1080p", json!([])), &profile, &w).is_some());
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S03E05"), &parsed(json!({ "id": 5 }), 3, json!([5]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S02E02"), &parsed(json!({ "id": 5 }), 2, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
+        assert!(judge(&r("Outra.Serie.S03E02"), &parsed(json!({ "id": 9 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
+        assert!(judge(&r("Outra Serie S03E02"), &parsed(Value::Null, 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
+        assert_eq!(series_name("Doctor Who (2005)"), "Doctor Who");
+    }
 
     #[test]
     fn qbittorrent_folder_of_the_torrent() {

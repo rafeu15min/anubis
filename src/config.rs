@@ -22,6 +22,16 @@ pub struct Config {
     pub stream: Option<Stream>,
     pub bazarr: Option<BazarrCfg>,
     pub tmdb: Option<TmdbCfg>,
+    /// busca direta nos indexadores (o "assistir" de episódios fica bem mais
+    /// rápido que pela busca do Sonarr, e acha os nomes em português)
+    pub prowlarr: Option<ProwlarrCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProwlarrCfg {
+    pub url: String,
+    pub api_key: String,
 }
 
 /// "Onde assistir": serviços de streaming do país, pelo TMDB.

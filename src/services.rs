@@ -217,6 +217,12 @@ impl Arr {
         self.get(&format!("movie/{id}")).await
     }
 
+    /// Como o Radarr/Sonarr entende um nome de versão (temporada/episódios,
+    /// qualidade, idiomas, formatos personalizados), sem buscar nada.
+    pub async fn parse(&self, title: &str) -> Result<Value> {
+        self.get(&format!("parse?title={}", url_encode(title))).await
+    }
+
     /// Itens na fila de download (`queue/details?movieId=` / `?seriesId=`).
     pub async fn queue(&self, filter: &str) -> Result<Vec<Value>> {
         self.get(&format!("queue/details?{filter}")).await
@@ -280,6 +286,28 @@ impl Bazarr {
 
 /// Só o "onde assistir": os serviços de streaming de um país (o TMDB recebe
 /// esses dados do JustWatch).
+/// Prowlarr: busca em todos os indexadores de uma vez.
+pub struct Prowlarr {
+    base: String,
+    key: String,
+    http: Client,
+}
+
+impl Prowlarr {
+    pub fn new(base: &str, key: &str) -> Result<Self> {
+        Ok(Self { base: base.trim_end_matches('/').into(), key: key.trim().into(), http: http()? })
+    }
+
+    /// Busca por texto nas categorias (o Prowlarr consulta os indexadores ao
+    /// mesmo tempo). Cada resultado traz title, guid, size, seeders,
+    /// downloadUrl/magnetUrl, indexer.
+    pub async fn search(&self, query: &str, categories: &[u32]) -> Result<Vec<Value>> {
+        let cats: String = categories.iter().map(|c| format!("&categories={c}")).collect();
+        let url = format!("{}/api/v1/search?query={}&type=search&limit=100{cats}", self.base, url_encode(query));
+        send(counted(self.http.get(url).header("X-Api-Key", &self.key).timeout(Duration::from_secs(90))), "Prowlarr busca").await
+    }
+}
+
 pub struct Tmdb {
     key: String,
     http: Client,

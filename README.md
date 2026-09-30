@@ -56,6 +56,16 @@ AniList — com a extensão MAL-Sync, o que se assiste na Crunchyroll vai sozinh
 para o AniList (status, nota e favoritos pesam; ids pela lista pública
 Fribb/anime-lists). Fica em `state_dir/externo.json`.
 
+**Assistir um episódio, com o Prowlarr** (`[prowlarr]` na config): a busca
+vai direto aos indexadores — o episódio, a temporada e o nome em português
+da série (do TMDB; é como os sites brasileiros publicam) ao mesmo tempo — e
+cada nome passa pelo `parse` do Sonarr (temporada/episódios, qualidade,
+formatos), julgado pelo perfil da série. Numa série sem dublado, a resposta
+caiu de ~76 s para ~21 s; e "A Lenda de Vox Machina S03E01-02-03 … DUAL",
+que o Sonarr não reconhecia, passa a ser achado. Na importação, se o Sonarr
+não reconhece o nome em 30 s, o Anubis faz a importação manual dizendo a
+série. Sem `[prowlarr]`, a busca é a do Sonarr.
+
 **Não quero ver** (no cartão de um título da vitrine): ele sai de todas as
 fileiras da vitrine e vira sinal contra no Para você — o que o TMDB recomenda
 a partir dele desce, e os gêneros dele pesam menos (cada um vale −2; um

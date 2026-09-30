@@ -21,6 +21,7 @@ pub struct Orchestrator {
     pub(crate) jellyfin: Jellyfin,
     pub(crate) bazarr: Option<Bazarr>,
     pub(crate) tmdb: Option<Tmdb>,
+    pub(crate) prowlarr: Option<crate::services::Prowlarr>,
     /// "Abrir no Jellyfin" já logado: (usuário, senha)
     pub(crate) jellyfin_login: Option<(String, String)>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
@@ -72,6 +73,7 @@ impl Orchestrator {
             jellyfin: Jellyfin::new(&cfg.jellyfin.url, &cfg.jellyfin.api_key)?,
             bazarr: cfg.bazarr.as_ref().map(|b| Bazarr::new(&b.url, &b.api_key)).transpose()?,
             tmdb: cfg.tmdb.as_ref().map(|t| Tmdb::new(&t.api_key)).transpose()?,
+            prowlarr: cfg.prowlarr.as_ref().map(|p| crate::services::Prowlarr::new(&p.url, &p.api_key)).transpose()?,
             streamer,
             muxes: Mutex::new(HashMap::new()),
             live: crate::live::Live::default(),

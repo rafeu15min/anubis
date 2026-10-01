@@ -17,6 +17,7 @@
 //!   `state_dir`, e o Anubis retoma cada um de onde parou.
 
 use crate::config::Transcode;
+use crate::dubsync::DubSync;
 use crate::orchestrator::Orchestrator;
 use crate::search::Kind;
 use crate::services::TorrentSource;
@@ -120,6 +121,8 @@ pub struct Job {
     probing: StdMutex<bool>,
     /// legendas do torrent já completas no disco (antes disso, não aparecem)
     subs_ready: StdMutex<HashSet<PathBuf>>,
+    /// sincronia da dublagem (None = ainda não medida)
+    dub: StdMutex<Option<DubSync>>,
 }
 
 impl Job {
@@ -132,6 +135,7 @@ impl Job {
             media: StdMutex::new(None),
             probing: StdMutex::new(false),
             subs_ready: StdMutex::new(HashSet::new()),
+            dub: StdMutex::new(None),
         })
     }
     pub fn phase(&self) -> (Phase, Option<String>) {
@@ -143,8 +147,26 @@ impl Job {
     pub fn touch(&self) {
         *self.last_access.lock().unwrap() = Instant::now();
     }
+    /// Formato do vídeo. Com a dublagem fora de sincronia, o que tocaria
+    /// direto passa pelo ffmpeg (é ele que corrige o atraso).
     pub fn media(&self) -> Option<MediaInfo> {
-        self.media.lock().unwrap().clone()
+        let mut media = self.media.lock().unwrap().clone()?;
+        if media.mode == Mode::Direct && self.dub_offset().is_some() {
+            media.mode = Mode::Remux;
+        }
+        Some(media)
+    }
+    pub fn dub(&self) -> Option<DubSync> {
+        self.dub.lock().unwrap().clone()
+    }
+    pub(crate) fn set_dub(&self, sync: DubSync) {
+        *self.dub.lock().unwrap() = Some(sync);
+    }
+    pub(crate) fn dub_offset(&self) -> Option<f64> {
+        self.dub.lock().unwrap().as_ref().and_then(DubSync::offset)
+    }
+    pub(crate) fn host_file(&self) -> &Path {
+        &self.info.host_file
     }
     fn snapshot(&self) -> JobInfo {
         JobInfo { phase: self.phase().0, ..self.info.clone() }
@@ -541,7 +563,7 @@ impl Streamer {
     /// já baixados (frações 0..1, a barra branca) e o formato do vídeo.
     pub fn info(&self, job: &Job) -> Value {
         let (phase, error) = job.phase();
-        let base = json!({ "phase": phase, "error": error, "media": job.media(), "next": job.info.next });
+        let base = json!({ "phase": phase, "error": error, "media": job.media(), "next": job.info.next, "dub": job.dub() });
         let Some(h) = job.handle().filter(|_| phase != Phase::Done) else {
             let mut v = base;
             v["progress"] = json!(1.0);
@@ -654,8 +676,20 @@ impl Streamer {
         if vaapi {
             args.extend(["-vaapi_device".into(), t.device.clone()]);
         }
-        args.extend(["-ss".into(), format!("{start:.3}"), "-i".into(), input]);
-        args.extend(["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"].map(String::from));
+        args.extend(["-ss".into(), format!("{start:.3}"), "-i".into(), input.clone()]);
+        // dublagem fora de sincronia: lida à parte, deslocada. O som que vai com
+        // o vídeo no segundo T está em T + atraso na faixa da dublagem
+        let dub = job.dub_offset();
+        let mut dub_delay = None;
+        if let Some(offset) = dub {
+            let at = start + offset;
+            if at < 0.0 {
+                dub_delay = Some(-at);
+            }
+            args.extend(["-ss".into(), format!("{:.3}", at.max(0.0)), "-i".into(), input]);
+        }
+        let audio_map = if dub.is_some() { "1:a:0" } else { "0:a:0?" };
+        args.extend(["-map", "0:v:0", "-map", audio_map, "-sn", "-dn"].map(String::from));
         let scale = format!("scale=-2:'min({},ih)'", t.max_height);
         match (media.mode, vaapi) {
             (Mode::Transcode, true) => args.extend(["-vf".into(), format!("{scale},format=nv12,hwupload"), "-c:v".into(), "h264_vaapi".into(), "-b:v".into(), "5M".into(), "-g".into(), "60".into()]),
@@ -664,8 +698,12 @@ impl Streamer {
             ),
             _ => args.extend(["-c:v", "copy"].map(String::from)),
         }
-        // áudio: AAC/MP3 passam; o resto (AC3, DTS, TrueHD…) vira AAC estéreo
-        if media.audio.as_deref().is_some_and(|a| a == "aac" || a == "mp3") {
+        // áudio: AAC/MP3 passam; o resto (AC3, DTS, TrueHD…) vira AAC estéreo.
+        // Com a dublagem deslocada, sempre convertido (o corte cai no meio de pacotes)
+        if let Some(d) = dub_delay {
+            args.extend(["-af".into(), format!("adelay=delays={}:all=1", (d * 1000.0).round())]);
+        }
+        if dub.is_none() && media.audio.as_deref().is_some_and(|a| a == "aac" || a == "mp3") {
             args.extend(["-c:a", "copy"].map(String::from));
         } else {
             args.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"].map(String::from));
@@ -877,6 +915,7 @@ impl Orchestrator {
             && guid.is_none()
         {
             streamer.probe(&job);
+            self.check_dub(&job);
             return Ok(Started::Ready);
         }
         // já baixando pelo "Baixar" (qBittorrent): assume esse download
@@ -937,6 +976,7 @@ impl Orchestrator {
             );
             streamer.jobs.lock().await.insert((kind, id), job.clone());
             streamer.probe(&job);
+            self.check_dub(&job);
             return Ok(Started::Ready);
         }
 
@@ -1460,6 +1500,10 @@ async fn finish(orch: Arc<Orchestrator>, job: Arc<Job>) {
         }
     }
     if job.phase().0 == Phase::Importing {
+        // a dublagem é medida antes: com atraso, entra a cópia corrigida
+        let sync = orch.measure_dub(&job.info.host_file, job.info.file_len).await;
+        crate::dubsync::log_sync(&job.info.title, &sync);
+        job.set_dub(sync);
         info!("{}: download completo, importando", job.info.title);
         if let Err(e) = import(&orch, &job).await {
             warn!("{}: {e:#}", job.info.title);
@@ -1478,13 +1522,40 @@ async fn finish(orch: Arc<Orchestrator>, job: Arc<Job>) {
 }
 
 async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
-    let container = orch.cfg.container_path(&job.info.folder).context("a pasta de download está fora dos [[paths]]")?;
-    // "Copy" com hardlinks ligados = hardlink (o arquivo continua no torrent)
+    // dublagem fora de sincronia: importa uma cópia corrigida (o original segue
+    // no torrent); sem correção, o próprio arquivo, por hardlink
+    let fixed = match job.dub_offset() {
+        Some(offset) => match orch.fix_dub(&job.info.host_file, offset).await {
+            Ok(p) => {
+                info!("{}: dublagem corrigida em {}", job.info.title, p.display());
+                Some(p)
+            }
+            Err(e) => {
+                warn!("{}: não deu para corrigir a dublagem no arquivo ({e:#}); importando o original", job.info.title);
+                None
+            }
+        },
+        None => None,
+    };
+    let result = import_file(orch, job, fixed.as_deref().unwrap_or(&job.info.host_file), fixed.is_some()).await;
+    if let Some(dir) = fixed.as_deref().and_then(Path::parent) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    result
+}
+
+/// Importa só `file` (num pacote de temporada, a pasta tem os outros
+/// episódios ainda vazios: o torrent baixa só o que se assiste).
+async fn import_file(orch: &Arc<Orchestrator>, job: &Arc<Job>, file: &Path, moved: bool) -> Result<()> {
+    let container = orch.cfg.container_path(file).context("o arquivo baixado está fora dos [[paths]]")?;
+    // "Copy" com hardlinks ligados = hardlink (o arquivo continua no torrent);
+    // a cópia corrigida é nossa, vai inteira
+    let mode = if moved { "Move" } else { "Copy" };
     let (arr, cmd) = match job.info.kind {
         Kind::Movie => (orch.radarr.as_ref().context("Radarr não configurado")?, "DownloadedMoviesScan"),
         _ => (orch.sonarr.as_ref().context("Sonarr não configurado")?, "DownloadedEpisodesScan"),
     };
-    arr.command(json!({ "name": cmd, "path": container, "importMode": "Copy" })).await?;
+    arr.command(json!({ "name": cmd, "path": container, "importMode": mode })).await?;
     let old = job.info.replaces.as_ref().map(|r| r.file_id);
     for round in 0..60 {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1493,7 +1564,7 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
         if round == 6
             && job.info.kind != Kind::Movie
             && let Some(series_id) = job.info.series_id
-            && let Err(e) = manual_import_episodes(arr, &container, series_id).await
+            && let Err(e) = manual_import_episodes(arr, &container, series_id, mode).await
         {
             warn!("{}: importação manual: {e:#}", job.info.title);
         }
@@ -1521,14 +1592,18 @@ async fn import(orch: &Arc<Orchestrator>, job: &Arc<Job>) -> Result<()> {
     bail!("o import não aconteceu em 5 min (veja Activity → Queue no Radarr/Sonarr)")
 }
 
-/// Importa os episódios da pasta dizendo ao Sonarr de que série são (os
-/// episódios ele tira do SxxEyy do nome de cada arquivo).
-async fn manual_import_episodes(sonarr: &crate::services::Arr, folder: &str, series_id: i64) -> Result<()> {
-    let items = sonarr.get_json(&format!("manualimport?folder={}&seriesId={series_id}&filterExistingFiles=true", crate::services::url_encode(folder))).await?;
+/// Importa o episódio `file` dizendo ao Sonarr de que série é (o episódio ele
+/// tira do SxxEyy do nome). Lista a pasta e fica só com o arquivo pedido.
+async fn manual_import_episodes(sonarr: &crate::services::Arr, file: &str, series_id: i64, mode: &str) -> Result<()> {
+    let folder = file.rsplit_once('/').map_or(file, |(dir, _)| dir);
+    // filterExistingFiles=false: com true, o Sonarr responde 500 se a pasta da
+    // série ainda não existe (primeiro episódio)
+    let items = sonarr.get_json(&format!("manualimport?folder={}&seriesId={series_id}&filterExistingFiles=false", crate::services::url_encode(folder))).await?;
     let files: Vec<Value> = items
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|i| i["path"].as_str() == Some(file))
         .filter_map(|i| {
             let eps: Vec<i64> = i["episodes"].as_array()?.iter().filter_map(|e| e["id"].as_i64()).collect();
             (!eps.is_empty()).then(|| {
@@ -1538,9 +1613,9 @@ async fn manual_import_episodes(sonarr: &crate::services::Arr, folder: &str, ser
         })
         .collect();
     if files.is_empty() {
-        bail!("o Sonarr não reconheceu episódios na pasta");
+        bail!("o Sonarr não reconheceu o episódio em {file}");
     }
-    sonarr.send_json(reqwest::Method::POST, "command", &json!({ "name": "ManualImport", "files": files, "importMode": "copy" })).await?;
+    sonarr.send_json(reqwest::Method::POST, "command", &json!({ "name": "ManualImport", "files": files, "importMode": mode.to_lowercase() })).await?;
     Ok(())
 }
 

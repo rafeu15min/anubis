@@ -203,18 +203,18 @@ fn describe(offset: f64) -> String {
 // ------------------------------------------------------------ faixas de áudio
 
 #[derive(Debug, Clone)]
-struct Track {
+pub(crate) struct Track {
     /// posição entre as faixas de áudio do arquivo (0:a:N)
-    n: usize,
-    lang: String,
-    title: String,
-    channels: u32,
+    pub(crate) n: usize,
+    pub(crate) lang: String,
+    pub(crate) title: String,
+    pub(crate) channels: u32,
 }
 
 #[derive(Debug)]
-struct Probed {
-    duration: f64,
-    tracks: Vec<Track>,
+pub(crate) struct Probed {
+    pub(crate) duration: f64,
+    pub(crate) tracks: Vec<Track>,
 }
 
 fn probed(v: &Value) -> Probed {
@@ -234,7 +234,7 @@ fn probed(v: &Value) -> Probed {
     Probed { duration: v["format"]["duration"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0), tracks }
 }
 
-fn is_portuguese(t: &Track) -> bool {
+pub(crate) fn is_portuguese(t: &Track) -> bool {
     let title = t.title.to_lowercase();
     ["por", "pt", "pob", "ptb", "pt-br"].contains(&t.lang.as_str()) || ["portug", "brasil", "brazil", "dublad"].iter().any(|k| title.contains(k))
 }
@@ -263,7 +263,7 @@ impl Orchestrator {
     /// roda numa cópia descartável da mesma imagem com os [[paths]] montados
     /// como o Radarr os vê (o container do Jellyfin só enxerga a biblioteca);
     /// sem, o do host. `name` dá nome ao container (um reinício o derruba).
-    async fn media_tool(&self, bin: &str, name: Option<&str>) -> Result<Command> {
+    pub(crate) async fn media_tool(&self, bin: &str, name: Option<&str>) -> Result<Command> {
         let t = &self.streamer()?.transcode;
         let Some(c) = &t.container else { return Ok(Command::new(bin)) };
         let out = Command::new("docker").args(["inspect", "-f", "{{.Config.Image}}", c]).output().await.context("docker inspect")?;
@@ -285,14 +285,14 @@ impl Orchestrator {
     }
 
     /// Caminho como o ffmpeg o enxerga.
-    fn tool_path(&self, host: &Path) -> Result<String> {
+    pub(crate) fn tool_path(&self, host: &Path) -> Result<String> {
         if self.streamer()?.transcode.container.is_none() {
             return Ok(host.to_string_lossy().into_owned());
         }
         self.cfg.container_path(host).with_context(|| format!("{} está fora dos [[paths]]", host.display()))
     }
 
-    async fn probe_file(&self, file: &Path) -> Result<Probed> {
+    pub(crate) async fn probe_file(&self, file: &Path) -> Result<Probed> {
         let t = self.streamer()?.transcode.ffprobe.clone();
         let out = self
             .media_tool(&t, None)
@@ -355,7 +355,7 @@ impl Orchestrator {
         Ok(Point { minute: at / 60.0, offset, sharpness })
     }
 
-    async fn check_sync(&self, video: &Path, v: &Probed, vtrack: usize, dub: &Path, d: &Probed, dtrack: usize) -> Result<SyncReport> {
+    pub(crate) async fn check_sync(&self, video: &Path, v: &Probed, vtrack: usize, dub: &Path, d: &Probed, dtrack: usize) -> Result<SyncReport> {
         if v.duration < 600.0 || d.duration < 600.0 {
             bail!("vídeo curto demais para conferir a sincronia");
         }

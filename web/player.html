@@ -121,15 +121,27 @@ const fmt = (s) => {
 // ---- tempo: direto, o <video> sabe tudo; convertido (ffmpeg), o vídeo
 // começa em `offset` e a duração vem do ffprobe
 let converted = false, offset = 0, duration = 0;
-const now = () => offset + (v.currentTime || 0);
+// posição pedida enquanto o stream novo ainda não começou
+let target = null, seekTimer;
+const now = () => target ?? offset + (v.currentTime || 0);
 const total = () => (converted ? duration : v.duration || duration || 0);
-function seek(t) {
+// a tela mostra a posição nova na hora (o <video> só avisa quando o stream
+// novo começa). `wait`: toques seguidos em voltar/avançar se somam e só a
+// posição final abre um stream, já que cada um é um ffmpeg novo
+function seek(t, wait = 0) {
   t = Math.max(0, Math.min(total() - 1, t));
+  paint(t);
   if (!converted) { v.currentTime = t; return; }
-  offset = t;
-  v.src = `${base}/stream.mp4?t=${t.toFixed(1)}`;
-  v.play().catch(() => {});
-  if (typeof applySub === 'function') applySub();
+  target = t;
+  document.body.classList.add('waiting');
+  clearTimeout(seekTimer);
+  seekTimer = setTimeout(() => {
+    target = null;
+    offset = t;
+    v.src = `${base}/stream.mp4?t=${t.toFixed(1)}`;
+    v.play().catch(() => {});
+    if (typeof applySub === 'function') applySub();
+  }, wait);
 }
 
 function start(media) {
@@ -145,6 +157,20 @@ function start(media) {
     if (pos) v.addEventListener('loadedmetadata', () => { v.currentTime = pos; }, { once: true });
   }
   v.play().catch(() => {});
+}
+
+// ---- dublagem: se o Anubis mede um atraso com o vídeo já tocando, recomeça
+// o stream na posição atual (o ffmpeg passa a corrigir a dublagem)
+const dubSecs = (d) => (d && d.state === 'offset' ? d.seconds : 0);
+let dubApplied = null;
+function syncDub(dub) {
+  const s = dubSecs(dub);
+  if (dubApplied === null) { dubApplied = s; return; }
+  if (s === dubApplied) return;
+  dubApplied = s;
+  const pos = now();
+  converted = true;
+  seek(pos);
 }
 
 v.addEventListener('waiting', () => document.body.classList.add('waiting'));
@@ -196,7 +222,7 @@ bar.addEventListener('pointerup', (e) => { dragging = false; bar.classList.remov
 
 // ---- controles
 const toggle = () => (v.paused ? v.play() : v.pause());
-const skip = (s) => { seek(now() + s); poke(); };
+const skip = (s) => { seek(now() + s, 600); poke(); };
 $('play').onclick = toggle;
 $('rew').onclick = () => skip(-10);
 $('fwd').onclick = () => skip(30);
@@ -368,6 +394,7 @@ async function info() {
     have = d.have || []; paintHave();
     // começa quando o formato é conhecido (ou depois de ~20 s sem ffprobe)
     if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); if (d.phase === 'done') offerBetter(); }
+    if (started) syncDub(d.dub);
     if (d.media && d.media.duration) duration = d.media.duration;
     if (d.next && !next) { next = d.next; $('next').textContent = `Próximo: ${d.next[1]} ▶`; $('next').hidden = false; }
     let t = PHASE[d.phase] || d.phase;
@@ -378,6 +405,8 @@ async function info() {
     }
     checkPace(d);
     if (d.media && MODE[d.media.mode]) t += MODE[d.media.mode];
+    if (d.dub && d.dub.state === 'checking') t += ' · conferindo a sincronia da dublagem';
+    if (d.dub && d.dub.state === 'offset') t += ` · dublagem ressincronizada (${Math.abs(d.dub.seconds).toFixed(1).replace('.', ',')} s)`;
     if (d.error) t += ` — ${d.error}`;
     $('panel').innerHTML = t + (d.jellyfin_url ? ` · <a href="${jf(d.jellyfin_url)}">Abrir no Jellyfin</a>` : '');
     const m = $('msg');

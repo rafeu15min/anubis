@@ -15,6 +15,7 @@ mod avail;
 mod config;
 mod discover;
 mod disk;
+mod dubsync;
 mod external;
 mod foryou;
 mod indexers;

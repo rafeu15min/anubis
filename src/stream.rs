@@ -45,8 +45,8 @@ const IDLE_BEFORE_HANDOFF: Duration = Duration::from_secs(5 * 60);
 const JOBS_FILE: &str = "pedidos.json";
 /// Porta em que o librqbit recebe conexões (TCP e uTP). Sem ela, só baixa de
 /// quem aceita conexão de fora — e quase ninguém aceita (roteador/NAT), então
-/// torrents com poucas fontes não respondiam. Fixa para dar para liberar no
-/// roteador.
+/// torrents com poucas fontes não respondiam. Fixa: é a que o firewall do
+/// FeuVault (infra/feuvault/firewall) deixa entrar pelo IPv6.
 const TORRENT_PORT: u16 = 6882;
 /// Rastreadores públicos somados a todo torrent (há magnets sem nenhum, como
 /// o pacote de Loki do Comando; as fontes que o site mostra vêm deles).
@@ -549,13 +549,13 @@ impl Streamer {
             // a sessão (torrents e o que já baixou) volta depois de um reinício
             persistence: Some(SessionPersistenceConfig::Json { folder: Some(state_dir.join("sessao")) }),
             fastresume: true,
-            // o FeuVault não tem IPv6 (o socket em [::] falharia)
-            ipv4_only: true,
+            // IPv4 e IPv6: a casa está atrás de CGNAT, então só pelo IPv6
+            // alguém de fora consegue se conectar (sem IPv6 no kernel, o
+            // vendor/librqbit-dualstack-sockets troca "[::]" por "0.0.0.0")
+            ipv4_only: false,
             listen: Some(ListenerOptions {
                 mode: ListenerMode::TcpAndUtp,
-                listen_addr: (std::net::Ipv4Addr::UNSPECIFIED, TORRENT_PORT).into(),
-                enable_upnp_port_forwarding: true,
-                ipv4_only: true,
+                listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, TORRENT_PORT).into(),
                 ..Default::default()
             }),
             trackers: PUBLIC_TRACKERS.iter().filter_map(|t| reqwest::Url::parse(t).ok()).collect(),
@@ -1664,7 +1664,7 @@ async fn import_file(orch: &Arc<Orchestrator>, job: &Arc<Job>, file: &Path, move
         if round == 6
             && job.info.kind != Kind::Movie
             && let Some(series_id) = job.info.series_id
-            && let Err(e) = manual_import_episodes(arr, &container, series_id, mode).await
+            && let Err(e) = manual_import_episodes(arr, &container, series_id, job.info.arr_id, mode).await
         {
             warn!("{}: importação manual: {e:#}", job.info.title);
         }
@@ -1692,24 +1692,32 @@ async fn import_file(orch: &Arc<Orchestrator>, job: &Arc<Job>, file: &Path, move
     bail!("o import não aconteceu em 5 min (veja Activity → Queue no Radarr/Sonarr)")
 }
 
-/// Importa o episódio `file` dizendo ao Sonarr de que série é (o episódio ele
-/// tira do SxxEyy do nome). Lista a pasta e fica só com o arquivo pedido.
-async fn manual_import_episodes(sonarr: &crate::services::Arr, file: &str, series_id: i64, mode: &str) -> Result<()> {
+/// Importa o episódio `file` dizendo ao Sonarr de que série e episódio é.
+/// Lista a pasta e fica só com o arquivo pedido; qualidade e idiomas vêm do
+/// que o Sonarr leu do nome.
+async fn manual_import_episodes(sonarr: &crate::services::Arr, file: &str, series_id: i64, episode_id: i64, mode: &str) -> Result<()> {
     let folder = file.rsplit_once('/').map_or(file, |(dir, _)| dir);
+    // só a pasta: com seriesId o Sonarr lista a pasta da série na biblioteca,
+    // não a do download (como o Radarr com movieId).
     // filterExistingFiles=false: com true, o Sonarr responde 500 se a pasta da
     // série ainda não existe (primeiro episódio)
-    let items = sonarr.get_json(&format!("manualimport?folder={}&seriesId={series_id}&filterExistingFiles=false", crate::services::url_encode(folder))).await?;
+    let items = sonarr.get_json(&format!("manualimport?folder={}&filterExistingFiles=false", crate::services::url_encode(folder))).await?;
     let files: Vec<Value> = items
         .as_array()
         .into_iter()
         .flatten()
         .filter(|i| i["path"].as_str() == Some(file))
-        .filter_map(|i| {
-            let eps: Vec<i64> = i["episodes"].as_array()?.iter().filter_map(|e| e["id"].as_i64()).collect();
-            (!eps.is_empty()).then(|| {
-                json!({ "path": i["path"], "seriesId": series_id, "episodeIds": eps, "quality": i["quality"], "languages": i["languages"],
-                        "releaseGroup": i["releaseGroup"], "indexerFlags": 0, "releaseType": i["releaseType"] })
-            })
+        .map(|i| {
+            // os episódios que o Sonarr achou, se for esta série (nome que ele
+            // não entende: o episódio que está sendo assistido)
+            let eps: Vec<i64> = if i["series"]["id"].as_i64() == Some(series_id) {
+                i["episodes"].as_array().into_iter().flatten().filter_map(|e| e["id"].as_i64()).collect()
+            } else {
+                vec![]
+            };
+            let eps = if eps.is_empty() { vec![episode_id] } else { eps };
+            json!({ "path": i["path"], "seriesId": series_id, "episodeIds": eps, "quality": i["quality"], "languages": i["languages"],
+                    "releaseGroup": i["releaseGroup"], "indexerFlags": 0, "releaseType": i["releaseType"] })
         })
         .collect();
     if files.is_empty() {

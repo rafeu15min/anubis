@@ -1,0 +1,46 @@
+#!/usr/bin/nft -f
+# Firewall IPv6 do FeuVault (/etc/nftables-feuvault-ipv6.nft).
+#
+# Só IPv6: o IPv4 está atrás do CGNAT da operadora e o Docker mantém as
+# próprias regras (iptables-nft); esta tabela não toca nelas. Com IPv6 o
+# servidor tem endereço público, então de fora só entram as portas de
+# torrent e o Tailscale. O resto: rede local (link-local), cabo do PC e
+# interfaces internas.
+
+# recria a tabela inteira numa transação só
+table ip6 feuvault
+delete table ip6 feuvault
+
+table ip6 feuvault {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		iif "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+
+		# vizinhança, anúncio de rota, PMTU: o IPv6 não funciona sem ICMPv6
+		meta l4proto ipv6-icmp accept
+		# rede local (inclui a resposta do DHCPv6)
+		ip6 saddr fe80::/10 accept
+
+		iifname "enp2s0" accept       # cabo direto do PC (interconexao)
+		iifname "tailscale0" accept
+		iifname "utun100" accept      # nvpn
+		iifname "docker0" accept
+		iifname "br-*" accept         # redes do Docker
+
+		tcp dport 6882 accept         # Anubis (librqbit)
+		udp dport 6882 accept         # uTP do Anubis
+		udp dport 41641 accept        # Tailscale: conexão direta
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		ct state established,related accept
+		iifname "tailscale0" accept
+		iifname "docker0" accept
+		iifname "br-*" accept
+	}
+}

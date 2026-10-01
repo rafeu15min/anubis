@@ -1,0 +1,20 @@
+# /etc/systemd/system/feuvault-firewall-ipv6.service
+# Carrega a tabela "ip6 feuvault" antes da rede subir. Não usa o
+# nftables.service do Arch: ele faz "flush ruleset" ao parar e apagaria as
+# regras do Docker.
+[Unit]
+Description=Firewall IPv6 do FeuVault (tabela ip6 feuvault)
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /etc/nftables-feuvault-ipv6.nft
+ExecReload=/usr/bin/nft -f /etc/nftables-feuvault-ipv6.nft
+ExecStop=/usr/bin/nft delete table ip6 feuvault
+
+[Install]
+WantedBy=multi-user.target

@@ -490,7 +490,7 @@ impl Orchestrator {
         let streamer = self.streamer()?;
         let source = self.fetch_source(&c.raw).await?;
         let folder = base.join(folder_name(&c.title));
-        let h = self.add_torrent(&source, &folder).await?;
+        let h = self.add_torrent(&source, &folder, crate::stream::ADD_TIMEOUT).await?;
         let (file_id, _, rel) = h.with_metadata(|m| video_file(&m.file_infos, None))?.context("o torrent não tem vídeo")?;
         let only_file = h.with_metadata(|m| m.file_infos.len())? > 1;
         if only_file {
@@ -611,7 +611,7 @@ impl Orchestrator {
             (None, Some(f)) => TorrentSource::File(std::fs::read(f)?.into()),
             _ => bail!("sem magnet nem .torrent gravado"),
         };
-        let h = self.add_torrent(&source, &s.folder).await?;
+        let h = self.add_torrent(&source, &s.folder, crate::stream::ADD_TIMEOUT).await?;
         if s.only_file {
             self.streamer()?.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(h.id()), &HashSet::from([s.file_id])).await?;
         }

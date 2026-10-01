@@ -24,7 +24,8 @@ use crate::services::TorrentSource;
 use anyhow::{Context, Result, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, DhtSessionConfig, ManagedTorrent, Session, SessionOptions, SessionPersistenceConfig,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, DhtSessionConfig, ListenerMode, ListenerOptions, ManagedTorrent, Session, SessionOptions,
+    SessionPersistenceConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,6 +43,25 @@ const VIDEO_EXT: [&str; 6] = ["mp4", "m4v", "mkv", "webm", "mov", "avi"];
 /// sem requisições do player por esse tempo → pode entregar ao qBittorrent
 const IDLE_BEFORE_HANDOFF: Duration = Duration::from_secs(5 * 60);
 const JOBS_FILE: &str = "pedidos.json";
+/// Porta em que o librqbit recebe conexões (TCP e uTP). Sem ela, só baixa de
+/// quem aceita conexão de fora — e quase ninguém aceita (roteador/NAT), então
+/// torrents com poucas fontes não respondiam. Fixa para dar para liberar no
+/// roteador.
+const TORRENT_PORT: u16 = 6882;
+/// Rastreadores públicos somados a todo torrent (há magnets sem nenhum, como
+/// o pacote de Loki do Comando; as fontes que o site mostra vêm deles).
+const PUBLIC_TRACKERS: [&str; 5] = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+];
+/// Tempo para um torrent achar alguém e mandar os metadados.
+pub(crate) const ADD_TIMEOUT: Duration = Duration::from_secs(120);
+/// No "Assistir", cada versão tem isso antes de dar lugar à próxima (todas
+/// dentro de ADD_TIMEOUT).
+const TRY_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +262,38 @@ fn normalize_magnet(m: &str) -> String {
         format!("{}{}{}", &m[..start], hash.to_ascii_uppercase(), &m[end..])
     } else {
         m.to_owned()
+    }
+}
+
+/// O info hash de um magnet em hexadecimal minúsculo (o btih vem em hex, 40
+/// caracteres, ou em base32, 32), para reconhecer o mesmo torrent vindo de
+/// sites diferentes. `.torrent` → None.
+fn magnet_hash(source: &TorrentSource) -> Option<String> {
+    let TorrentSource::Magnet(m) = source else { return None };
+    let start = m.find("urn:btih:")? + "urn:btih:".len();
+    let hash = m[start..].split('&').next()?;
+    match hash.len() {
+        40 if hash.chars().all(|c| c.is_ascii_hexdigit()) => Some(hash.to_ascii_lowercase()),
+        32 => {
+            let mut bits: u64 = 0;
+            let mut n = 0;
+            let mut out = String::with_capacity(40);
+            for c in hash.chars() {
+                let v = match c.to_ascii_uppercase() {
+                    c @ 'A'..='Z' => c as u64 - 'A' as u64,
+                    c @ '2'..='7' => c as u64 - '2' as u64 + 26,
+                    _ => return None,
+                };
+                bits = (bits << 5) | v;
+                n += 5;
+                if n >= 8 {
+                    n -= 8;
+                    out.push_str(&format!("{:02x}", (bits >> n) & 0xff));
+                }
+            }
+            Some(out)
+        }
+        _ => None,
     }
 }
 
@@ -499,6 +551,14 @@ impl Streamer {
             fastresume: true,
             // o FeuVault não tem IPv6 (o socket em [::] falharia)
             ipv4_only: true,
+            listen: Some(ListenerOptions {
+                mode: ListenerMode::TcpAndUtp,
+                listen_addr: (std::net::Ipv4Addr::UNSPECIFIED, TORRENT_PORT).into(),
+                enable_upnp_port_forwarding: true,
+                ipv4_only: true,
+                ..Default::default()
+            }),
+            trackers: PUBLIC_TRACKERS.iter().filter_map(|t| reqwest::Url::parse(t).ok()).collect(),
             ..Default::default()
         };
         let session = Session::new_with_opts(std::env::temp_dir(), opts).await.context("iniciando o librqbit")?;
@@ -869,22 +929,22 @@ impl Orchestrator {
             (None, Some(f)) => TorrentSource::File(std::fs::read(f)?.into()),
             _ => bail!("sem magnet nem .torrent gravado"),
         };
-        let h = self.add_torrent(&source, &info.folder).await?;
+        let h = self.add_torrent(&source, &info.folder, ADD_TIMEOUT).await?;
         if info.only_file {
             self.streamer()?.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(h.id()), &HashSet::from([info.file_id])).await?;
         }
         Ok(h)
     }
 
-    pub(crate) async fn add_torrent(&self, source: &TorrentSource, folder: &Path) -> Result<Arc<ManagedTorrent>> {
+    pub(crate) async fn add_torrent(&self, source: &TorrentSource, folder: &Path, wait: Duration) -> Result<Arc<ManagedTorrent>> {
         let add = match source {
             TorrentSource::Magnet(m) => AddTorrent::from_url(m.clone()),
             TorrentSource::File(b) => AddTorrent::from_bytes(b.clone()),
         };
         let opts = AddTorrentOptions { output_folder: Some(folder.to_string_lossy().into_owned()), overwrite: true, ..Default::default() };
-        let added = tokio::time::timeout(Duration::from_secs(120), self.streamer()?.api.session().add_torrent(add, Some(opts)))
+        let added = tokio::time::timeout(wait, self.streamer()?.api.session().add_torrent(add, Some(opts)))
             .await
-            .context("o torrent não respondeu em 2 min (sem fontes?)")??;
+            .with_context(|| format!("o torrent não respondeu em {} s (sem fontes?)", wait.as_secs()))??;
         let handle = match added {
             AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => h,
             AddTorrentResponse::ListOnly(_) => bail!("resposta inesperada do librqbit"),
@@ -980,19 +1040,56 @@ impl Orchestrator {
             return Ok(Started::Ready);
         }
 
-        let pick = match guid {
-            Some(g) => target.candidates.iter().find(|c| c.guid == g),
-            None => target.candidates.iter().find(|c| !c.rejected),
+        // a versão escolhida na página tem o tempo todo; sem escolha, a que não
+        // acha ninguém em TRY_TIMEOUT dá lugar à próxima aprovada
+        let picks: Vec<Candidate> = match guid {
+            Some(g) => target.candidates.iter().filter(|c| c.guid == g).take(1).cloned().collect(),
+            None => target.candidates.iter().filter(|c| !c.rejected).cloned().collect(),
         };
-        let Some(pick) = pick.cloned() else {
+        if picks.is_empty() {
             return Ok(Started::NoApproved(target.candidates.into_iter().take(10).collect()));
-        };
+        }
+        target.candidates.clear();
+        let per_try = if guid.is_some() { ADD_TIMEOUT } else { TRY_TIMEOUT };
 
         let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
-        let source = self.fetch_source(&pick.raw).await?;
-        let folder = stream_cfg.download_dir.join(folder_name(&pick.title));
-        info!("assistir agora: {} — {} ({} MB)", target.title, pick.title, pick.size >> 20);
-        self.start_torrent(kind, id, target, pick.title.clone(), source, folder, true, replaces, vec![]).await
+        let deadline = Instant::now() + ADD_TIMEOUT;
+        // o mesmo torrent em dois sites é tentado uma vez só
+        let mut tried = HashSet::new();
+        let mut last_err = None;
+        for pick in picks {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left < Duration::from_secs(5) {
+                break;
+            }
+            let source = match self.fetch_source(&pick.raw).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("{}: {}: {e:#}", target.title, pick.title);
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            if let Some(hash) = magnet_hash(&source)
+                && !tried.insert(hash)
+            {
+                continue;
+            }
+            let folder = stream_cfg.download_dir.join(folder_name(&pick.title));
+            info!("assistir agora: {} — {} ({} MB)", target.title, pick.title, pick.size >> 20);
+            match self.start_torrent(kind, id, target.clone(), pick.title.clone(), source, folder, true, replaces.clone(), vec![], per_try.min(left)).await {
+                Err(e) if e.root_cause().is::<tokio::time::error::Elapsed>() => {
+                    warn!("{}: {} não achou fontes; tentando a próxima versão", target.title, pick.title);
+                    last_err = Some(e);
+                }
+                started => return started,
+            }
+        }
+        match last_err {
+            Some(e) if tried.len() > 1 => Err(e.context(format!("nenhuma das {} versões achou fontes em {} s", tried.len(), ADD_TIMEOUT.as_secs()))),
+            Some(e) => Err(e),
+            None => bail!("nenhuma versão respondeu"),
+        }
     }
 
     /// O "Assistir" de algo que o "Baixar" já está baixando no qBittorrent:
@@ -1055,7 +1152,7 @@ impl Orchestrator {
         self.qbit.remove_keep_files(&hash).await?;
         info!("assistir agora: {} — assumindo o download do qBittorrent ({:.0}%, {})", target.title, t.progress * 100.0, t.name);
         let remonitor = if kind == Kind::Movie { vec![] } else { episodes };
-        self.start_torrent(kind, id, target, t.name, source, folder, false, None, remonitor).await.map(Some)
+        self.start_torrent(kind, id, target, t.name, source, folder, false, None, remonitor, ADD_TIMEOUT).await.map(Some)
     }
 
     /// Põe o torrent no librqbit (arquivos em `folder`, que já podem ter parte
@@ -1073,10 +1170,11 @@ impl Orchestrator {
         pack_select: bool,
         replaces: Option<Replace>,
         remonitor: Vec<i64>,
+        wait: Duration,
     ) -> Result<Started> {
         let streamer = self.streamer()?.clone();
         let job_folder = folder.clone();
-        let handle = self.add_torrent(&source, &folder).await?;
+        let handle = self.add_torrent(&source, &folder, wait).await?;
         let (file_id, file_len, rel) = handle.with_metadata(|m| video_file(&m.file_infos, target.episode))?.context("o torrent não tem o vídeo")?;
         let many_files = handle.with_metadata(|m| m.file_infos.len())? > 1;
         let sub_files: Vec<(usize, PathBuf)> = handle.with_metadata(|m| {
@@ -1425,6 +1523,7 @@ impl Orchestrator {
     }
 }
 
+#[derive(Clone)]
 struct Target {
     title: String,
     arr_id: i64,
@@ -1436,6 +1535,7 @@ struct Target {
 }
 
 /// O arquivo que já está na biblioteca.
+#[derive(Clone)]
 struct Library {
     /// caminho como o Radarr/Sonarr o veem
     path: String,
@@ -1772,6 +1872,15 @@ mod tests {
         // hex (40) fica como está
         let hex = "magnet:?xt=urn:btih:1127588e1cb04f16b7cb0f64dcce32edb792d157&dn=x";
         assert_eq!(normalize_magnet(hex), hex);
+    }
+
+    #[test]
+    fn same_torrent_from_hex_and_base32_magnets() {
+        let hex = TorrentSource::Magnet("magnet:?xt=urn:btih:1127588E1CB04F16B7CB0F64DCCE32EDB792D157&dn=a".into());
+        let b32 = TorrentSource::Magnet("magnet:?xt=urn:btih:cetvrdq4wbhrnn6lb5snztrs5w3zfukx&dn=b".into());
+        assert_eq!(magnet_hash(&hex).as_deref(), Some("1127588e1cb04f16b7cb0f64dcce32edb792d157"));
+        assert_eq!(magnet_hash(&hex), magnet_hash(&b32));
+        assert_eq!(magnet_hash(&TorrentSource::File(bytes::Bytes::from_static(b"d4:infoe"))), None);
     }
     use super::*;
 

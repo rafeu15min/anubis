@@ -566,6 +566,8 @@ pub struct Jellyfin {
     base: String,
     key: String,
     http: Client,
+    /// usuário cujo progresso o Anubis lê e grava (achado uma vez)
+    user: std::sync::OnceLock<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -608,13 +610,48 @@ impl Jellyfin {
         Ok((get("/AccessToken")?, get("/User/Id")?, get("/ServerId")?))
     }
     pub fn new(base: &str, key: &str) -> Result<Self> {
-        Ok(Self { base: base.trim_end_matches('/').into(), key: key.into(), http: http()? })
+        Ok(Self { base: base.trim_end_matches('/').into(), key: key.into(), http: http()?, user: Default::default() })
     }
 
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
         self.http
             .request(method, format!("{}/{path}", self.base))
             .header("Authorization", format!("MediaBrowser Token=\"{}\"", self.key))
+    }
+
+    /// Id do usuário cujo progresso o Anubis lê e grava: o do login
+    /// configurado; sem login, o administrador (ou o primeiro).
+    pub async fn user_id(&self, login: Option<&str>) -> Result<String> {
+        if let Some(id) = self.user.get() {
+            return Ok(id.clone());
+        }
+        let users = self.get_json("Users").await?;
+        let id = users
+            .as_array()
+            .and_then(|u| {
+                let by_name = login.and_then(|n| u.iter().find(|x| x["Name"] == n));
+                by_name.or_else(|| u.iter().find(|x| x["Policy"]["IsAdministrator"] == true)).or(u.first())
+            })
+            .and_then(|u| u["Id"].as_str())
+            .context("Jellyfin sem usuário")?
+            .to_owned();
+        Ok(self.user.get_or_init(|| id).clone())
+    }
+
+    /// Episódios de uma série, com o progresso de `user` (`UserData`).
+    pub async fn episodes(&self, series: &str, user: &str) -> Result<Vec<Value>> {
+        let v = self.get_json(&format!("Shows/{series}/Episodes?userId={user}")).await?;
+        Ok(v["Items"].as_array().cloned().unwrap_or_default())
+    }
+
+    pub async fn user_data(&self, item: &str, user: &str) -> Result<Value> {
+        self.get_json(&format!("UserItems/{item}/UserData?userId={user}")).await
+    }
+
+    /// Grava o progresso de `user` em `item` (só os campos enviados mudam).
+    pub async fn set_user_data(&self, item: &str, user: &str, data: &Value) -> Result<()> {
+        send::<Value>(self.req(Method::POST, &format!("UserItems/{item}/UserData?userId={user}")).json(data), "Jellyfin gravar progresso").await?;
+        Ok(())
     }
 
     /// Pede ao Jellyfin para varrer a biblioteca onde entrou `arr_path` (o

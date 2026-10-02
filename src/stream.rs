@@ -160,6 +160,9 @@ pub struct Job {
     subs_ready: StdMutex<HashSet<PathBuf>>,
     /// sincronia da dublagem (None = ainda não medida)
     dub: StdMutex<Option<DubSync>>,
+    /// o vídeo no Jellyfin (guardado quando achado: antes de o arquivo
+    /// entrar na biblioteca, o Jellyfin ainda não o conhece)
+    jellyfin: StdMutex<Option<String>>,
 }
 
 impl Job {
@@ -173,6 +176,7 @@ impl Job {
             probing: StdMutex::new(false),
             subs_ready: StdMutex::new(HashSet::new()),
             dub: StdMutex::new(None),
+            jellyfin: StdMutex::new(None),
         })
     }
     pub fn phase(&self) -> (Phase, Option<String>) {
@@ -1561,6 +1565,62 @@ impl Orchestrator {
         bail!("redirecionamentos demais no link de download")
     }
 
+    /// O vídeo no Jellyfin (o filme ou o episódio) e o usuário cujo
+    /// progresso o Anubis lê e grava.
+    async fn jellyfin_item(&self, job: &Job) -> Option<(String, String)> {
+        let user = self.jellyfin_user().await.ok()?;
+        if let Some(id) = job.jellyfin.lock().unwrap().clone() {
+            return Some((id, user));
+        }
+        let id = match job.info.kind {
+            Kind::Movie => {
+                let movie = self.radarr.as_ref()?.movie(job.info.arr_id).await.ok()?;
+                let folder = self.cfg.jellyfin_path_from_container(movie["path"].as_str()?)?;
+                self.jellyfin.find_item("Movie", movie["title"].as_str()?, &folder).await.ok()??
+            }
+            _ => {
+                let sonarr = self.sonarr.as_ref()?;
+                let ep = sonarr.episode(job.info.id).await.ok()?;
+                let series = sonarr.series_by_id(job.info.series_id?).await.ok()?;
+                let eps = self.jellyfin_episodes(&series, &user).await.ok()?;
+                eps.get(&(ep["seasonNumber"].as_i64()?, ep["episodeNumber"].as_i64()?))?.id.clone()
+            }
+        };
+        *job.jellyfin.lock().unwrap() = Some(id.clone());
+        Some((id, user))
+    }
+
+    /// Onde o usuário parou neste vídeo no Jellyfin (s), para continuar
+    /// de lá em qualquer aparelho.
+    pub async fn saved_position(&self, job: &Job) -> Option<f64> {
+        let (item, user) = self.jellyfin_item(job).await?;
+        let ticks = self.jellyfin.user_data(&item, &user).await.ok()?["PlaybackPositionTicks"].as_i64()?;
+        (ticks > 0).then(|| ticks as f64 / 1e7)
+    }
+
+    /// Grava no Jellyfin o progresso do player: `t` s de `duration`. Como o
+    /// próprio Jellyfin, o começo (menos de 5 %) não vira "continuar" e
+    /// passar de 90 % marca como assistido. `false`: o Jellyfin ainda não
+    /// conhece o vídeo.
+    pub async fn save_progress(&self, job: &Job, t: f64, duration: f64) -> Result<bool> {
+        let Some((item, user)) = self.jellyfin_item(job).await else { return Ok(false) };
+        let Some(data) = progress_update(t, duration) else { return Ok(true) };
+        let data = if data["Played"] == true {
+            // os avisos seguem chegando até o fim: só o primeiro conta a vez
+            let cur = self.jellyfin.user_data(&item, &user).await?;
+            if cur["Played"] == true && cur["PlaybackPositionTicks"].as_i64() == Some(0) {
+                return Ok(true);
+            }
+            let mut d = data;
+            d["PlayCount"] = json!(cur["PlayCount"].as_i64().unwrap_or(0) + 1);
+            d
+        } else {
+            data
+        };
+        self.jellyfin.set_user_data(&item, &user, &data).await?;
+        Ok(true)
+    }
+
     /// Link do Jellyfin para o player (o filme, ou a série do episódio).
     pub async fn watch_jellyfin_url(&self, job: &Job) -> Option<String> {
         match job.info.kind {
@@ -1811,6 +1871,20 @@ pub fn limit(r: Box<dyn AsyncRead + Send + Unpin>, len: u64) -> impl AsyncRead +
     r.take(len)
 }
 
+/// O que gravar no Jellyfin para a posição `t` de `duration` (s); `None` =
+/// nada (começo do vídeo ou duração desconhecida).
+fn progress_update(t: f64, duration: f64) -> Option<Value> {
+    if duration <= 0.0 || t / duration < 0.05 {
+        return None;
+    }
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Some(if t / duration >= 0.9 {
+        json!({ "Played": true, "PlaybackPositionTicks": 0, "LastPlayedDate": now })
+    } else {
+        json!({ "PlaybackPositionTicks": (t * 1e7) as i64, "LastPlayedDate": now })
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2026,6 +2100,17 @@ mod tests {
         assert_eq!(classify(&p("h264", "aac"), "f.mkv").mode, Mode::Remux);
         assert_eq!(classify(&p("hevc", "aac"), "f.mkv").mode, Mode::Transcode);
         assert_eq!(classify(&p("h264", "aac"), "f.mp4").duration, Some(5400.5));
+    }
+
+    #[test]
+    fn progress_sent_to_jellyfin() {
+        assert_eq!(progress_update(60.0, 3000.0), None, "começo não vira continuar");
+        assert_eq!(progress_update(10.0, 0.0), None);
+        let mid = progress_update(1500.0, 3000.0).unwrap();
+        assert_eq!(mid["PlaybackPositionTicks"], 15_000_000_000_i64);
+        assert!(mid.get("Played").is_none(), "no meio não mexe em assistido");
+        let end = progress_update(2800.0, 3000.0).unwrap();
+        assert_eq!((end["Played"].clone(), end["PlaybackPositionTicks"].clone()), (json!(true), json!(0)));
     }
 
     #[test]

@@ -13,11 +13,14 @@
 //! GET  /status/{kind}/{id}      — procurando / baixando / disponível (+ link do Jellyfin)
 //! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
+//! GET  /icones.woff2           — ícones das páginas
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
 //! GET  /watch/{kind}/{id}/lighter — versões mais leves (o download não acompanha o vídeo)
-//! GET  /watch/{kind}/{id}/stream.mp4?t=S — convertido na hora (H.265, AC3…), a partir de S s
+//! GET  /watch/{kind}/{id}/stream.mp4?t=S&a=N&h=A — convertido na hora (H.265, AC3…), a partir de S s, faixa de áudio N, altura máxima A
+//! GET  /watch/{kind}/{id}/progress — onde o usuário parou no Jellyfin
+//! POST /watch/{kind}/{id}/progress {"t", "duration"} — o player avisa onde está; grava no Jellyfin
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! POST /movie/{tmdb}/subbed      — o mesmo para filmes
@@ -74,6 +77,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/search", get(search))
         .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
+        // ícones das páginas (Nerd Font reduzida; web/icones.py)
+        .route("/icones.woff2", get(|| async { ([("content-type", "font/woff2"), ("cache-control", "max-age=86400")], include_bytes!("../web/icones.woff2").as_slice()) }))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
@@ -99,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/lighter", get(lighter))
         .route("/watch/{kind}/{id}/better", get(better))
         .route("/watch/{kind}/{id}/stream.mp4", get(converted))
+        .route("/watch/{kind}/{id}/progress", get(get_progress).post(post_progress))
         .route("/watch/{kind}/{id}/subs", get(subs_list))
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
@@ -360,6 +366,33 @@ async fn video(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, h
         h.insert("content-range", format!("bytes {start}-{end}/{len}").parse().unwrap());
     }
     res
+}
+
+/// Onde o usuário parou no Jellyfin (`t` em s; `null` sem progresso).
+async fn get_progress(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    Json(json!({ "t": s.orch.saved_position(&job).await })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ProgressBody {
+    t: f64,
+    duration: f64,
+}
+
+/// O player avisa onde está; o Anubis grava no Jellyfin.
+async fn post_progress(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, Json(b): Json<ProgressBody>) -> Response {
+    let job = match job_of(&s, kind, id).await {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    match s.orch.save_progress(&job, b.t, b.duration).await {
+        Ok(saved) => Json(json!({ "saved": saved })).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 #[derive(serde::Deserialize)]

@@ -195,7 +195,10 @@ function reopen() {
   if (!$('menu').hidden) renderMenu();
 }
 
-function start(media) {
+// onde a pessoa parou no Jellyfin (qualquer aparelho, ou o próprio Jellyfin)
+const savedAt = fetch(`${base}/progress`).then((r) => (r.ok ? r.json() : null)).then((d) => d && d.t).catch(() => null);
+
+async function start(media) {
   M = media || {};
   duration = M.duration || 0;
   const q = stored(QKEY);
@@ -206,6 +209,10 @@ function start(media) {
   if (r) v.defaultPlaybackRate = v.playbackRate = r;
   let pos = 0;
   try { const p = parseFloat(localStorage.getItem(RESUME)); if (p > 5) pos = p; } catch {}
+  // vale o do Jellyfin; o deste aparelho só se estiver perto (é salvo mais
+  // vezes, então é mais exato) ou se o Jellyfin não souber
+  const jf = await Promise.race([savedAt, new Promise((ok) => setTimeout(() => ok(null), 2500))]);
+  if (jf > 5 && !(pos && Math.abs(pos - jf) < 30)) pos = jf;
   openAt(pos);
 }
 
@@ -240,7 +247,25 @@ v.addEventListener('timeupdate', () => {
   paintBuf();
   if (Math.abs(now() - saved) > 5) { saved = now(); try { localStorage.setItem(RESUME, String(saved)); } catch {} }
 });
+// ---- progresso no Jellyfin: o player avisa onde está (a cada 15 s tocando,
+// ao pausar, ao sair da aba e no fim); o Anubis grava para o usuário dele
+let reportedAt = 0;
+function report(beacon = false, t = now()) {
+  const d = total();
+  if (!started || !d) return;
+  reportedAt = performance.now();
+  const body = JSON.stringify({ t, duration: d });
+  // saindo da página, só o sendBeacon garante a entrega
+  if (beacon) navigator.sendBeacon(`${base}/progress`, new Blob([body], { type: 'application/json' }));
+  else fetch(`${base}/progress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+}
+v.addEventListener('timeupdate', () => { if (!v.paused && target === null && performance.now() - reportedAt > 15000) report(); });
+v.addEventListener('pause', () => { if (target === null && !v.ended) report(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) report(true); });
+window.addEventListener('pagehide', () => report(true));
+
 v.addEventListener('ended', () => {
+  report(true, total());
   try { localStorage.removeItem(RESUME); } catch {}
   if (next) goNext();
 });

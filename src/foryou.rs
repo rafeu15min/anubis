@@ -349,16 +349,7 @@ impl Orchestrator {
         let mut add = |k: (Media, i64), w: f64| *seeds.entry(k).or_insert(0.0) += w;
 
         // Jellyfin: filmes e séries da biblioteca, com o que a pessoa fez com eles
-        let users = self.jellyfin.get_json("Users").await?;
-        let user = users
-            .as_array()
-            .and_then(|u| {
-                let by_name = self.jellyfin_login.as_ref().and_then(|(name, _)| u.iter().find(|x| x["Name"] == name.as_str()));
-                by_name.or_else(|| u.iter().find(|x| x["Policy"]["IsAdministrator"] == true)).or(u.first())
-            })
-            .and_then(|u| u["Id"].as_str())
-            .context("Jellyfin sem usuário")?
-            .to_owned();
+        let user = self.jellyfin_user().await?;
         let lib = self.jellyfin.get_json(&format!("Users/{user}/Items?Recursive=true&IncludeItemTypes=Movie,Series&Fields=ProviderIds")).await?;
         let mut series_tmdb: HashMap<String, i64> = HashMap::new();
         for it in lib["Items"].as_array().into_iter().flatten() {

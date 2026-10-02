@@ -71,6 +71,40 @@ pub struct EpisodeRow {
     pub title: Option<String>,
     pub air_date: Option<String>,
     pub has_file: bool,
+    /// o que o usuário do Jellyfin já viu dele
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Progress>,
+}
+
+/// Progresso no Jellyfin: assistido e/ou parado no meio (em %).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Progress {
+    pub played: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+}
+
+impl Progress {
+    /// Do `UserData` do Jellyfin; `None` se nunca foi visto.
+    pub fn from_user_data(ud: &Value, runtime_ticks: Option<i64>) -> Option<Self> {
+        let played = ud["Played"] == true;
+        let pos = ud["PlaybackPositionTicks"].as_i64().unwrap_or(0);
+        let percent = if pos > 0 {
+            ud["PlayedPercentage"]
+                .as_f64()
+                .or_else(|| runtime_ticks.filter(|r| *r > 0).map(|r| pos as f64 * 100.0 / r as f64))
+                .map(|p| p.round().clamp(1.0, 99.0) as u8)
+        } else {
+            None
+        };
+        (played || percent.is_some()).then_some(Self { played, percent })
+    }
+}
+
+/// Um episódio no Jellyfin: o item e o progresso do usuário.
+pub(crate) struct JellyfinEpisode {
+    pub id: String,
+    pub progress: Option<Progress>,
 }
 
 #[derive(Debug, Serialize)]
@@ -531,15 +565,22 @@ impl Orchestrator {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             raw = sonarr.episodes_raw(series_id).await?;
         }
+        // série que o Jellyfin ainda não conhece: sem progresso
+        let watched = match self.jellyfin_user().await {
+            Ok(user) => self.jellyfin_episodes(&series, &user).await.unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
         let mut seasons: std::collections::BTreeMap<i64, Vec<EpisodeRow>> = Default::default();
         for e in raw {
             let season = e["seasonNumber"].as_i64().unwrap_or(0);
+            let number = e["episodeNumber"].as_i64().unwrap_or(0);
             seasons.entry(season).or_default().push(EpisodeRow {
                 id: e["id"].as_i64().unwrap_or(0),
-                number: e["episodeNumber"].as_i64().unwrap_or(0),
+                number,
                 title: e["title"].as_str().map(str::to_owned),
                 air_date: e["airDate"].as_str().map(str::to_owned),
                 has_file: e["hasFile"].as_bool().unwrap_or(false),
+                watch: watched.get(&(season, number)).and_then(|j| j.progress.clone()),
             });
         }
         let mut seasons: Vec<Season> = seasons
@@ -599,6 +640,25 @@ impl Orchestrator {
         Ok(offers(&tmdb.get(&path).await?["results"][&cfg.region]))
     }
 
+    /// O usuário do Jellyfin cujo progresso o Anubis lê e grava.
+    pub(crate) async fn jellyfin_user(&self) -> Result<String> {
+        self.jellyfin.user_id(self.jellyfin_login.as_ref().map(|(name, _)| name.as_str())).await
+    }
+
+    /// Episódios da série (do Sonarr) no Jellyfin, por (temporada, número).
+    pub(crate) async fn jellyfin_episodes(&self, series: &Value, user: &str) -> Result<std::collections::HashMap<(i64, i64), JellyfinEpisode>> {
+        let folder = series["path"].as_str().and_then(|p| self.cfg.jellyfin_path_from_container(p)).context("série sem pasta")?;
+        let title = series["title"].as_str().unwrap_or_default();
+        let id = self.jellyfin.find_item("Series", title, &folder).await?.context("série fora do Jellyfin")?;
+        let mut out = std::collections::HashMap::new();
+        for e in self.jellyfin.episodes(&id, user).await? {
+            let (Some(season), Some(number), Some(id)) = (e["ParentIndexNumber"].as_i64(), e["IndexNumber"].as_i64(), e["Id"].as_str()) else { continue };
+            let progress = Progress::from_user_data(&e["UserData"], e["RunTimeTicks"].as_i64());
+            out.insert((season, number), JellyfinEpisode { id: id.to_owned(), progress });
+        }
+        Ok(out)
+    }
+
     /// Link do item no Jellyfin, se ele já o conhece.
     pub(crate) async fn jellyfin_url(&self, kind: Kind, item: &Value) -> Option<String> {
         let public = self.cfg.jellyfin.public_url.as_deref().unwrap_or(&self.cfg.jellyfin.url).trim_end_matches('/');
@@ -616,6 +676,18 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_from_jellyfin_user_data() {
+        let p = |v: Value| Progress::from_user_data(&v, Some(30_000_000_000));
+        assert_eq!(p(json!({ "Played": false, "PlaybackPositionTicks": 0 })), None);
+        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 0 })), Some(Progress { played: true, percent: None }));
+        assert_eq!(p(json!({ "Played": false, "PlaybackPositionTicks": 12_000_000_000_i64, "PlayedPercentage": 41.6 })), Some(Progress { played: false, percent: Some(42) }));
+        // sem PlayedPercentage: pela duração
+        assert_eq!(p(json!({ "PlaybackPositionTicks": 15_000_000_000_i64 })), Some(Progress { played: false, percent: Some(50) }));
+        // revendo algo já assistido
+        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 3_000_000_000_i64 })), Some(Progress { played: true, percent: Some(10) }));
+    }
 
     #[test]
     fn orders_offers_subscription_first_and_skips_empty() {

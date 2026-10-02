@@ -13,13 +13,20 @@
     --accent: #c9a24a; --ok: #5fbf7f; --info: #6fa8ff;
   }
   * { box-sizing: border-box; }
+  /* ícones: Nerd Font reduzida aos usados (web/icones.py) */
+  @font-face { font-family: 'Anubis Icones'; src: url('icones.woff2') format('woff2'); font-display: block; }
+  .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
+  .i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
+  .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
+  .i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
+  .i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
   header { position: sticky; top: 0; z-index: 2; padding: 16px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
   .bar { display: flex; gap: 12px; align-items: center; max-width: 1100px; margin: 0 auto; }
   h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
   input[type=search] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 16px; }
   input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .gear { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); }
+  .gear { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); font-size: 22px; text-decoration: none; }
   .gear:hover { color: var(--accent); background: var(--panel); }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 24px 0 12px; }
@@ -37,7 +44,15 @@
   .state { font-size: 13px; color: var(--info); }
   .progress { height: 6px; width: 100%; border-radius: 3px; background: var(--line); overflow: hidden; }
   .progress i { display: block; height: 100%; background: var(--info); transition: width .6s; }
-  .tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
+  /* um selo não quebra no meio: se não cabe, vai inteiro para a linha de baixo */
+  .tag { display: inline-block; white-space: nowrap; font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
+  .tag .i { margin-right: 3px; }
+  .tag.seen { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .tag.watching { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+  button.icon { width: 44px; min-height: 44px; padding: 0; justify-content: center; font-size: 17px; }
+  /* fechar: no canto da janela, à vista mesmo rolando uma lista longa */
+  dialog > .x { position: sticky; top: 0; float: right; z-index: 1; width: 40px; height: 40px; min-height: 40px; margin: -8px -8px 0 8px; padding: 0; justify-content: center; border-color: var(--line); border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 16px; }
+  dialog > .x:hover { border-color: var(--accent); color: var(--accent); background: var(--panel); }
   .msg { color: var(--muted); padding: 24px 0; }
   button.primary { background: var(--accent); color: #111; font-weight: 600; }
   button.quiet { border-color: var(--line); color: var(--muted); }
@@ -53,6 +68,7 @@
   summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
   .ep { display: grid; grid-template-columns: 3.2em 1fr auto; gap: 10px; align-items: center; padding: 6px 0; }
   .ep .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ep .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: 1px; margin-left: 4px; }
   .ep small { color: var(--muted); display: block; }
   .err { color: #ff8a8a; }
   label.rel { cursor: pointer; }
@@ -70,7 +86,7 @@
   .shelf h2 { margin-top: 20px; }
   /* setas dos carrosséis: sem barra de rolagem, é por elas que o mouse anda de lado (no toque, arrasta) */
   .railbox { position: relative; }
-  .railbox .nav { display: none; position: absolute; top: calc(clamp(112px, 30vw, 150px) * .75 - 22px); z-index: 1; width: 44px; height: 44px; min-height: 0; padding: 0; justify-content: center; border-radius: 50%; border-color: var(--line); background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--text); font-size: 26px; line-height: 1; }
+  .railbox .nav { display: none; position: absolute; top: calc(clamp(112px, 30vw, 150px) * .75 - 22px); z-index: 1; width: 44px; height: 44px; min-height: 0; padding: 0; justify-content: center; border-radius: 50%; border-color: var(--line); background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--text); font-size: 18px; line-height: 1; }
   .railbox .nav:hover { border-color: var(--accent); color: var(--accent); background: var(--bg); }
   .railbox .nav[data-scroll="-1"] { left: 4px; }
   .railbox .nav[data-scroll="1"] { right: 4px; }
@@ -100,7 +116,7 @@
       <button data-cat="filmes">Filmes</button><button data-cat="series">Séries</button><button data-cat="animes">Animes</button>
     </nav>
     <input id="q" type="search" placeholder="Buscar filme ou série…" autocomplete="off">
-    <a class="gear" href="preferencias" title="Preferências" aria-label="Preferências"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.3 7.3 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg></a>
+    <a class="gear" href="preferencias" title="Preferências" aria-label="Preferências"><i class="i i-gear"></i></a>
   </div>
 </header>
 <main>
@@ -112,27 +128,29 @@
   <div id="results" hidden></div>
 </main>
 <dialog id="item">
+  <button id="itemclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <div id="itembody"></div>
-  <div class="row" style="justify-content:flex-end"><button id="itemhide" class="quiet" style="margin-right:auto">Não quero ver</button><button id="itemclose">Fechar</button></div>
+  <div class="row"><button id="itemhide" class="quiet">Não quero ver</button></div>
 </dialog>
 <dialog id="pick">
+  <button id="pickclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <h3 id="picktitle"></h3>
   <p class="meta" id="pickmsg"></p>
   <p class="meta" id="pickdown" style="color:#ffb36b"></p>
   <div id="rels"></div>
   <div id="pickwhere"></div>
-  <div class="row" style="justify-content:flex-end"><button id="pickclose">Fechar</button></div>
 </dialog>
 <dialog id="mux">
+  <button id="muxclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <h3 id="muxtitle"></h3>
   <p class="meta">A imagem de uma versão com o áudio em português de outra. O Anubis baixa as duas, confere se as falas caem no mesmo lugar e só junta se baterem.</p>
   <div id="muxbody"></div>
-  <div class="row" style="justify-content:flex-end"><button id="muxclose">Fechar</button><button class="primary" id="muxgo" hidden>Juntar</button></div>
+  <div class="row" style="justify-content:flex-end"><button class="primary" id="muxgo" hidden>Juntar</button></div>
 </dialog>
 <dialog id="eps">
+  <button id="epsclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <h3 id="epstitle"></h3>
   <div id="epslist"><p class="msg">Carregando…</p></div>
-  <div class="row" style="justify-content:flex-end"><button id="epsclose">Fechar</button></div>
 </dialog>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
@@ -431,6 +449,14 @@ async function muxCancel(id) {
   if (t) { t.mux = false; save(); refresh(t, false); }
 }
 
+// o que o usuário do Jellyfin já viu: assistido, ou parado no meio (a fatia
+// do círculo mostra quanto)
+function watchTag(w) {
+  if (!w) return '';
+  if (w.percent) return `<span class="tag watching"><i class="i i-s${Math.min(8, Math.max(1, Math.round(w.percent / 12.5)))}"></i>assistindo ${w.percent}%</span>`;
+  return '<span class="tag seen"><i class="i i-check"></i>assistido</span>';
+}
+
 // temporadas e episódios de uma série
 let currentTvdb = null;
 async function episodes(tvdb, title) {
@@ -447,9 +473,10 @@ async function episodes(tvdb, title) {
         <summary>${s.number === 0 ? 'Especiais' : `Temporada ${s.number}`} <span class="meta">· ${s.episodes.length} episódios</span></summary>
         ${s.episodes.map((e) => {
           const future = e.air_date && e.air_date > today;
-          const btn = future ? `<span class="meta">estreia ${esc(e.air_date)}</span>` : `<button data-watch="episode:${e.id}">Assistir</button>`;
+          const btn = future ? `<span class="meta">estreia ${esc(e.air_date)}</span>` : `<button class="icon" data-watch="episode:${e.id}" title="Assistir" aria-label="Assistir"><i class="i i-play"></i></button>`;
+          const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + watchTag(e.watch);
           return `<div class="ep"><span class="n">${e.number}</span>
-            <div>${esc(e.title || 'Episódio ' + e.number)}${e.has_file ? ' <span class="tag">na biblioteca</span>' : ''}<small>${esc(e.air_date || '')}</small></div>${btn}</div>`;
+            <div>${esc(e.title || 'Episódio ' + e.number)}${tags ? ` <span class="tags">${tags}</span>` : ''}<small>${esc(e.air_date || '')}</small></div>${btn}</div>`;
         }).join('')}</details>`).join('') || '<p class="msg">Nenhum episódio.</p>';
   } catch (e) {
     $('#epslist').innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
@@ -525,7 +552,7 @@ async function pollAvailability() {
 }
 const shelf = (title, items, ready) => items.length
   ? `<section class="shelf${ready ? ' ready' : ''}"><h2>${esc(title)}</h2><div class="railbox">
-      <button class="nav" data-scroll="-1" aria-label="Voltar">‹</button><button class="nav" data-scroll="1" aria-label="Avançar">›</button>
+      <button class="nav" data-scroll="-1" aria-label="Voltar"><i class="i i-left"></i></button><button class="nav" data-scroll="1" aria-label="Avançar"><i class="i i-right"></i></button>
       <div class="rail">${items.map((it) => tile(it, ready)).join('')}</div></div></section>` : '';
 async function showCategory(cat) {
   currentCat = cat;

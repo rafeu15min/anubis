@@ -41,10 +41,18 @@
   .panel { position: fixed; top: 68px; right: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 10px 14px; border-radius: 10px; background: rgba(20,20,20,.75); font-size: 13px; transition: opacity .25s; }
   .panel a { color: #7fd0ff; }
   #cc.on { color: var(--played); }
-  .ccmenu { position: fixed; right: 20px; bottom: 90px; min-width: 220px; max-height: 50vh; overflow: auto; padding: 6px; border-radius: 10px; background: rgba(20,20,20,.92); z-index: 5; }
-  .ccmenu button { display: block; width: 100%; height: auto; min-height: 40px; padding: 8px 12px; border-radius: 6px; text-align: left; font: inherit; }
-  .ccmenu button.sel { color: var(--played); font-weight: 600; }
-  .ccmenu small { display: block; padding: 6px 12px; color: var(--muted); }
+  /* o menu rola sozinho e não herda o touch-action do body: sem isto, toques
+     rápidos (atraso +0,1 três vezes) viram toque duplo e o segundo se perde */
+  .menu, button { touch-action: manipulation; }
+  .menu { position: fixed; right: 20px; bottom: 90px; width: min(330px, calc(100vw - 24px)); max-height: 62vh; overflow: auto; padding: 6px; border-radius: 10px; background: rgba(20,20,20,.98); z-index: 5; }
+  .menu button { display: flex; justify-content: space-between; gap: 10px; width: 100%; height: auto; min-height: 42px; padding: 8px 12px; border-radius: 6px; text-align: left; font: inherit; }
+  .menu button.sel { color: var(--played); font-weight: 600; }
+  .menu .val { color: var(--muted); font-size: 13px; text-align: right; }
+  .menu small { display: block; padding: 6px 12px; color: var(--muted); }
+  .menu h3 { margin: 10px 12px 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .menu .row { display: flex; align-items: center; gap: 4px; padding: 0 4px; }
+  .menu .row button { flex: 1; justify-content: center; text-align: center; min-height: 38px; padding: 6px; }
+  .menu .row .mid { flex: 1.6; }
   video::cue { background: rgba(0,0,0,.65); color: #fff; font-size: clamp(16px, 2.6vw, 30px); line-height: 1.3; }
   button.next { position: fixed; right: 20px; bottom: 120px; width: auto; height: auto; padding: 10px 16px; border-radius: 8px; background: rgba(20,20,20,.85); font: inherit; border: 1px solid rgba(255,255,255,.25); transition: opacity .25s; }
   .hidden button.next { opacity: 0; pointer-events: none; }
@@ -62,8 +70,9 @@
   .slow p { margin: 0 0 10px; }
   .slow button { width: 100%; height: auto; min-height: 44px; margin-top: 6px; padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); text-align: left; font: inherit; }
   .slow small { color: var(--muted); }
-  @media (max-width: 600px) { #vol, .desk { display: none; } .bottom { padding: 30px 10px 8px; } }
+  @media (max-width: 600px) { #vol, .desk { display: none; } .bottom { padding: 30px 10px 8px; } .menu { right: 12px; bottom: 80px; } }
 </style>
+<style id="cuestyle"></style>
 </head>
 <body class="waiting">
 <video id="v" playsinline preload="auto"></video>
@@ -74,7 +83,7 @@
 </div>
 
 <div class="panel" id="panel">Preparando…</div>
-<div class="ccmenu" id="ccmenu" hidden></div>
+<div class="menu" id="menu" hidden></div>
 <button class="next" id="next" hidden></button>
 <div class="slow" id="slow" hidden></div>
 
@@ -100,6 +109,7 @@
     <button id="fwd" title="Avançar 10 s (→)"><svg viewBox="0 0 24 24"><path d="M12.01 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="16" font-size="6.5" text-anchor="middle" font-family="sans-serif">10</text></svg></button>
     <span class="spacer"></span>
     <button id="cc" title="Legendas (C)"><svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1z"/></svg></button>
+    <button id="gear" title="Qualidade, áudio, legendas e velocidade"><svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7 7 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54a7.4 7.4 0 0 0-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54a7 7 0 0 0 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.48.48 0 0 0-.12-.61l-2.01-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z"/></svg></button>
     <button id="mute" title="Som (M)"><svg viewBox="0 0 24 24"><path id="volicon" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg></button>
     <input id="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
     <button id="pip" class="desk" title="Imagem na imagem"><svg viewBox="0 0 24 24"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg></button>
@@ -145,25 +155,58 @@ function seek(t, wait = 0) {
   seekTimer = setTimeout(() => {
     target = null;
     offset = t;
-    v.src = `${base}/stream.mp4?t=${t.toFixed(1)}`;
+    setSrc(streamUrl(t));
     v.play().catch(() => {});
     if (typeof applySub === 'function') applySub();
   }, wait);
 }
 
-function start(media) {
-  converted = !!media && media.mode !== 'direct';
-  duration = (media && media.duration) || 0;
-  let pos = 0;
-  try { const p = parseFloat(localStorage.getItem(RESUME)); if (p > 5) pos = p; } catch {}
-  if (converted) {
-    offset = pos;
-    v.src = `${base}/stream.mp4?t=${pos.toFixed(1)}`;
-  } else {
-    v.src = `${base}/video`;
-    if (pos) v.addEventListener('loadedmetadata', () => { v.currentTime = pos; }, { once: true });
+// ---- formato e escolhas do menu. M: o que o ffprobe viu (altura, faixas de
+// áudio). Faixa de áudio que não é a primeira, qualidade abaixo da do
+// arquivo ou dublagem corrigida obrigam a converter mesmo um vídeo que o
+// navegador tocaria direto
+let M = {}, T = 720;  // T: altura do convertido sem escolha (padrão do servidor)
+let aud = 0, quality = 'auto', autoH = null, forceConv = false;
+const store = (k, x) => { try { localStorage.setItem(k, String(x)); } catch {} };
+const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const QKEY = 'anubis.qualidade', AKEY = 'anubis.audio', RKEY = 'anubis.velocidade';
+const effH = () => (quality === 'auto' ? autoH : quality);
+const needsConvert = () => (!!M.mode && M.mode !== 'direct') || forceConv || aud > 0 || (!!effH() && !!M.height && effH() < M.height);
+const streamUrl = (t) => `${base}/stream.mp4?t=${t.toFixed(1)}` + (aud ? `&a=${aud}` : '') + (effH() ? `&h=${effH()}` : '');
+// abre o vídeo em `t`: direto (o <video> busca sozinho) ou convertido a partir de `t`
+function openAt(t) {
+  converted = needsConvert();
+  if (converted) { offset = t; setSrc(streamUrl(t)); }
+  else {
+    offset = 0;
+    setSrc(`${base}/video`);
+    if (t) v.addEventListener('loadedmetadata', () => { v.currentTime = t; }, { once: true });
   }
   v.play().catch(() => {});
+}
+// troca de qualidade/áudio/dublagem: continua do ponto atual
+function reopen() {
+  const t = now();
+  target = null;
+  clearTimeout(seekTimer);
+  document.body.classList.add('waiting');
+  openAt(t);
+  applySub();
+  if (!$('menu').hidden) renderMenu();
+}
+
+function start(media) {
+  M = media || {};
+  duration = M.duration || 0;
+  const q = stored(QKEY);
+  if (q && q !== 'auto' && M.height) quality = Math.min(+q, M.height);
+  const a = (M.audios || []).findIndex((x) => x.lang && x.lang === stored(AKEY));
+  if (a > 0) aud = a;
+  const r = +stored(RKEY);
+  if (r) v.defaultPlaybackRate = v.playbackRate = r;
+  let pos = 0;
+  try { const p = parseFloat(localStorage.getItem(RESUME)); if (p > 5) pos = p; } catch {}
+  openAt(pos);
 }
 
 // ---- dublagem: se o Anubis mede um atraso com o vídeo já tocando, recomeça
@@ -175,9 +218,8 @@ function syncDub(dub) {
   if (dubApplied === null) { dubApplied = s; return; }
   if (s === dubApplied) return;
   dubApplied = s;
-  const pos = now();
-  converted = true;
-  seek(pos);
+  forceConv = true;
+  reopen();
 }
 
 v.addEventListener('waiting', () => document.body.classList.add('waiting'));
@@ -277,7 +319,7 @@ let hideTimer;
 function poke() {
   document.body.classList.remove('hidden');
   clearTimeout(hideTimer);
-  hideTimer = setTimeout(() => { if (!v.paused && !dragging) document.body.classList.add('hidden'); }, 3000);
+  hideTimer = setTimeout(() => { if (!v.paused && !dragging && $('menu').hidden) document.body.classList.add('hidden'); }, 3000);
 }
 function hide() { clearTimeout(hideTimer); document.body.classList.add('hidden'); }
 document.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') poke(); });
@@ -289,7 +331,7 @@ poke();
 // dura, cada toque a mais no mesmo lado soma 10 s (como no YouTube); dois
 // toques no centro alternam a tela cheia. O toque simples espera o intervalo
 // do duplo, para os dois não dispararem juntos
-const UI = 'button, input, a, .bar, .ccmenu, .slow, .panel, .msg';
+const UI = 'button, input, a, .bar, .menu, .slow, .panel, .msg';
 const TAP_GAP = 280, SERIES = 800;
 let down = null, tapTimer, lastTap = -1e9, series = null;
 const zone = (x) => (x < innerWidth * 0.35 ? -1 : x > innerWidth * 0.65 ? 1 : 0);
@@ -311,7 +353,7 @@ document.addEventListener('pointerup', (e) => {
   if (e.pointerType === 'mouse' || !down) return;
   const tap = Math.hypot(e.clientX - down.x, e.clientY - down.y) < 12 && e.timeStamp - down.t < 500;
   down = null;
-  if (!tap || e.target.closest(UI)) return;
+  if (!tap || e.target.closest(UI) || !$('menu').hidden) return;
   const z = zone(e.clientX);
   if (series && z === series.dir) return seekTap(z);
   if (e.timeStamp - lastTap < TAP_GAP) {
@@ -353,21 +395,118 @@ function applySub() {
   t.src = `${base}/subs/${subSel}?shift=${converted ? offset.toFixed(1) : 0}`;
   t.default = true;
   v.appendChild(t);
-  t.addEventListener('load', () => { t.track.mode = 'showing'; });
+  t.addEventListener('load', () => { t.track.mode = 'showing'; fixCues(t.track); });
   t.track.mode = 'showing';
 }
 function pickSub(i) {
   subSel = i;
   try { localStorage.setItem(SUBKEY, i >= 0 ? subs[i].lang : ''); } catch {}
   applySub();
-  renderCC();
+  if (!$('menu').hidden) renderMenu();
 }
-function renderCC() {
-  const m = $('ccmenu');
-  m.innerHTML = `<button class="${subSel < 0 ? 'sel' : ''}" data-sub="-1">Desligada</button>`
-    + subs.map((s, i) => `<button class="${i === subSel ? 'sel' : ''}" data-sub="${i}">${s.label}</button>`).join('')
-    + (subs.length ? '' : '<small>Nenhuma legenda ainda. O Bazarr procura sozinho; as embutidas aparecem quando o download termina.</small>');
+// tamanho e posição valem para todo vídeo; o atraso, só para este
+const SIZEKEY = 'anubis.legenda.tamanho', POSKEY = 'anubis.legenda.posicao', DELAYKEY = `anubis.legenda.atraso.${base}`;
+const SIZES = [[0.75, 'Pequena'], [1, 'Normal'], [1.25, 'Grande'], [1.5, 'Maior'], [2, 'Enorme']];
+const POSITIONS = [['auto', 'Embaixo'], ['80', 'Mais acima'], ['65', 'Bem acima']];
+let subSize = +stored(SIZEKEY) || 1, subPos = stored(POSKEY) || 'auto', subDelay = +stored(DELAYKEY) || 0;
+function cueStyle() { $('cuestyle').textContent = `video::cue { font-size: calc(clamp(16px, 2.6vw, 30px) * ${subSize}); }`; }
+cueStyle();
+// posição e atraso mexem nas falas já carregadas (o atraso soma a diferença
+// para o que já foi aplicado nesta faixa)
+function fixCues(tr) {
+  if (!tr || !tr.cues) return;
+  const dd = subDelay - (tr.anubisDelay || 0);
+  for (const c of tr.cues) {
+    if (dd) { c.startTime += dd; c.endTime += dd; }
+    if (subPos === 'auto') { c.snapToLines = true; c.line = 'auto'; } else { c.snapToLines = false; c.line = +subPos; }
+  }
+  tr.anubisDelay = subDelay;
 }
+const fixAllCues = () => [...v.textTracks].forEach(fixCues);
+
+// ---- menu: qualidade, áudio, legendas, velocidade
+const esc = (x) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const LANG = { por: 'Português', eng: 'Inglês', spa: 'Espanhol', jpn: 'Japonês', fre: 'Francês', fra: 'Francês', ger: 'Alemão', deu: 'Alemão', ita: 'Italiano', kor: 'Coreano', chi: 'Chinês', zho: 'Chinês', rus: 'Russo' };
+const CH = { 1: 'mono', 2: 'estéreo', 6: '5.1', 8: '7.1' };
+const audioName = (a) => LANG[a.lang] || a.lang || `Faixa ${a.n + 1}`;
+const audioLabel = (a) => [audioName(a), a.title, CH[a.channels]].filter(Boolean).join(' · ');
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const rateLabel = (r) => (r === 1 ? 'Normal' : `${String(r).replace('.', ',')}×`);
+const secs = (x) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${Math.abs(x).toFixed(1).replace('.', ',')} s`;
+// alturas oferecidas: a do arquivo e as comuns abaixo dela
+const heights = () => (M.height ? [M.height, ...[1080, 720, 480, 360].filter((h) => h < M.height)] : []);
+// onde a automática começa: o convertido sai em T; o resto, na altura do arquivo
+const autoStart = () => (M.mode === 'transcode' ? Math.min(T, M.height) : M.height);
+const curHeight = () => effH() || autoStart();
+const hLabel = (h) => (h === M.height ? `Original · ${h}p` : `${h}p`);
+const qualityLabel = () => (quality === 'auto' ? `Automática (${curHeight()}p)` : hLabel(quality));
+let menuPage = 'main', shownPage = null;
+function renderMenu() {
+  const item = (go, name, val) => `<button data-go="${go}"><span>${name}</span><span class="val">${esc(val)} ›</span></button>`;
+  const opt = (key, val, label, sel) => `<button class="${sel ? 'sel' : ''}" data-${key}="${val}"><span>${esc(label)}</span></button>`;
+  const back = '<button data-go="main"><span>‹ Voltar</span></button>';
+  let h = '';
+  if (menuPage === 'main') {
+    if (M.height) h += item('quality', 'Qualidade', qualityLabel());
+    if ((M.audios || []).length > 1) h += item('audio', 'Áudio', audioName(M.audios[aud]));
+    h += item('subs', 'Legendas', subSel >= 0 ? subs[subSel].label : 'Desligada');
+    h += item('speed', 'Velocidade', rateLabel(v.playbackRate));
+  } else if (menuPage === 'quality') {
+    h = back + opt('q', 'auto', `Automática · começa em ${autoStart()}p`, quality === 'auto')
+      + heights().map((x) => opt('q', x, hLabel(x), quality === x)).join('')
+      + '<small>A automática desce sozinha (720p → 480p → 360p) se o vídeo travar sem ser por falta de download.</small>';
+  } else if (menuPage === 'audio') {
+    h = back + M.audios.map((a) => opt('a', a.n, audioLabel(a), a.n === aud)).join('');
+  } else if (menuPage === 'speed') {
+    h = back + RATES.map((r) => opt('rate', r, rateLabel(r), r === v.playbackRate)).join('');
+  } else if (menuPage === 'subs') {
+    // os ajustes vêm antes da lista: um arquivo pode ter dezenas de legendas
+    const size = SIZES.find(([x]) => x === subSize)[1], pos = POSITIONS.find(([x]) => x === subPos)[1];
+    h = back + item('subadj', 'Ajustar', `${size} · ${pos} · ${secs(subDelay)}`)
+      + '<h3>Legenda</h3>'
+      + opt('sub', -1, 'Desligada', subSel < 0)
+      + subs.map((x, i) => opt('sub', i, x.label, i === subSel)).join('')
+      + (subs.length ? '' : '<small>Nenhuma legenda ainda. O Bazarr procura sozinho; as embutidas aparecem quando o download termina.</small>');
+  } else if (menuPage === 'subadj') {
+    const size = SIZES.findIndex(([x]) => x === subSize);
+    h = '<button data-go="subs"><span>‹ Legendas</span></button>'
+      + '<h3>Tamanho</h3>'
+      + `<div class="row"><button data-size="-1"${size <= 0 ? ' disabled' : ''}>A−</button><span class="mid" style="text-align:center">${SIZES[size][1]}</span><button data-size="1"${size >= SIZES.length - 1 ? ' disabled' : ''}>A+</button></div>`
+      + '<h3>Posição</h3>'
+      + `<div class="row">${POSITIONS.map(([x, l]) => opt('pos', x, l, subPos === x)).join('')}</div>`
+      + '<h3>Atraso</h3>'
+      + `<div class="row"><button data-delay="-0.1">−0,1</button><button class="mid" data-delay="0" title="Zerar">${secs(subDelay)}</button><button data-delay="0.1">+0,1</button></div>`
+      + '<small>+ a legenda aparece depois; − aparece antes.</small>';
+  }
+  $('menu').innerHTML = h;
+  if (shownPage !== menuPage) { $('menu').scrollTop = 0; shownPage = menuPage; }
+}
+function openMenu(page) {
+  const m = $('menu');
+  if (!m.hidden && menuPage === page) { m.hidden = true; return; }
+  menuPage = page;
+  renderMenu();
+  m.hidden = false;
+  poke();
+}
+// o clique não sobe: o menu redesenha os botões e o tocado já não estaria
+// dentro dele quando o "clique fora fecha" o conferisse
+$('menu').onclick = (e) => {
+  e.stopPropagation();
+  const b = e.target.closest('button');
+  if (!b) return;
+  const d = b.dataset;
+  if (d.go) menuPage = d.go;
+  else if (d.q) { quality = d.q === 'auto' ? 'auto' : +d.q; autoH = null; store(QKEY, quality); reopen(); menuPage = 'main'; }
+  else if (d.a) { aud = +d.a; store(AKEY, M.audios[aud].lang); reopen(); menuPage = 'main'; }
+  else if (d.rate) { v.defaultPlaybackRate = v.playbackRate = +d.rate; store(RKEY, d.rate); menuPage = 'main'; }
+  else if (d.sub) pickSub(+d.sub);
+  else if (d.size) { const i = SIZES.findIndex(([x]) => x === subSize) + +d.size; subSize = SIZES[Math.max(0, Math.min(SIZES.length - 1, i))][0]; store(SIZEKEY, subSize); cueStyle(); }
+  else if (d.pos) { subPos = d.pos; store(POSKEY, subPos); fixAllCues(); }
+  else if (d.delay) { subDelay = +d.delay ? Math.round((subDelay + +d.delay) * 10) / 10 : 0; store(DELAYKEY, subDelay); fixAllCues(); }
+  renderMenu();
+  poke();
+};
 async function loadSubs() {
   try {
     const r = await fetch(`${base}/subs`);
@@ -379,12 +518,12 @@ async function loadSubs() {
     subSel = cur ? subs.findIndex((s) => s.label === cur) : -1;
     // primeira vez: liga no idioma escolhido antes
     if (subSel < 0 && wantLang) { subSel = subs.findIndex((s) => s.lang === wantLang); if (subSel >= 0) applySub(); }
-    renderCC();
+    if (!$('menu').hidden) renderMenu();
   } catch {}
 }
-$('cc').onclick = (e) => { e.stopPropagation(); renderCC(); $('ccmenu').hidden = !$('ccmenu').hidden; };
-$('ccmenu').onclick = (e) => { const b = e.target.closest('[data-sub]'); if (b) { pickSub(+b.dataset.sub); $('ccmenu').hidden = true; } };
-document.addEventListener('click', (e) => { if (!e.target.closest('#ccmenu, #cc')) $('ccmenu').hidden = true; });
+$('cc').onclick = (e) => { e.stopPropagation(); openMenu('subs'); };
+$('gear').onclick = (e) => { e.stopPropagation(); openMenu('main'); };
+document.addEventListener('click', (e) => { if (!e.target.closest('#menu, #cc, #gear')) $('menu').hidden = true; });
 loadSubs();
 setInterval(loadSubs, 15000);
 
@@ -400,6 +539,34 @@ async function goNext() {
   else location.href = '/';  // sem versão aprovada: a busca mostra as opções
 }
 $('next').onclick = goNext;
+
+// ---- qualidade automática: se o vídeo trava sem o download ser o motivo
+// (o trecho à frente já está no disco), a conversão ou a conexão não dá
+// conta: desce um degrau (720p → 480p → 360p) e reabre no ponto atual. Conta
+// como travada uma espera de mais de 2,5 s ou 3 esperas em 1 minuto, fora os
+// primeiros 5 s depois de abrir o vídeo
+let srcAt = 0, stallAt = 0, stalls = [], phase = null;
+function setSrc(u) { srcAt = performance.now(); stallAt = 0; v.src = u; }
+v.addEventListener('waiting', () => { if (!v.paused && performance.now() - srcAt > 5000) stallAt = performance.now(); });
+v.addEventListener('playing', () => {
+  if (!stallAt) return;
+  const t = performance.now(), long = t - stallAt > 2500;
+  stallAt = 0;
+  stalls = stalls.filter((x) => t - x < 60000);
+  stalls.push(t);
+  if (long || stalls.length >= 3) degrade();
+});
+// travada sem voltar a tocar (chamada a cada 2 s)
+function stuck() { if (stallAt && performance.now() - stallAt > 5000) { stallAt = 0; degrade(); } }
+function degrade() {
+  if (quality !== 'auto' || !M.height) return;
+  if (phase !== 'done' && aheadSecs() < 30) return;  // é o download: o aviso de versão mais leve cuida
+  const next = [720, 480, 360].find((h) => h < curHeight());
+  if (!next) return;
+  autoH = next;
+  stalls = [];
+  reopen();
+}
 
 // ---- o download acompanha o vídeo? Se ficar ~30 s abaixo do que o vídeo
 // consome, com pouco já baixado à frente, oferece uma versão mais leve
@@ -469,6 +636,8 @@ async function info() {
     $('release').textContent = d.release;
     have = d.have || []; paintHave();
     // começa quando o formato é conhecido (ou depois de ~20 s sem ffprobe)
+    if (d.transcode_height) T = d.transcode_height;
+    phase = d.phase;
     if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); if (d.phase === 'done') offerBetter(); }
     if (started) syncDub(d.dub);
     if (d.media && d.media.duration) duration = d.media.duration;
@@ -480,9 +649,11 @@ async function info() {
       if (d.peers != null) t += ` · ${d.peers} fontes`;
     }
     checkPace(d);
+    stuck();
     if (d.media && MODE[d.media.mode]) t += MODE[d.media.mode];
     if (d.dub && d.dub.state === 'checking') t += ' · conferindo a sincronia da dublagem';
     if (d.dub && d.dub.state === 'offset') t += ` · dublagem ressincronizada (${Math.abs(d.dub.seconds).toFixed(1).replace('.', ',')} s)`;
+    if (autoH) t += ` · qualidade automática em ${autoH}p (o vídeo travava)`;
     if (d.error) t += ` — ${d.error}`;
     $('panel').innerHTML = t + (d.jellyfin_url ? ` · <a href="${jf(d.jellyfin_url)}">Abrir no Jellyfin</a>` : '');
     const m = $('msg');

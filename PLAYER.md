@@ -52,13 +52,13 @@ descreve o que o `web/player.html` faz hoje e propõe o que entra, em fases.
 
 ## Proposta, em fases
 
-**Fase A — defeitos e base (pequena, resolve o que incomoda):**
+**Fase A — defeitos e base (pequena, resolve o que incomoda):** feita em 2026-10-02 (b2d4155).
 1. Toque simples mostra ou esconde os controles. No PC, o clique continua pausando, como no YouTube e na Netflix web. No celular, pausa só pelo botão.
 2. Botão e seta de avançar passam de 30 s para 10 s. Toque duplo: nas laterais −10/+10 s, com o total somado aparecendo no lado tocado; no centro, tela cheia.
 3. Ressincronizar ao voltar para a aba (`visibilitychange`).
 4. Barra com três cores: branco = baixado, amarelo = carregado no player (`video.buffered`, somado ao `offset` no vídeo convertido), roxo = assistido (bolinha também roxa).
 
-**Fase B — menu de configurações (usa o servidor já pronto):**
+**Fase B — menu de configurações (usa o servidor já pronto):** feita em 2026-10-02. A qualidade automática só desce (720p → 480p → 360p) e não volta a subir no mesmo vídeo; tamanho e posição da legenda valem para todos os vídeos, o atraso só para o vídeo em que foi ajustado.
 5. Botão de engrenagem com seções:
    - Qualidade: Automática (720p), Original e alturas menores que a do arquivo;
    - Áudio: faixas com idioma, título e canais;

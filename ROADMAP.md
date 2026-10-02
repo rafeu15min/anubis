@@ -15,7 +15,10 @@ gestos, controles e aparência. Escolher o que entra com base nisso.
 - Ao sair do app/aba e voltar, o áudio fica fora de sincronia com o vídeo.
 
 **Aparência:**
-- Barra de progresso amarela (hoje vermelha).
+- A barra mostra três estados, cada um com sua cor:
+  - **branco:** quanto do torrent já foi baixado (como hoje);
+  - **amarelo:** quanto da mídia já foi carregado para exibição (buffer do player);
+  - **roxo:** quanto já foi assistido (hoje vermelho).
 
 **Funções que faltam (o Jellyfin já tem várias):**
 - Escolha de qualidade/resolução do vídeo (e automática pela velocidade).

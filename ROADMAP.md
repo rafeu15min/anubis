@@ -8,6 +8,7 @@ usá-lo no lugar do Jellyfin no dia a dia, principalmente no celular.
 **Antes de codar:** pesquisar a fundo os melhores players do mercado (Netflix, YouTube, Disney+,
 Prime Video, Plex, Jellyfin, Infuse, VLC, mpv, MX Player…) e anotar o que cada um faz bem em
 gestos, controles e aparência. Escolher o que entra com base nisso.
+Feito em 2026-10-02: ver `PLAYER.md` (comparação, causas dos defeitos e fases A–D).
 
 **Defeitos relatados:**
 - Tocar na tela pausa o vídeo. O toque deveria só mostrar/esconder os controles (como nos

@@ -130,9 +130,23 @@ pub struct MediaInfo {
     pub video: Option<String>,
     pub audio: Option<String>,
     pub mode: Mode,
+    /// altura do vídeo (o menu de qualidade oferece daí para baixo)
+    pub height: Option<u32>,
+    /// faixas de áudio, na ordem do arquivo (o player escolhe por `n`)
+    pub audios: Vec<AudioTrack>,
     /// faixas de legenda em texto embutidas: (posição entre as legendas, idioma, título)
     #[serde(skip)]
     pub subs: Vec<(usize, String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioTrack {
+    /// posição entre as faixas de áudio (0:a:N)
+    pub n: usize,
+    pub lang: String,
+    pub title: String,
+    pub codec: String,
+    pub channels: u32,
 }
 
 pub struct Job {
@@ -720,7 +734,7 @@ impl Streamer {
                         Err(_) => "tempo esgotado".into(),
                     };
                     warn!("{}: sem ffprobe ({why}), tocando direto", job.info.title);
-                    MediaInfo { duration: None, video: None, audio: None, mode: Mode::Direct, subs: vec![] }
+                    MediaInfo { duration: None, video: None, audio: None, mode: Mode::Direct, height: None, audios: vec![], subs: vec![] }
                 }
             };
             info!("{}: {:?} (vídeo {:?}, áudio {:?})", job.info.title, media.mode, media.video, media.audio);
@@ -731,19 +745,26 @@ impl Streamer {
 
     /// Converte na hora a partir de `start` segundos (vídeo fragmentado em
     /// MP4, que o navegador toca enquanto chega).
-    pub fn transcode(&self, job: &Job, start: f64) -> Result<(Child, ChildStdout)> {
+    /// Vídeo convertido a partir de `start` s. `audio`: faixa de áudio (0:a:N,
+    /// padrão a primeira). `height`: altura escolhida no player (menor que a
+    /// do arquivo força a conversão do vídeo; sem escolha, o padrão do modo).
+    pub fn transcode(&self, job: &Job, start: f64, audio: Option<usize>, height: Option<u32>) -> Result<(Child, ChildStdout)> {
         let media = job.media().context("formato do vídeo ainda desconhecido")?;
         let t = &self.transcode;
         let input = self.input(job);
+        let source_h = media.height.unwrap_or(u32::MAX);
+        let encode = media.mode == Mode::Transcode || height.is_some_and(|h| h < source_h);
+        let max_h = height.map_or(t.max_height, |h| h.min(source_h));
         let mut args: Vec<String> = vec!["-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into()];
-        let vaapi = media.mode == Mode::Transcode && t.encoder == "vaapi";
+        let vaapi = encode && t.encoder == "vaapi";
         if vaapi {
             args.extend(["-vaapi_device".into(), t.device.clone()]);
         }
         args.extend(["-ss".into(), format!("{start:.3}"), "-i".into(), input.clone()]);
-        // dublagem fora de sincronia: lida à parte, deslocada. O som que vai com
-        // o vídeo no segundo T está em T + atraso na faixa da dublagem
-        let dub = job.dub_offset();
+        // dublagem fora de sincronia (sempre a primeira faixa): lida à parte,
+        // deslocada. O som que vai com o vídeo no segundo T está em T + atraso
+        let track = audio.unwrap_or(0);
+        let dub = if track == 0 { job.dub_offset() } else { None };
         let mut dub_delay = None;
         if let Some(offset) = dub {
             let at = start + offset;
@@ -752,13 +773,24 @@ impl Streamer {
             }
             args.extend(["-ss".into(), format!("{:.3}", at.max(0.0)), "-i".into(), input]);
         }
-        let audio_map = if dub.is_some() { "1:a:0" } else { "0:a:0?" };
-        args.extend(["-map", "0:v:0", "-map", audio_map, "-sn", "-dn"].map(String::from));
-        let scale = format!("scale=-2:'min({},ih)'", t.max_height);
-        match (media.mode, vaapi) {
-            (Mode::Transcode, true) => args.extend(["-vf".into(), format!("{scale},format=nv12,hwupload"), "-c:v".into(), "h264_vaapi".into(), "-b:v".into(), "5M".into(), "-g".into(), "60".into()]),
-            (Mode::Transcode, false) => args.extend(
-                ["-vf", &scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", "-g", "60"].map(String::from),
+        let audio_map = if dub.is_some() { "1:a:0".to_owned() } else { format!("0:a:{track}?") };
+        args.extend(["-map".into(), "0:v:0".into(), "-map".into(), audio_map, "-sn".into(), "-dn".into()]);
+        let scale = format!("scale=-2:'min({max_h},ih)'");
+        // teto de taxa pela altura: a qualidade menor existe para conexões lentas
+        let rate = match max_h {
+            1440.. => "12M",
+            1080.. => "8M",
+            720.. => "4M",
+            480.. => "2M",
+            _ => "1M",
+        };
+        let buf = format!("{}M", rate.trim_end_matches('M').parse::<u32>().unwrap_or(4) * 2);
+        match (encode, vaapi) {
+            (true, true) => args.extend(
+                ["-vf".into(), format!("{scale},format=nv12,hwupload"), "-c:v".into(), "h264_vaapi".into(), "-b:v".into(), rate.into(), "-maxrate".into(), rate.into(), "-bufsize".into(), buf, "-g".into(), "60".into()],
+            ),
+            (true, false) => args.extend(
+                ["-vf", &scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-maxrate", rate, "-bufsize", &buf, "-pix_fmt", "yuv420p", "-g", "60"].map(String::from),
             ),
             _ => args.extend(["-c:v", "copy"].map(String::from)),
         }
@@ -767,7 +799,8 @@ impl Streamer {
         if let Some(d) = dub_delay {
             args.extend(["-af".into(), format!("adelay=delays={}:all=1", (d * 1000.0).round())]);
         }
-        if dub.is_none() && media.audio.as_deref().is_some_and(|a| a == "aac" || a == "mp3") {
+        let codec = media.audios.get(track).map(|a| a.codec.as_str()).or(media.audio.as_deref());
+        if dub.is_none() && codec.is_some_and(|a| a == "aac" || a == "mp3") {
             args.extend(["-c:a", "copy"].map(String::from));
         } else {
             args.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"].map(String::from));
@@ -892,7 +925,20 @@ fn classify(probe: &Value, file_name: &str) -> MediaInfo {
         .filter(|(_, s)| s["codec_name"].as_str().is_some_and(|c| crate::subs::TEXT_CODECS.contains(&c)))
         .map(|(i, s)| (i, s["tags"]["language"].as_str().unwrap_or_default().to_owned(), s["tags"]["title"].as_str().unwrap_or_default().to_owned()))
         .collect();
-    MediaInfo { duration, video, audio, mode, subs }
+    let height = streams.iter().find(|s| s["codec_type"] == "video").and_then(|s| s["height"].as_u64()).map(|h| h as u32);
+    let audios = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .enumerate()
+        .map(|(n, s)| AudioTrack {
+            n,
+            lang: s["tags"]["language"].as_str().unwrap_or_default().to_owned(),
+            title: s["tags"]["title"].as_str().unwrap_or_default().to_owned(),
+            codec: s["codec_name"].as_str().unwrap_or_default().to_owned(),
+            channels: s["channels"].as_u64().unwrap_or(0) as u32,
+        })
+        .collect();
+    MediaInfo { duration, video, audio, mode, height, audios, subs }
 }
 
 impl Orchestrator {
@@ -1980,6 +2026,23 @@ mod tests {
         assert_eq!(classify(&p("h264", "aac"), "f.mkv").mode, Mode::Remux);
         assert_eq!(classify(&p("hevc", "aac"), "f.mkv").mode, Mode::Transcode);
         assert_eq!(classify(&p("h264", "aac"), "f.mp4").duration, Some(5400.5));
+    }
+
+    #[test]
+    fn height_and_audio_tracks_for_the_player_menus() {
+        // como o Loki E01: dublagem e original, com uma legenda no meio
+        let probe = json!({ "streams": [
+            { "codec_type": "video", "codec_name": "hevc", "height": 804 },
+            { "codec_type": "audio", "codec_name": "aac", "channels": 6, "tags": { "language": "por", "title": "DDP5.1 BR" } },
+            { "codec_type": "subtitle", "codec_name": "subrip" },
+            { "codec_type": "audio", "codec_name": "eac3", "channels": 6, "tags": { "language": "eng" } },
+        ] });
+        let m = classify(&probe, "f.mkv");
+        assert_eq!(m.height, Some(804));
+        let tracks: Vec<_> = m.audios.iter().map(|a| (a.n, a.lang.as_str(), a.codec.as_str(), a.channels)).collect();
+        assert_eq!(tracks, [(0, "por", "aac", 6), (1, "eng", "eac3", 6)]);
+        assert_eq!(m.audios[0].title, "DDP5.1 BR");
+        assert_eq!(classify(&json!({}), "f.mkv").height, None);
     }
 
     #[test]

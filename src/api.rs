@@ -267,6 +267,9 @@ async fn watch_info(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64
         Err(r) => return r,
     };
     let mut info = s.orch.streamer.as_ref().map(|st| st.info(&job)).unwrap_or_default();
+    // altura em que o vídeo convertido sai sem escolha no player (o menu de
+    // qualidade mostra "Automática (720p)")
+    info["transcode_height"] = json!(s.orch.streamer.as_ref().map(|st| st.transcode.max_height));
     info["title"] = json!(job.info.title);
     info["release"] = json!(job.info.release);
     info["file"] = json!(job.info.file_name);
@@ -363,17 +366,22 @@ async fn video(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, h
 struct StartAt {
     #[serde(default)]
     t: f64,
+    /// faixa de áudio (0:a:N)
+    a: Option<usize>,
+    /// altura máxima do vídeo (qualidade escolhida no player)
+    h: Option<u32>,
 }
 
 /// O vídeo convertido na hora, a partir de `t` segundos (o player pula
-/// recomeçando daqui: vídeo convertido não tem "faixa de bytes").
+/// recomeçando daqui: vídeo convertido não tem "faixa de bytes"), com a faixa
+/// de áudio `a` e a altura `h` escolhidas no player.
 async fn converted(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, Query(q): Query<StartAt>) -> Response {
     let job = match job_of(&s, kind, id).await {
         Ok(j) => j,
         Err(r) => return r,
     };
     let Some(streamer) = s.orch.streamer.as_ref() else { return error(StatusCode::NOT_FOUND, "assistir agora desligado") };
-    let (child, out) = match streamer.transcode(&job, q.t.max(0.0)) {
+    let (child, out) = match streamer.transcode(&job, q.t.max(0.0), q.a, q.h) {
         Ok(x) => x,
         Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     };

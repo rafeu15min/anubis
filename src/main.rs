@@ -29,6 +29,7 @@ mod season;
 mod services;
 mod stream;
 mod subs;
+mod uninstall;
 
 use anyhow::{Context, Result, bail};
 use orchestrator::Orchestrator;

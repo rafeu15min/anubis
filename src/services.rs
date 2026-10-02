@@ -245,6 +245,13 @@ impl Arr {
         Ok(())
     }
 
+    /// Sonarr: para de acompanhar a série (episódios novos não são buscados).
+    pub async fn unmonitor_series(&self, series_id: i64) -> Result<()> {
+        let body = json!({ "seriesIds": [series_id], "monitored": false });
+        send::<Value>(self.req(Method::PUT, "series/editor").json(&body), &format!("{} desmonitorar série", self.name)).await?;
+        Ok(())
+    }
+
     /// Desmarca o filme (senão o Radarr baixaria de novo) e apaga o arquivo.
     pub async fn delete_movie_file(&self, file_id: i64, movie_id: i64) -> Result<()> {
         let what = format!("{} desmonitorar filme", self.name);

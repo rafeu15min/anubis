@@ -71,6 +71,11 @@
     </div></div>
   </section>
   <section>
+    <h2>Gostei</h2>
+    <p class="help">O que você marcou com o polegar para cima. Conta como um favorito: o que se parece com eles aparece mais no "Para você".</p>
+    <div id="liked"><p class="help">Nada marcado.</p></div>
+  </section>
+  <section>
     <h2>Ocultos da vitrine</h2>
     <p class="help">O que você marcou como "Não quero ver". Não aparece mais na vitrine, e o que se parece com eles aparece menos no "Para você". A busca continua achando.</p>
     <div id="hidden"><p class="help">Nada oculto.</p></div>
@@ -214,6 +219,25 @@ $('#hidden').onclick = async (e) => {
   loadHidden();
 };
 loadHidden();
+
+// "gostei"
+async function loadLiked() {
+  try {
+    const list = await (await fetch('liked')).json();
+    $('#liked').innerHTML = list.length
+      ? list.slice().reverse().map((h) => `<div class="hid"><span>${escH(h.title)} <small class="help">· ${h.kind === 'movie' ? 'filme' : 'série'}, ${escH(h.at)}</small></span>
+          <button type="button" data-unlike="${h.kind}/${h.id}">Tirar</button></div>`).join('')
+      : '<p class="help">Nada marcado.</p>';
+  } catch {}
+}
+$('#liked').onclick = async (e) => {
+  const b = e.target.closest('[data-unlike]');
+  if (!b) return;
+  b.disabled = true;
+  await fetch(`liked/${b.dataset.unlike}`, { method: 'DELETE' });
+  loadLiked();
+};
+loadLiked();
 
 // o favorito da Crunchyroll: roda no crunchyroll.com, com a sessão de quem
 // está logado, e baixa o histórico de exibição (o mesmo que o site mostra)

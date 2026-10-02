@@ -72,9 +72,12 @@ struct State {
     /// "não quero ver": fora da vitrine, e o que se parece com eles desce
     #[serde(default)]
     hidden: Vec<Hidden>,
+    /// "gostei": sementes do "Para você" com peso de favorito
+    #[serde(default)]
+    liked: Vec<Hidden>,
 }
 
-/// Um título que a pessoa não quer ver.
+/// Um título marcado pela pessoa: "não quero ver" ou "gostei".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hidden {
     /// como a página o identifica (filme: id do TMDB; série: do TVDB)
@@ -644,9 +647,8 @@ impl Orchestrator {
         Ok(seeds)
     }
 
-    /// "Não quero ver": sai da vitrine e vira sinal contra (o que o TMDB
-    /// recomenda a partir dele desce, e os gêneros dele pesam menos).
-    pub async fn hide(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
+    /// Um título marcado ("gostei" ou "não quero ver"), com os gêneros do TMDB.
+    async fn mark(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
         use crate::search::Kind;
         let (media, tmdb_id) = match kind {
             Kind::Movie => (Media::Movie, id),
@@ -655,7 +657,7 @@ impl Orchestrator {
         let tmdb = self.tmdb.as_ref().context("TMDB não configurado")?;
         let path = if media == Media::Movie { "movie" } else { "tv" };
         let v = tmdb.get(&format!("{path}/{tmdb_id}?language=pt-BR")).await?;
-        let h = Hidden {
+        Ok(Hidden {
             kind,
             id,
             media,
@@ -663,10 +665,17 @@ impl Orchestrator {
             title: v["title"].as_str().or(v["name"].as_str()).unwrap_or_default().to_owned(),
             genres: v["genres"].as_array().into_iter().flatten().filter_map(|g| g["id"].as_i64()).collect(),
             at: chrono::Local::now().format("%Y-%m-%d").to_string(),
-        };
+        })
+    }
+
+    /// "Não quero ver": sai da vitrine e vira sinal contra (o que o TMDB
+    /// recomenda a partir dele desce, e os gêneros dele pesam menos).
+    pub async fn hide(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
+        let h = self.mark(kind, id).await?;
         {
             let mut st = self.external.state.lock().await;
             st.hidden.retain(|x| (x.kind, x.id) != (kind, id));
+            st.liked.retain(|x| (x.kind, x.id) != (kind, id));
             st.hidden.push(h.clone());
         }
         self.external.save().await;
@@ -684,6 +693,34 @@ impl Orchestrator {
     /// Os ocultos, do mais antigo ao mais recente.
     pub async fn hidden(&self) -> Vec<Hidden> {
         self.external.state.lock().await.hidden.clone()
+    }
+
+    /// "Gostei": vira semente do "Para você" com o peso de um favorito do
+    /// Jellyfin (o que o TMDB recomenda a partir dele sobe, e os gêneros
+    /// dele pesam mais). Sai dos ocultos, se estava lá.
+    pub async fn like(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
+        let h = self.mark(kind, id).await?;
+        {
+            let mut st = self.external.state.lock().await;
+            st.liked.retain(|x| (x.kind, x.id) != (kind, id));
+            st.hidden.retain(|x| (x.kind, x.id) != (kind, id));
+            st.liked.push(h.clone());
+        }
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+        info!("gostei: {}", h.title);
+        Ok(h)
+    }
+
+    pub async fn unlike(&self, kind: crate::search::Kind, id: i64) {
+        self.external.state.lock().await.liked.retain(|x| (x.kind, x.id) != (kind, id));
+        self.external.save().await;
+        self.for_you_cache.clear().await;
+    }
+
+    /// Os "gostei", do mais antigo ao mais recente.
+    pub async fn liked(&self) -> Vec<Hidden> {
+        self.external.state.lock().await.liked.clone()
     }
 
     /// Id do TMDB de uma série pelo do TVDB (guardado).

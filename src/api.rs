@@ -25,6 +25,7 @@
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! POST /movie/{tmdb}/subbed      — o mesmo para filmes
 //! GET /hidden · POST/DELETE /hidden/{kind}/{id} — "não quero ver" (fora da vitrine)
+//! GET /liked · POST/DELETE /liked/{kind}/{id} — "gostei" (semente do "Para você")
 //! GET  /indexers · POST /indexers/test — indexadores fora do ar · testar de novo (tira do castigo)
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
@@ -85,6 +86,8 @@ pub fn router(state: AppState) -> Router {
         .route("/history/anilist", axum::routing::put(set_anilist))
         .route("/hidden", get(|State(s): State<AppState>| async move { Json(s.orch.hidden().await) }))
         .route("/hidden/{kind}/{id}", post(hide).delete(unhide))
+        .route("/liked", get(|State(s): State<AppState>| async move { Json(s.orch.liked().await) }))
+        .route("/liked/{kind}/{id}", post(like).delete(unlike))
         .route("/history/crunchyroll", post(import_crunchyroll).delete(clear_crunchyroll).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/request", post(request))
         .route("/events", get(events))
@@ -509,6 +512,18 @@ async fn hide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) ->
 
 async fn unhide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     s.orch.unhide(kind, id).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn like(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.like(kind, id).await {
+        Ok(h) => Json(h).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn unlike(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    s.orch.unlike(kind, id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 

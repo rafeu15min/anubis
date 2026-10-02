@@ -18,6 +18,7 @@
   .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
   .i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
   .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
+  .i-up::before { content: "\f164"; } .i-down::before { content: "\f165"; }
   .i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
   .i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
@@ -50,8 +51,10 @@
   .tag.seen { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
   .tag.watching { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
   button.icon { width: 44px; min-height: 44px; padding: 0; justify-content: center; font-size: 17px; }
+  button.icon.on { background: var(--accent); color: #111; }
   /* fechar: no canto da janela, à vista mesmo rolando uma lista longa */
   dialog > .x { position: sticky; top: 0; float: right; z-index: 1; width: 40px; height: 40px; min-height: 40px; margin: -8px -8px 0 8px; padding: 0; justify-content: center; border-color: var(--line); border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 16px; }
+  #itembody { clear: both; }  /* o cartão começa abaixo do ✕ */
   dialog > .x:hover { border-color: var(--accent); color: var(--accent); background: var(--panel); }
   .msg { color: var(--muted); padding: 24px 0; }
   button.primary { background: var(--accent); color: #111; font-weight: 600; }
@@ -130,7 +133,10 @@
 <dialog id="item">
   <button id="itemclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <div id="itembody"></div>
-  <div class="row"><button id="itemhide" class="quiet">Não quero ver</button></div>
+  <div class="row">
+    <button id="itemlike" class="icon" title="Gostei (o que se parece com ele aparece mais no Para você)" aria-label="Gostei" aria-pressed="false"><i class="i i-up"></i></button>
+    <button id="itemhide" class="icon quiet" title="Não quero ver (sai da vitrine)" aria-label="Não quero ver"><i class="i i-down"></i></button>
+  </div>
 </dialog>
 <dialog id="pick">
   <button id="pickclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
@@ -602,6 +608,7 @@ function openItem(k) {
   const it = lastResults[k];
   if (!it) return;
   openKey = k;
+  likeButton();
   $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
   $('#item').showModal();
   if (it.requested) refresh(it, false);
@@ -625,6 +632,28 @@ async function checkNow(k) {
 }
 $('#itemclose').onclick = () => $('#item').close();
 // "não quero ver": sai da vitrine (e o que se parece com ele aparece menos)
+// "gostei": liga e desliga; vira semente do "Para você" (peso de favorito)
+const liked = new Set();
+fetch('liked').then((r) => r.json()).then((l) => { l.forEach((h) => liked.add(`${h.kind}:${h.id}`)); likeButton(); }).catch(() => {});
+function likeButton() {
+  const on = liked.has(openKey);
+  $('#itemlike').classList.toggle('on', on);
+  $('#itemlike').setAttribute('aria-pressed', on);
+}
+$('#itemlike').onclick = async () => {
+  const k = openKey, b = $('#itemlike');
+  if (!k) return;
+  const [kind, id] = k.split(':');
+  const on = !liked.has(k);
+  b.disabled = true;
+  try {
+    const r = await fetch(`liked/${kind}/${id}`, { method: on ? 'POST' : 'DELETE' });
+    if (!r.ok) throw new Error((await r.json()).error);
+    if (on) liked.add(k); else liked.delete(k);
+    likeButton();
+  } catch (e) { alert(`Não deu: ${e.message}`); } finally { b.disabled = false; }
+};
+
 $('#itemhide').onclick = async () => {
   const k = openKey, b = $('#itemhide');
   if (!k) return;
@@ -634,6 +663,7 @@ $('#itemhide').onclick = async () => {
     const r = await fetch(`hidden/${kind}/${id}`, { method: 'POST' });
     if (!r.ok) throw new Error((await r.json()).error);
     document.querySelectorAll(`#showcase [data-open="${k}"]`).forEach((t) => t.remove());
+    liked.delete(k);
     $('#item').close();
   } catch (e) { alert(`Não deu: ${e.message}`); } finally { b.disabled = false; }
 };

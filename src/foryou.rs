@@ -405,6 +405,14 @@ impl Orchestrator {
             }
         }
 
+        // "gostei" no Anubis: como um favorito do Jellyfin
+        for h in self.liked().await {
+            add((h.media, h.tmdb), weight(3.0, 0.0, true));
+            if !h.genres.is_empty() {
+                genres.insert((h.media, h.tmdb), h.genres);
+            }
+        }
+
         // pedidos e baixados: intenção, peso baixo (pela data em que entraram)
         let snap = self.live.arr.lock().await;
         let arr = snap.movies.iter().map(|m| (Media::Movie, m)).chain(snap.series.iter().map(|s| (Media::Tv, s)));

@@ -54,7 +54,7 @@ descreve o que o `web/player.html` faz hoje e propõe o que entra, em fases.
 
 **Fase A — defeitos e base (pequena, resolve o que incomoda):**
 1. Toque simples mostra ou esconde os controles. No PC, o clique continua pausando, como no YouTube e na Netflix web. No celular, pausa só pelo botão.
-2. Toque duplo: nas laterais −10/+10 s, com o total somado aparecendo no lado tocado; no centro, tela cheia.
+2. Botão e seta de avançar passam de 30 s para 10 s. Toque duplo: nas laterais −10/+10 s, com o total somado aparecendo no lado tocado; no centro, tela cheia.
 3. Ressincronizar ao voltar para a aba (`visibilitychange`).
 4. Barra com três cores: branco = baixado, amarelo = carregado no player (`video.buffered`, somado ao `offset` no vídeo convertido), roxo = assistido (bolinha também roxa).
 
@@ -69,7 +69,7 @@ descreve o que o `web/player.html` faz hoje e propõe o que entra, em fases.
 
 **Fase C — gestos e atalhos:**
 8. Segurar o dedo = 2× enquanto segura.
-9. Arrastar na horizontal busca (mostrando o tempo de destino). Arrastar na vertical à direita muda o volume (só Android). À esquerda escurece o vídeo.
+9. Arrastar na horizontal busca (mostrando o tempo de destino). Arrastar na vertical à direita muda o volume (só Android; brilho e iPhone ficam para o app).
 10. Bloqueio de tela.
 11. Pinça para alternar entre preencher a tela e mostrar o quadro inteiro (`object-fit`).
 12. Atalhos que faltam: `<`/`>` velocidade, 0–9 porcentagem, `,`/`.` quadro a quadro, Shift+N próximo episódio, V faixa de áudio, `+`/`−` tamanho da legenda, S pular abertura.
@@ -80,11 +80,18 @@ descreve o que o `web/player.html` faz hoje e propõe o que entra, em fases.
 15. Posição e preferências entre aparelhos. Hoje ficam no `localStorage`. Seria preciso guardar no Anubis ou usar o progresso do Jellyfin.
 16. Chromecast/AirPlay.
 
-## Decisões em aberto
+## Decisões (2026-10-02)
 
-- Avançar: hoje é +30 s; o padrão do mercado é +10 s. Ficam 10/10?
-- No PC, o clique no vídeo continua pausando?
-- Gesto de brilho escurecendo o vídeo vale a pena, ou fica só o de volume?
+- Avançar e voltar: 10 s (botões, setas e toque duplo).
+- Clique no vídeo pausa só no PC (mouse). No celular, o toque só mostra/esconde os controles.
+- Gesto vertical só para volume. Nada de brilho imitado escurecendo o vídeo.
+- O que o navegador não permite fica para o app (abaixo).
+
+## Para o app (o navegador não permite)
+
+- Brilho da tela por gesto (arrastar na vertical à esquerda).
+- Volume por gesto no iPhone (`video.volume` é só leitura no iOS).
+- Volume do sistema, em vez do volume do vídeo.
 
 ## Fontes
 

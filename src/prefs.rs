@@ -106,15 +106,18 @@ pub struct SubPrefs {
     pub skip_if_audio: bool,
 }
 
-/// Qualidade dos pedidos (além do idioma), no mesmo perfil do Radarr/Sonarr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Qualidade dos pedidos (além do idioma), no mesmo perfil do Radarr/Sonarr:
+/// a fila de qualidades aceitas, da preferida para a menos preferida, e o
+/// alvo. Os nomes são os do perfil (uma qualidade, ou um grupo como "WEB 720p").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityPrefs {
-    /// Bluray 1080p aceito e preferido, logo acima do WEB 1080p — que vira a
-    /// segunda opção e já conta como bom o bastante (não baixa de novo
-    /// sozinho; o "assistir" oferece a troca)
-    pub bluray_first: bool,
-    /// recusar gravações de cinema (só filmes: o Sonarr não tem essas qualidades)
-    pub no_cinema: Option<bool>,
+    pub queue: Vec<String>,
+    /// com um arquivo nesta qualidade (ou melhor), o Radarr/Sonarr não trocam
+    /// sozinhos por uma melhor da fila — o "assistir" oferece a troca
+    pub cutoff: String,
+    /// as que estão fora da fila e podem entrar (só leitura)
+    #[serde(default)]
+    pub others: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,10 +130,6 @@ pub struct Prefs {
     #[serde(default)]
     pub series_quality: Option<QualityPrefs>,
 }
-
-const CINEMA: [&str; 4] = ["CAM", "TELESYNC", "TELECINE", "WORKPRINT"];
-const BLURAY: &str = "Bluray-1080p";
-const WEB: [&str; 2] = ["WEBDL-1080p", "WEBRip-1080p"];
 
 /// Qualidades de um item do perfil: a própria, ou as de um grupo.
 fn names(item: &Value) -> Vec<&str> {
@@ -145,35 +144,69 @@ fn cutoff_id(item: &Value) -> Option<i64> {
     item["quality"]["id"].as_i64().or_else(|| item["id"].as_i64())
 }
 
-fn quality_prefs(profile: &Value) -> QualityPrefs {
-    let items = profile["items"].as_array().cloned().unwrap_or_default();
-    let allowed = |q: &str| items.iter().any(|i| names(i).contains(&q) && i["allowed"].as_bool() == Some(true));
-    let has_cinema = items.iter().any(|i| names(i).iter().any(|n| CINEMA.contains(n)));
-    QualityPrefs { bluray_first: allowed(BLURAY), no_cinema: has_cinema.then(|| !CINEMA.iter().any(|c| allowed(c))) }
+/// Nome de um item do perfil: o da qualidade ou o do grupo.
+fn item_name(item: &Value) -> &str {
+    item["quality"]["name"].as_str().or(item["name"].as_str()).unwrap_or_default()
 }
 
-/// Aplica as escolhas no perfil (a lista vai da pior para a melhor qualidade).
-fn apply_quality(profile: &mut Value, q: &QualityPrefs) -> Result<()> {
+/// A fila de um perfil: as aceitas, da melhor para a pior (o perfil guarda
+/// da pior para a melhor). "Unknown" nunca é oferecida.
+pub(crate) fn queue_of(profile: &Value) -> Vec<String> {
+    let items = profile["items"].as_array().cloned().unwrap_or_default();
+    items.iter().rev().filter(|i| i["allowed"] == true).map(|i| item_name(i).to_owned()).collect()
+}
+
+/// Posição de uma qualidade (ex. "WEBDL-1080p") na fila do perfil — dentro
+/// de um grupo conta a posição do grupo. `None`: fora da fila.
+pub(crate) fn rank_in(profile: &Value, quality: &str) -> Option<usize> {
+    let items = profile["items"].as_array()?;
+    items.iter().rev().filter(|i| i["allowed"] == true).position(|i| names(i).contains(&quality))
+}
+
+/// Posição do alvo na fila.
+pub(crate) fn cutoff_rank(profile: &Value) -> Option<usize> {
+    let cutoff = profile["cutoff"].as_i64()?;
+    let items = profile["items"].as_array()?;
+    items.iter().rev().filter(|i| i["allowed"] == true).position(|i| cutoff_id(i) == Some(cutoff))
+}
+
+fn quality_prefs(profile: &Value) -> QualityPrefs {
+    let items = profile["items"].as_array().cloned().unwrap_or_default();
     let cutoff = profile["cutoff"].as_i64();
+    QualityPrefs {
+        queue: queue_of(profile),
+        cutoff: items.iter().find(|i| cutoff_id(i) == cutoff).map(|i| item_name(i).to_owned()).unwrap_or_default(),
+        others: items.iter().rev().filter(|i| i["allowed"] != true && item_name(i) != "Unknown").map(|i| item_name(i).to_owned()).collect(),
+    }
+}
+
+/// Aplica a fila no perfil: a ordem (o perfil vai da pior para a melhor; o
+/// que está fora da fila fica abaixo de tudo, na ordem de antes), quais são
+/// aceitas e o alvo.
+fn apply_quality(profile: &mut Value, q: &QualityPrefs) -> Result<()> {
+    if q.queue.is_empty() {
+        bail!("a fila de qualidades não pode ficar vazia");
+    }
+    if !q.queue.contains(&q.cutoff) {
+        bail!("o alvo ({}) precisa estar na fila", q.cutoff);
+    }
     let items = profile["items"].as_array_mut().context("perfil sem qualidades")?;
-    let pos = items.iter().position(|i| i["quality"]["name"] == BLURAY).context("Bluray 1080p está num grupo do perfil — separe no Radarr/Sonarr")?;
-    let mut bluray = items.remove(pos);
-    bluray["allowed"] = json!(q.bluray_first);
-    // primeira opção: logo acima da última entrada WEB 1080p
-    let web = items.iter().rposition(|i| names(i).iter().any(|n| WEB.contains(n))).context("perfil sem WEB 1080p")?;
-    let web_dl = items.iter().find(|i| names(i).contains(&WEB[0])).and_then(cutoff_id);
-    let bluray_id = cutoff_id(&bluray);
-    items.insert(web + 1, bluray);
-    if let Some(no) = q.no_cinema {
-        for i in items.iter_mut().filter(|i| names(i).iter().any(|n| CINEMA.contains(n))) {
-            i["allowed"] = json!(!no);
-        }
+    // numa cópia: com erro, o perfil fica como estava
+    let mut rest = items.clone();
+    let mut queue = Vec::new();
+    for name in q.queue.iter().rev() {
+        let pos = rest.iter().position(|i| item_name(i) == name).with_context(|| format!("qualidade \"{name}\" não existe neste perfil (ou repetida)"))?;
+        let mut it = rest.remove(pos);
+        it["allowed"] = json!(true);
+        queue.push(it);
     }
-    // alvo no WEB: um WEB baixado já basta (a troca pelo Bluray é oferecida no
-    // "assistir", não feita sozinha). Um alvo escolhido à mão fica como está.
-    if cutoff == bluray_id {
-        profile["cutoff"] = json!(web_dl);
+    for it in rest.iter_mut() {
+        it["allowed"] = json!(false);
     }
+    let cutoff = queue.iter().find(|i| item_name(i) == q.cutoff).and_then(cutoff_id).context("alvo sem id")?;
+    rest.extend(queue);
+    *items = rest;
+    profile["cutoff"] = json!(cutoff);
     Ok(())
 }
 
@@ -389,26 +422,42 @@ mod tests {
     }
 
     #[test]
-    fn bluray_becomes_first_option_and_cinema_is_refused() {
-        // Radarr "Any" (pior → melhor), alvo WEBDL-1080p; Bluray recusado e abaixo do WEB
-        let mut radarr = json!({ "cutoff": 3, "items": [q(25, "CAM", true), q(9, "HDTV-1080p", true), q(7, "Bluray-1080p", false), q(15, "WEBRip-1080p", true), q(3, "WEBDL-1080p", true), q(30, "Remux-1080p", false)] });
-        assert_eq!(quality_prefs(&radarr), QualityPrefs { bluray_first: false, no_cinema: Some(false) });
-        let on = QualityPrefs { bluray_first: true, no_cinema: Some(true) };
-        apply_quality(&mut radarr, &on).unwrap();
-        assert_eq!(order(&radarr), ["CAM✗", "HDTV-1080p", "WEBRip-1080p", "WEBDL-1080p", "Bluray-1080p", "Remux-1080p✗"]);
-        // alvo continua no WEB: um WEB baixado não é trocado sozinho
-        assert_eq!(radarr["cutoff"], 3);
-        assert_eq!(quality_prefs(&radarr), on);
-        apply_quality(&mut radarr, &QualityPrefs { bluray_first: false, no_cinema: Some(false) }).unwrap();
-        assert_eq!(order(&radarr)[0], "CAM");
-        assert_eq!(order(&radarr)[4], "Bluray-1080p✗");
+    fn quality_queue_reads_and_writes_the_profile() {
+        // Radarr "Any" (pior → melhor), alvo WEBDL-1080p
+        let web720 = json!({ "id": 1001, "name": "WEB 720p", "allowed": true, "items": [q(5, "WEBDL-720p", true), q(14, "WEBRip-720p", true)] });
+        let mut p = json!({ "cutoff": 3, "items": [q(0, "Unknown", false), q(25, "CAM", false), web720, q(15, "WEBRip-1080p", true), q(3, "WEBDL-1080p", true), q(7, "Bluray-1080p", true), q(19, "Bluray-2160p", false)] });
+        let r = quality_prefs(&p);
+        assert_eq!(r.queue, ["Bluray-1080p", "WEBDL-1080p", "WEBRip-1080p", "WEB 720p"]);
+        assert_eq!(r.cutoff, "WEBDL-1080p");
+        assert_eq!(r.others, ["Bluray-2160p", "CAM"], "Unknown nunca é oferecida");
+        // 4K entra no topo, WEBRip sai, o alvo vai para o Bluray 1080p
+        let want = QualityPrefs { queue: vec!["Bluray-2160p".into(), "Bluray-1080p".into(), "WEBDL-1080p".into(), "WEB 720p".into()], cutoff: "Bluray-1080p".into(), others: vec![] };
+        apply_quality(&mut p, &want).unwrap();
+        assert_eq!(order(&p), ["Unknown✗", "CAM✗", "WEBRip-1080p✗", "WEBDL-720p+WEBRip-720p", "WEBDL-1080p", "Bluray-1080p", "Bluray-2160p"]);
+        assert_eq!(p["cutoff"], 7);
+        let back = quality_prefs(&p);
+        assert_eq!((back.queue, back.cutoff), (want.queue.clone(), want.cutoff.clone()));
+        // posições na fila (qualidade dentro de grupo conta o grupo)
+        assert_eq!(rank_in(&p, "Bluray-2160p"), Some(0));
+        assert_eq!(rank_in(&p, "WEBRip-720p"), Some(3));
+        assert_eq!(rank_in(&p, "WEBRip-1080p"), None);
+        assert_eq!(cutoff_rank(&p), Some(1));
+        // o perfil continua com todas as qualidades (o Radarr exige)
+        assert_eq!(p["items"].as_array().unwrap().len(), 7);
+    }
 
-        // Sonarr: Bluray já estava acima do WEB; sem qualidades de cinema
-        let mut sonarr = json!({ "cutoff": 3, "items": [q(6, "Bluray-720p", true), q(15, "WEBRip-1080p", true), q(3, "WEBDL-1080p", true), q(7, "Bluray-1080p", false), q(20, "Bluray-1080p Remux", false)] });
-        assert_eq!(quality_prefs(&sonarr).no_cinema, None);
-        apply_quality(&mut sonarr, &QualityPrefs { bluray_first: true, no_cinema: None }).unwrap();
-        assert_eq!(order(&sonarr), ["Bluray-720p", "WEBRip-1080p", "WEBDL-1080p", "Bluray-1080p", "Bluray-1080p Remux✗"]);
-        assert_eq!(sonarr["cutoff"], 3);
+    #[test]
+    fn quality_queue_refuses_bad_input() {
+        let mut p = json!({ "cutoff": 3, "items": [q(3, "WEBDL-1080p", true), q(7, "Bluray-1080p", true)] });
+        let bad = |queue: &[&str], cutoff: &str| QualityPrefs { queue: queue.iter().map(|s| s.to_string()).collect(), cutoff: cutoff.into(), others: vec![] };
+        assert!(apply_quality(&mut p.clone(), &bad(&[], "WEBDL-1080p")).is_err());
+        assert!(apply_quality(&mut p.clone(), &bad(&["Bluray-1080p"], "WEBDL-1080p")).is_err(), "alvo fora da fila");
+        assert!(apply_quality(&mut p.clone(), &bad(&["Remux-1080p"], "Remux-1080p")).is_err(), "qualidade inexistente");
+        assert!(apply_quality(&mut p.clone(), &bad(&["Bluray-1080p", "Bluray-1080p"], "Bluray-1080p")).is_err(), "repetida");
+        // erro não estraga o perfil
+        let before = p.clone();
+        assert!(apply_quality(&mut p, &bad(&["Bluray-1080p", "Remux-1080p"], "Bluray-1080p")).is_err());
+        assert_eq!(p, before);
     }
 
     #[test]
@@ -441,17 +490,4 @@ mod tests {
         assert_eq!(rule_in(&old(0, 0), &formats), AudioRule::Any);
     }
 
-    #[test]
-    fn works_with_the_web_group_and_never_targets_bluray() {
-        let group = json!({ "id": 1002, "name": "WEB 1080p", "allowed": true, "items": [q(3, "WEBDL-1080p", true), q(15, "WEBRip-1080p", true)] });
-        let mut p = json!({ "cutoff": 7, "items": [q(9, "HDTV-1080p", true), q(7, "Bluray-1080p", true), group] });
-        apply_quality(&mut p, &QualityPrefs { bluray_first: true, no_cinema: None }).unwrap();
-        assert_eq!(order(&p), ["HDTV-1080p", "WEBDL-1080p+WEBRip-1080p", "Bluray-1080p"]);
-        // alvo que estava no Bluray vai para o WEB (o grupo)
-        assert_eq!(p["cutoff"], 1002);
-        // alvo escolhido à mão (Remux) não muda
-        let mut p = json!({ "cutoff": 30, "items": [q(7, "Bluray-1080p", false), q(3, "WEBDL-1080p", true), q(30, "Remux-1080p", true)] });
-        apply_quality(&mut p, &QualityPrefs { bluray_first: true, no_cinema: None }).unwrap();
-        assert_eq!(p["cutoff"], 30);
-    }
 }

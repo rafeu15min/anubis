@@ -345,6 +345,8 @@ impl Orchestrator {
     #[allow(clippy::type_complexity)]
     async fn seeds(&self) -> Result<(HashMap<(Media, i64), f64>, HashMap<(Media, i64), Vec<i64>>)> {
         let mut genres = HashMap::new();
+        // favoritos no Jellyfin (o "gostei" do Anubis não soma de novo)
+        let mut favorites: HashSet<(Media, i64)> = HashSet::new();
         let mut seeds: HashMap<(Media, i64), f64> = HashMap::new();
         let mut add = |k: (Media, i64), w: f64| *seeds.entry(k).or_insert(0.0) += w;
 
@@ -363,6 +365,7 @@ impl Orchestrator {
             let u = &it["UserData"];
             let days = days_since(u["LastPlayedDate"].as_str());
             if u["IsFavorite"] == true {
+                favorites.insert((media, tmdb));
                 add((media, tmdb), weight(3.0, days, true));
             }
             if media == Media::Movie {
@@ -405,9 +408,12 @@ impl Orchestrator {
             }
         }
 
-        // "gostei" no Anubis: como um favorito do Jellyfin
-        for h in self.liked().await {
-            add((h.media, h.tmdb), weight(3.0, 0.0, true));
+        // "gostei" no Anubis: como um favorito do Jellyfin (o que já é
+        // favorito lá contou acima; o "gostei" marca o favorito também)
+        for h in self.liked_marks().await {
+            if !favorites.contains(&(h.media, h.tmdb)) {
+                add((h.media, h.tmdb), weight(3.0, 0.0, true));
+            }
             if !h.genres.is_empty() {
                 genres.insert((h.media, h.tmdb), h.genres);
             }

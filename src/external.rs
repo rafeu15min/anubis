@@ -77,6 +77,29 @@ struct State {
     liked: Vec<Hidden>,
 }
 
+/// Um "gostei" na página: marcado no Anubis, favorito no Jellyfin, ou os dois.
+#[derive(Debug, Clone, Serialize)]
+pub struct Liked {
+    pub kind: crate::search::Kind,
+    pub id: i64,
+    pub title: String,
+    /// quando foi marcado no Anubis
+    pub at: Option<String>,
+    pub anubis: bool,
+    pub jellyfin: bool,
+}
+
+/// Tipo e id da página de um item do Jellyfin (filme: TMDB; série: TVDB).
+fn page_id(item: &Value) -> Option<(crate::search::Kind, i64, String)> {
+    let (kind, key) = match item["Type"].as_str()? {
+        "Movie" => (crate::search::Kind::Movie, "Tmdb"),
+        "Series" => (crate::search::Kind::Series, "Tvdb"),
+        _ => return None,
+    };
+    let id = item["ProviderIds"][key].as_str()?.parse().ok()?;
+    Some((kind, id, item["Name"].as_str().unwrap_or_default().to_owned()))
+}
+
 /// Um título marcado pela pessoa: "não quero ver" ou "gostei".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hidden {
@@ -672,6 +695,8 @@ impl Orchestrator {
     /// recomenda a partir dele desce, e os gêneros dele pesam menos).
     pub async fn hide(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
         let h = self.mark(kind, id).await?;
+        // não é mais favorito (no Anubis, abaixo, e no Jellyfin)
+        self.jellyfin_favorite(kind, id, false).await;
         {
             let mut st = self.external.state.lock().await;
             st.hidden.retain(|x| (x.kind, x.id) != (kind, id));
@@ -697,7 +722,8 @@ impl Orchestrator {
 
     /// "Gostei": vira semente do "Para você" com o peso de um favorito do
     /// Jellyfin (o que o TMDB recomenda a partir dele sobe, e os gêneros
-    /// dele pesam mais). Sai dos ocultos, se estava lá.
+    /// dele pesam mais). Sai dos ocultos, se estava lá. No Jellyfin, vira
+    /// favorito (se ele tem o título).
     pub async fn like(&self, kind: crate::search::Kind, id: i64) -> Result<Hidden> {
         let h = self.mark(kind, id).await?;
         {
@@ -708,19 +734,70 @@ impl Orchestrator {
         }
         self.external.save().await;
         self.for_you_cache.clear().await;
+        self.jellyfin_favorite(kind, id, true).await;
         info!("gostei: {}", h.title);
         Ok(h)
     }
 
+    /// Tira o "gostei" do Anubis e o favorito do Jellyfin.
     pub async fn unlike(&self, kind: crate::search::Kind, id: i64) {
         self.external.state.lock().await.liked.retain(|x| (x.kind, x.id) != (kind, id));
         self.external.save().await;
         self.for_you_cache.clear().await;
+        self.jellyfin_favorite(kind, id, false).await;
     }
 
-    /// Os "gostei", do mais antigo ao mais recente.
-    pub async fn liked(&self) -> Vec<Hidden> {
+    /// Os "gostei" do Anubis (com gêneros, para o "Para você").
+    pub async fn liked_marks(&self) -> Vec<Hidden> {
         self.external.state.lock().await.liked.clone()
+    }
+
+    /// Os "gostei" da página: os do Anubis e os favoritos do Jellyfin, juntos.
+    pub async fn liked(&self) -> Vec<Liked> {
+        let mut out: Vec<Liked> = self
+            .liked_marks()
+            .await
+            .into_iter()
+            .map(|h| Liked { kind: h.kind, id: h.id, title: h.title, at: Some(h.at), anubis: true, jellyfin: false })
+            .collect();
+        match self.jellyfin_favorites().await {
+            Ok(favs) => {
+                for (kind, id, title) in favs {
+                    match out.iter_mut().find(|l| (l.kind, l.id) == (kind, id)) {
+                        Some(l) => l.jellyfin = true,
+                        None => out.push(Liked { kind, id, title, at: None, anubis: false, jellyfin: true }),
+                    }
+                }
+            }
+            Err(e) => warn!("favoritos do Jellyfin: {e:#}"),
+        }
+        out
+    }
+
+    /// Filmes e séries que o usuário marcou como favorito no Jellyfin, pelo id
+    /// da página (filme: TMDB; série: TVDB).
+    async fn jellyfin_favorites(&self) -> Result<Vec<(crate::search::Kind, i64, String)>> {
+        let user = self.jellyfin_user().await?;
+        let v = self.jellyfin.get_json(&format!("Users/{user}/Items?Recursive=true&IncludeItemTypes=Movie,Series&Filters=IsFavorite&Fields=ProviderIds")).await?;
+        Ok(v["Items"].as_array().into_iter().flatten().filter_map(page_id).collect())
+    }
+
+    /// Liga ou desliga o favorito do título no Jellyfin (achado pelo id do
+    /// TMDB/TVDB). Fora do Jellyfin ou com erro, só registra no log: o
+    /// "gostei" do Anubis vale de qualquer jeito.
+    async fn jellyfin_favorite(&self, kind: crate::search::Kind, id: i64, on: bool) {
+        let res = async {
+            let user = self.jellyfin_user().await?;
+            let jf_kind = if kind == crate::search::Kind::Movie { "Movie" } else { "Series" };
+            let v = self.jellyfin.get_json(&format!("Users/{user}/Items?Recursive=true&IncludeItemTypes={jf_kind}&Fields=ProviderIds")).await?;
+            let Some(item) = v["Items"].as_array().into_iter().flatten().find(|i| page_id(i).is_some_and(|(k, x, _)| (k, x) == (kind, id))) else {
+                return Ok(());
+            };
+            self.jellyfin.set_favorite(item["Id"].as_str().context("item sem id")?, &user, on).await
+        };
+        if let Err(e) = res.await {
+            warn!("favorito no Jellyfin ({kind:?} {id}): {e:#}");
+        }
     }
 
     /// Id do TMDB de uma série pelo do TVDB (guardado).

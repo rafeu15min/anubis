@@ -768,7 +768,7 @@ async function offerBetter() {
   let list = [];
   try { const r = await fetch(`${base}/better`); if (r.ok) list = await r.json(); } catch {}
   if (!list.length || !$('slow').hidden) return;
-  $('slow').innerHTML = '<p>Há uma versão melhor desta (Bluray). A troca baixa a nova (dá para continuar assistindo enquanto baixa) e ela substitui a atual na biblioteca.</p>'
+  $('slow').innerHTML = `<p>Há uma versão melhor desta, mais acima na sua fila de qualidade (${list[0].quality.replace('-', ' ')}). A troca baixa a nova (dá para continuar assistindo enquanto baixa) e ela substitui a atual na biblioteca.</p>`
     + list.slice(0, 3).map((c) => `<button data-guid="${c.guid.replace(/"/g, '&quot;')}">Trocar por ${c.quality} · ${mb(c.size)} · ${c.seeders} fontes<br><small>${c.title.replace(/</g, '&lt;')}</small></button>`).join('')
     + '<button data-keep>Continuar com esta</button>';
   $('slow').hidden = false;

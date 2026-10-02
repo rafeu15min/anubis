@@ -1304,8 +1304,9 @@ impl Orchestrator {
     /// Versões mais leves que a que está baixando (o player oferece quando o
     /// download não acompanha): menores, com fontes suficientes, aceitas (ou
     /// recusadas só porque já existe arquivo) e dubladas se a atual é dublada.
-    /// Tocando da biblioteca em segunda opção (WEB 1080p): as versões na
-    /// primeira (Bluray 1080p) com fontes — o player oferece a troca.
+    /// Tocando da biblioteca numa qualidade que já atingiu o alvo da fila
+    /// (Preferências → Qualidade), o Radarr/Sonarr não trocam sozinhos: as
+    /// versões mais acima na fila, com fontes — o player oferece a troca.
     pub async fn better(&self, job: &Job) -> Result<Vec<Candidate>> {
         if job.handle().is_some() {
             return Ok(vec![]);
@@ -1319,10 +1320,12 @@ impl Orchestrator {
             }
         };
         let lib = Library::from(&file)?;
-        if !SECOND_OPTION.contains(&lib.quality.as_str()) {
-            return Ok(vec![]);
-        }
-        Ok(better_than(&lib, &self.releases_of(job.info.kind, job.info.arr_id).await?))
+        let (arr, name) = match job.info.kind {
+            Kind::Movie => (self.radarr.as_ref(), self.cfg.radarr.as_ref().map(|c| c.quality_profile.clone())),
+            _ => (self.sonarr.as_ref(), self.cfg.sonarr.as_ref().map(|c| c.quality_profile.clone())),
+        };
+        let profile = Orchestrator::profile(arr.context("Radarr/Sonarr não configurado")?, &name.unwrap_or_default()).await?;
+        Ok(better_than(&lib, &self.releases_of(job.info.kind, job.info.arr_id).await?, &profile))
     }
 
     pub async fn lighter(&self, job: &Job) -> Result<Vec<Candidate>> {
@@ -1666,29 +1669,30 @@ impl Library {
     }
 }
 
-/// Segunda opção de qualidade (Preferências → Qualidade: Bluray primeiro)...
-const SECOND_OPTION: [&str; 2] = ["WEBDL-1080p", "WEBRip-1080p"];
-/// ...e a primeira, que o "assistir" oferece em troca
-const FIRST_OPTION: &str = "Bluray-1080p";
-
 /// Fontes a partir das quais uma versão costuma tocar enquanto baixa sem
 /// travar; abaixo disso, uma versão com fontes suficientes vem antes.
 const ENOUGH_SEEDERS: i64 = 5;
 
-/// Versões na primeira opção, com fontes suficientes, que só foram recusadas
-/// porque já existe arquivo (o WEB conta como bom o bastante, então o
-/// Radarr/Sonarr não trocam sozinhos). Dublado não é trocado por não dublado.
-fn better_than(lib: &Library, list: &[Candidate]) -> Vec<Candidate> {
-    if !SECOND_OPTION.contains(&lib.quality.as_str()) {
+/// Versões mais acima na fila do perfil que o arquivo da biblioteca, com
+/// fontes suficientes, que só foram recusadas porque já existe arquivo. Só
+/// quando o arquivo já atingiu o alvo: abaixo dele, o Radarr/Sonarr trocam
+/// sozinhos. Dublado não é trocado por não dublado; as melhores primeiro.
+fn better_than(lib: &Library, list: &[Candidate], profile: &Value) -> Vec<Candidate> {
+    let (Some(have), Some(cutoff)) = (crate::prefs::rank_in(profile, &lib.quality), crate::prefs::cutoff_rank(profile)) else { return vec![] };
+    if have > cutoff {
         return vec![];
     }
-    list.iter()
-        .filter(|c| c.quality == FIRST_OPTION && c.seeders >= ENOUGH_SEEDERS)
+    let rank = |c: &Candidate| crate::prefs::rank_in(profile, &c.quality);
+    let mut out: Vec<Candidate> = list
+        .iter()
+        .filter(|c| rank(c).is_some_and(|r| r < have) && c.seeders >= ENOUGH_SEEDERS)
         .filter(|c| !c.rejected || c.reasons.iter().all(|r| r.starts_with("Existing file")))
         .filter(|c| c.portuguese() || !lib.portuguese)
-        .take(5)
         .cloned()
-        .collect()
+        .collect();
+    out.sort_by_key(|c| rank(c));
+    out.truncate(5);
+    out
 }
 
 /// Espera o download terminar, importa e, quando ninguém assiste, entrega o
@@ -2033,11 +2037,14 @@ mod tests {
     }
 
     #[test]
-    fn offers_bluray_only_when_the_existing_file_is_the_only_obstacle() {
+    fn offers_what_is_above_in_the_queue_only_when_the_existing_file_is_the_only_obstacle() {
         let rel = |title: &str, quality: &str, lang: &str, seeders: i64, why: &[&str]| {
             json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": seeders, "rejected": !why.is_empty(), "rejections": why,
                     "releaseWeight": 1, "languages": [{ "name": lang }], "quality": { "quality": { "name": quality } } })
         };
+        let q = |id: i64, name: &str, allowed: bool| json!({ "quality": { "id": id, "name": name }, "items": [], "allowed": allowed });
+        // fila (melhor primeiro): Bluray 4K, Bluray 1080p, WEB-DL 1080p (alvo), HDTV 1080p; Remux fora
+        let profile = json!({ "cutoff": 3, "items": [q(9, "HDTV-1080p", true), q(3, "WEBDL-1080p", true), q(7, "Bluray-1080p", true), q(30, "Remux-1080p", false), q(19, "Bluray-2160p", true)] });
         let cut = "Existing file on disk meets quality cutoff: WEBDL-1080p";
         let list = candidates(vec![
             rel("BD-DUB", "Bluray-1080p", "Portuguese (Brazil)", 20, &[cut]),
@@ -2045,16 +2052,21 @@ mod tests {
             rel("BD-POUCAS", "Bluray-1080p", "Portuguese (Brazil)", 2, &[cut]),
             rel("BD-SEM-CF", "Bluray-1080p", "Portuguese (Brazil)", 20, &[cut, "Custom Formats have score 0 below Movie's profile minimum 100"]),
             rel("WEB-DUB", "WEBDL-1080p", "Portuguese (Brazil)", 20, &[cut]),
+            rel("REMUX-DUB", "Remux-1080p", "Portuguese (Brazil)", 20, &[cut]),
+            rel("4K-DUB", "Bluray-2160p", "Portuguese (Brazil)", 20, &[cut]),
         ]);
         let dubbed = Library { path: String::new(), file_id: 1, quality: "WEBDL-1080p".into(), portuguese: true };
         let titles = |v: Vec<Candidate>| v.into_iter().map(|c| c.title).collect::<Vec<_>>();
-        // dublado não vira inglês; poucas fontes ou outra recusa tiram da lista; só Bluray
-        assert_eq!(titles(better_than(&dubbed, &list)), ["BD-DUB"]);
+        // dublado não vira inglês; poucas fontes, outra recusa ou fora da fila saem; o topo da fila primeiro
+        assert_eq!(titles(better_than(&dubbed, &list, &profile)), ["4K-DUB", "BD-DUB"]);
         let english = Library { portuguese: false, ..dubbed };
-        assert_eq!(titles(better_than(&english, &list)), ["BD-DUB", "BD-EN"]);
-        // já é Bluray (ou outra qualidade): nada a oferecer
+        assert_eq!(titles(better_than(&english, &list, &profile)), ["4K-DUB", "BD-DUB", "BD-EN"]);
+        // em Bluray 1080p: só o 4K está acima
         let bluray = Library { path: String::new(), file_id: 1, quality: "Bluray-1080p".into(), portuguese: true };
-        assert!(better_than(&bluray, &list).is_empty());
+        assert_eq!(titles(better_than(&bluray, &list, &profile)), ["4K-DUB"]);
+        // abaixo do alvo (HDTV): o Radarr troca sozinho, nada a oferecer
+        let hdtv = Library { path: String::new(), file_id: 1, quality: "HDTV-1080p".into(), portuguese: true };
+        assert!(better_than(&hdtv, &list, &profile).is_empty());
     }
 
     #[test]

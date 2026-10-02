@@ -655,6 +655,13 @@ impl Jellyfin {
         self.get_json(&format!("UserItems/{item}/UserData?userId={user}")).await
     }
 
+    /// Marca (ou desmarca) `item` como favorito de `user`.
+    pub async fn set_favorite(&self, item: &str, user: &str, on: bool) -> Result<()> {
+        let method = if on { Method::POST } else { Method::DELETE };
+        send::<Value>(self.req(method, &format!("UserFavoriteItems/{item}?userId={user}")), "Jellyfin favorito").await?;
+        Ok(())
+    }
+
     /// Grava o progresso de `user` em `item` (só os campos enviados mudam).
     pub async fn set_user_data(&self, item: &str, user: &str, data: &Value) -> Result<()> {
         send::<Value>(self.req(Method::POST, &format!("UserItems/{item}/UserData?userId={user}")).json(data), "Jellyfin gravar progresso").await?;

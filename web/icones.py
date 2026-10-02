@@ -25,6 +25,12 @@ ICONES = {
     'fa-thumbs_down': 0xF165,
     'fa-heart': 0xF004,
     'fa-trash': 0xF1F8,
+    'fa-arrow_up': 0xF062,
+    'fa-arrow_down': 0xF063,
+    'fa-plus': 0xF067,
+    'fa-arrow_left': 0xF060,
+    'fa-bullseye': 0xF140,
+    'fa-upload': 0xF093,
     # fatia do círculo = quanto já foi assistido (1/8 a 8/8)
     **{f'md-circle_slice_{n}': 0xF0A9E + n - 1 for n in range(1, 9)},
 }

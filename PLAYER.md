@@ -67,7 +67,7 @@ descreve o que o `web/player.html` faz hoje e propõe o que entra, em fases.
 6. Lembrar escolhas no aparelho: qualidade, idioma do áudio, tamanho da legenda e velocidade.
 7. Qualidade automática pela velocidade do stream (ver limites acima).
 
-**Fase C — gestos e atalhos:**
+**Fase C — gestos e atalhos:** feita em 2026-10-02. Quadro a quadro só no vídeo sem conversão (o convertido chega como um fluxo só). O cadeado de desbloquear fica embaixo: no alto, no centro, o Vivaldi põe o botão de imagem na imagem por cima do vídeo. Pular abertura (S) espera a Fase D.
 8. Segurar o dedo = 2× enquanto segura.
 9. Arrastar na horizontal busca (mostrando o tempo de destino). Arrastar na vertical à direita muda o volume (só Android; brilho e iPhone ficam para o app).
 10. Bloqueio de tela.

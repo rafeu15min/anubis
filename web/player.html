@@ -10,7 +10,8 @@
   *::-webkit-scrollbar { display: none; }
   :root { --played: #a855f7; --buf: rgba(250,204,21,.9); --have: rgba(255,255,255,.55); --track: rgba(255,255,255,.18); --text: #f2f2f2; --muted: rgba(255,255,255,.7); }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: #000; color: var(--text); font: 15px/1.4 system-ui, sans-serif; overflow: hidden; touch-action: manipulation; }
+  /* toque: os gestos do player (arrastar, segurar, pinça) no lugar de rolar e dar zoom na página */
+  html, body { margin: 0; height: 100%; background: #000; color: var(--text); font: 15px/1.4 system-ui, sans-serif; overflow: hidden; touch-action: none; -webkit-touch-callout: none; user-select: none; }
   video { position: fixed; inset: 0; width: 100%; height: 100%; background: #000; }
   .osd { position: fixed; left: 0; right: 0; transition: opacity .25s; }
   .hidden .osd, .hidden .panel { opacity: 0; pointer-events: none; }
@@ -64,6 +65,16 @@
   .hint { position: fixed; top: 50%; transform: translateY(-50%); padding: 10px 18px; border-radius: 24px; background: rgba(0,0,0,.55); font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .hint.l { left: 10%; opacity: 1; }
   .hint.r { right: 10%; opacity: 1; }
+  /* c: em cima (2× enquanto segura); m: no meio (arrasto, volume, atalhos) */
+  .hint.c { left: 50%; top: 14%; transform: translateX(-50%); opacity: 1; }
+  .hint.m { left: 50%; transform: translate(-50%, -50%); opacity: 1; }
+  /* tela bloqueada: só o cadeado, que aparece num toque. Embaixo: no alto,
+     no centro, o Vivaldi põe o botão de imagem na imagem por cima do vídeo */
+  .unlock { display: none; position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); z-index: 7; transition: opacity .25s; }
+  .locked .unlock { display: inline-flex; }
+  .locked.hidden .unlock { opacity: 0; pointer-events: none; }
+  .locked .osd, .locked .panel, .locked .menu, .locked button.next, .locked .slow { display: none !important; }
+  @media (hover: hover) and (pointer: fine) { #lock { display: none; } }
   .msg { max-width: 520px; margin: 0 20px; padding: 18px 20px; border-radius: 12px; background: rgba(20,20,20,.9); text-align: center; pointer-events: auto; display: none; }
   .msg.on { display: block; }
   .slow { position: fixed; left: 50%; top: 80px; transform: translateX(-50%); width: min(520px, calc(100vw - 32px)); padding: 14px 16px; border-radius: 12px; background: rgba(20,20,20,.94); z-index: 6; font-size: 14px; }
@@ -79,8 +90,10 @@
 
 <div class="osd top">
   <button id="back" title="Voltar à busca"><svg viewBox="0 0 24 24"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg></button>
-  <div style="min-width:0"><h1 id="title">…</h1><small id="release"></small></div>
+  <div style="min-width:0;flex:1"><h1 id="title">…</h1><small id="release"></small></div>
+  <button id="lock" title="Bloquear a tela (só o cadeado responde)"><svg viewBox="0 0 24 24"><path d="M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z"/></svg></button>
 </div>
+<button class="unlock" id="unlock" title="Desbloquear"><svg viewBox="0 0 24 24"><path d="M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z"/></svg></button>
 
 <div class="panel" id="panel">Preparando…</div>
 <div class="menu" id="menu" hidden></div>
@@ -273,7 +286,8 @@ v.addEventListener('ended', () => {
 // ---- barra: branca = já no disco, amarela = carregado no player, roxa = assistido
 const bar = $('bar');
 let have = [];
-function paint(t = now()) {
+let dragTo = null;  // destino de um arrasto na tela, enquanto o dedo está nela
+function paint(t = dragTo ?? now()) {
   const d = total();
   const f = d ? t / d : 0;
   $('played').style.width = `${f * 100}%`;
@@ -336,6 +350,33 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'f') full();
   else if (k === 'm') v.muted = !v.muted;
   else if (k === 'c') pickSub(subSel >= 0 ? -1 : (subs.findIndex((s) => s.lang === (wantLang || 'pt-BR')) >= 0 ? subs.findIndex((s) => s.lang === (wantLang || 'pt-BR')) : subs.length ? 0 : -1));
+  // como no YouTube: < > velocidade, 0–9 vai a 0–90 %, , . quadro a quadro (pausado)
+  else if (k === '<' || k === '>') {
+    const i = RATES.indexOf(v.playbackRate);
+    const r = RATES[Math.max(0, Math.min(RATES.length - 1, (i < 0 ? RATES.indexOf(1) : i) + (k === '>' ? 1 : -1)))];
+    v.defaultPlaybackRate = v.playbackRate = r;
+    store(RKEY, r);
+    hint(rateLabel(r), 'm');
+  }
+  else if (/^[0-9]$/.test(k) && !e.ctrlKey && !e.altKey && !e.metaKey) { if (total()) seek((total() * +k) / 10); }
+  else if ((k === ',' || k === '.') && v.paused) {
+    // o convertido chega como um fluxo só, sem como voltar dentro dele
+    const t = Math.max(0, v.currentTime + (k === '.' ? 1 : -1) / 24);
+    const ok = [...Array(v.seekable.length).keys()].some((i) => t >= v.seekable.start(i) && t <= v.seekable.end(i));
+    if (ok) v.currentTime = t; else hint('Quadro a quadro só com o vídeo sem conversão', 'm', 1500);
+  }
+  else if (k === 'n' && e.shiftKey) { if (next) goNext(); }
+  else if (k === 'v') {
+    const n = (M.audios || []).length;
+    if (n > 1) { aud = (aud + 1) % n; store(AKEY, M.audios[aud].lang); reopen(); hint(`Áudio: ${audioName(M.audios[aud])}`, 'm', 1500); }
+  }
+  else if (k === '+' || k === '=' || k === '-') {
+    const i = SIZES.findIndex(([x]) => x === subSize) + (k === '-' ? -1 : 1);
+    subSize = SIZES[Math.max(0, Math.min(SIZES.length - 1, i))][0];
+    store(SIZEKEY, subSize);
+    cueStyle();
+    hint(`Legenda: ${SIZES.find(([x]) => x === subSize)[1]}`, 'm');
+  }
   poke();
 });
 
@@ -355,30 +396,121 @@ poke();
 // Dois toques seguidos numa lateral voltam/avançam 10 s e, enquanto a série
 // dura, cada toque a mais no mesmo lado soma 10 s (como no YouTube); dois
 // toques no centro alternam a tela cheia. O toque simples espera o intervalo
-// do duplo, para os dois não dispararem juntos
+// do duplo, para os dois não dispararem juntos.
+// Gestos: segurar = 2× enquanto segura; arrastar na horizontal busca (a
+// largura da tela vale 2 min); na vertical, na metade direita, muda o volume
+// (onde a página pode: no iPhone o volume do vídeo é só leitura); pinça
+// alterna entre preencher a tela e mostrar o quadro inteiro. Com a tela
+// bloqueada, um toque só mostra o cadeado
 const UI = 'button, input, a, .bar, .menu, .slow, .panel, .msg';
-const TAP_GAP = 280, SERIES = 800;
-let down = null, tapTimer, lastTap = -1e9, series = null;
+const TAP_GAP = 280, SERIES = 800, HOLD = 500, MOVE = 12, SEEK_SPAN = 120;
+const CAN_VOLUME = (() => { const a = document.createElement('video'); a.volume = 0.5; return a.volume === 0.5; })();
+let down = null, tapTimer, lastTap = -1e9, series = null, hintTimer, pinch = null;
+const touches = new Map();  // dedos na tela: id → [x, y]
+// aviso no meio da tela (`ms` = 0: fica até o próximo)
+function hint(text, where, ms = 900) {
+  const h = $('hint');
+  h.textContent = text;
+  h.className = `hint ${where}`;
+  clearTimeout(hintTimer);
+  if (ms) hintTimer = setTimeout(() => { h.className = 'hint'; }, ms);
+}
 const zone = (x) => (x < innerWidth * 0.35 ? -1 : x > innerWidth * 0.65 ? 1 : 0);
+const locked = () => document.body.classList.contains('locked');
+const signed = (x) => `${x < 0 ? '−' : '+'}${fmt(Math.abs(x))}`;
 function seekTap(dir) {
   if (!series || series.dir !== dir) series = { dir, n: 0 };
   series.n++;
   clearTimeout(series.timer);
-  series.timer = setTimeout(() => { series = null; $('hint').className = 'hint'; }, SERIES);
+  series.timer = setTimeout(() => { series = null; }, SERIES);
   seek(now() + dir * 10, 600);
-  $('hint').className = `hint ${dir < 0 ? 'l' : 'r'}`;
-  $('hint').textContent = dir < 0 ? `« ${series.n * 10} s` : `${series.n * 10} s »`;
+  hint(dir < 0 ? `« ${series.n * 10} s` : `${series.n * 10} s »`, dir < 0 ? 'l' : 'r', SERIES);
 }
+const FILLKEY = 'anubis.preencher';
+function setFill(on, say = true) {
+  v.style.objectFit = on ? 'cover' : '';
+  store(FILLKEY, on ? 1 : 0);
+  if (say) hint(on ? 'Preenchendo a tela' : 'Quadro inteiro', 'm');
+}
+if (stored(FILLKEY) === '1') setFill(true, false);
+v.addEventListener('contextmenu', (e) => e.preventDefault());  // segurar não abre o menu do navegador
+
 document.addEventListener('pointerdown', (e) => {
   pointer = e.pointerType;
-  down = { x: e.clientX, y: e.clientY, t: e.timeStamp };
-  if (pointer !== 'mouse' && e.target.closest(UI)) poke();
+  if (pointer === 'mouse') return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touches.size === 2 && !locked()) {
+    // segundo dedo: pinça (o primeiro deixa de ser toque, segurar ou arrasto)
+    const [a, b] = [...touches.values()];
+    pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), done: false };
+    if (down) { clearTimeout(down.hold); if (down.mode === 'hold') v.playbackRate = down.rate; }
+    down = null; dragTo = null;
+    return;
+  }
+  if (touches.size > 1) return;
+  const ui = !!e.target.closest(UI);
+  down = { x: e.clientX, y: e.clientY, t: e.timeStamp, ui, mode: null };
+  if (ui) { poke(); return; }
+  if (locked()) return;
+  down.hold = setTimeout(() => {
+    if (!down || down.mode || v.paused) return;
+    down.mode = 'hold';
+    down.rate = v.playbackRate;
+    v.playbackRate = 2;
+    hint('2× »', 'c', 0);
+  }, HOLD);
 }, true);
-document.addEventListener('pointerup', (e) => {
-  if (e.pointerType === 'mouse' || !down) return;
-  const tap = Math.hypot(e.clientX - down.x, e.clientY - down.y) < 12 && e.timeStamp - down.t < 500;
+
+document.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'mouse' || !touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pinch) {
+    if (touches.size < 2 || pinch.done) return;
+    const [a, b] = [...touches.values()];
+    const k = Math.hypot(a[0] - b[0], a[1] - b[1]) / pinch.d;
+    if (k > 1.15 || k < 0.87) { pinch.done = true; setFill(k > 1); }
+    return;
+  }
+  if (!down || down.ui || locked()) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (!down.mode) {
+    if (Math.hypot(dx, dy) < MOVE) return;
+    clearTimeout(down.hold);
+    if (Math.abs(dx) > Math.abs(dy)) { down.mode = 'seek'; down.from = now(); }
+    else if (down.x > innerWidth / 2 && CAN_VOLUME) { down.mode = 'volume'; down.vol = v.muted ? 0 : v.volume; }
+    else down.mode = 'none';
+  }
+  if (down.mode === 'seek' && total()) {
+    dragTo = Math.max(0, Math.min(total() - 1, down.from + (dx / innerWidth) * SEEK_SPAN));
+    paint();
+    hint(`${signed(dragTo - down.from)} · ${fmt(dragTo)}`, 'm', 0);
+  } else if (down.mode === 'volume') {
+    const vol = Math.max(0, Math.min(1, down.vol - dy / (innerHeight * 0.6)));
+    v.volume = vol;
+    v.muted = vol === 0;
+    hint(`Volume ${Math.round(vol * 100)}%`, 'm', 0);
+  }
+});
+
+function endTouch(e) {
+  if (e.pointerType === 'mouse') return;
+  touches.delete(e.pointerId);
+  if (pinch) { if (!touches.size) pinch = null; return; }  // depois da pinça, nada de toque
+  if (!down) return;
+  const g = down;
   down = null;
-  if (!tap || e.target.closest(UI) || !$('menu').hidden) return;
+  clearTimeout(g.hold);
+  if (g.mode === 'hold') { v.playbackRate = g.rate; $('hint').className = 'hint'; return; }
+  if (g.mode === 'seek') {
+    const to = dragTo;
+    dragTo = null;
+    hint($('hint').textContent, 'm', 500);
+    if (e.type === 'pointerup' && to !== null) seek(to); else paint();
+    return;
+  }
+  if (g.mode) { if (g.mode === 'volume') hint($('hint').textContent, 'm', 500); return; }
+  if (e.type !== 'pointerup' || e.timeStamp - g.t >= HOLD || g.ui || !$('menu').hidden) return;
+  if (locked()) { poke(); return; }
   const z = zone(e.clientX);
   if (series && z === series.dir) return seekTap(z);
   if (e.timeStamp - lastTap < TAP_GAP) {
@@ -388,7 +520,13 @@ document.addEventListener('pointerup', (e) => {
   }
   lastTap = e.timeStamp;
   tapTimer = setTimeout(() => (document.body.classList.contains('hidden') ? poke() : hide()), TAP_GAP);
-});
+}
+document.addEventListener('pointerup', endTouch);
+document.addEventListener('pointercancel', endTouch);
+
+// ---- bloqueio de tela: nada responde ao toque além do cadeado
+$('lock').onclick = () => { $('menu').hidden = true; document.body.classList.add('locked'); hint('Tela bloqueada', 'c', 1200); poke(); };
+$('unlock').onclick = () => { document.body.classList.remove('locked'); hint('Tela desbloqueada', 'c', 1200); poke(); };
 
 // ---- de volta à aba: o Chrome no celular desliga o vídeo de abas em segundo
 // plano e, ao religar, o vídeo pode voltar fora de sincronia com o som.

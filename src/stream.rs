@@ -45,9 +45,12 @@ const IDLE_BEFORE_HANDOFF: Duration = Duration::from_secs(5 * 60);
 const JOBS_FILE: &str = "pedidos.json";
 /// Porta em que o librqbit recebe conexões (TCP e uTP). Sem ela, só baixa de
 /// quem aceita conexão de fora — e quase ninguém aceita (roteador/NAT), então
-/// torrents com poucas fontes não respondiam. Fixa: é a que o firewall do
-/// FeuVault (infra/feuvault/firewall) deixa entrar pelo IPv6.
+/// torrents com poucas fontes não respondiam.
 const TORRENT_PORT: u16 = 6882;
+/// Porta anunciada aos rastreadores e à DHT. O firewall do roteador (Huawei)
+/// só deixa entrar IPv6 de fora nas portas 80 e 443; o do FeuVault
+/// (infra/feuvault/firewall) desvia a 443 que chega de fora para TORRENT_PORT.
+const ANNOUNCE_PORT: u16 = 443;
 /// Rastreadores públicos somados a todo torrent (há magnets sem nenhum, como
 /// o pacote de Loki do Comando; as fontes que o site mostra vêm deles).
 const PUBLIC_TRACKERS: [&str; 5] = [
@@ -556,6 +559,7 @@ impl Streamer {
             listen: Some(ListenerOptions {
                 mode: ListenerMode::TcpAndUtp,
                 listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, TORRENT_PORT).into(),
+                announce_port: Some(ANNOUNCE_PORT),
                 ..Default::default()
             }),
             trackers: PUBLIC_TRACKERS.iter().filter_map(|t| reqwest::Url::parse(t).ok()).collect(),

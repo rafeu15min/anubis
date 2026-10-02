@@ -12,6 +12,17 @@ table ip6 feuvault
 delete table ip6 feuvault
 
 table ip6 feuvault {
+	# O firewall do roteador (Huawei) só deixa entrar IPv6 de fora nas portas
+	# 80 e 443. A 443 que chega pela rede da casa vira a porta do Anubis, que
+	# anuncia 443 ao enxame. Antes do NAT do Docker (prioridade menor), que
+	# mandaria a 443 para o NPM. Link-local fica de fora (rede da casa).
+	chain prerouting {
+		type nat hook prerouting priority dstnat - 10; policy accept;
+
+		iifname "enp4s0" ip6 saddr != fe80::/10 tcp dport 443 redirect to :6882
+		iifname "enp4s0" ip6 saddr != fe80::/10 udp dport 443 redirect to :6882
+	}
+
 	chain input {
 		type filter hook input priority filter; policy drop;
 

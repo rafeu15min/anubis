@@ -79,8 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/search", get(search))
         .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
-        // ícones das páginas (Nerd Font reduzida; web/icones.py)
-        .route("/icones.woff2", get(|| async { ([("content-type", "font/woff2"), ("cache-control", "max-age=86400")], include_bytes!("../web/icones.woff2").as_slice()) }))
+        .route("/icones.woff2", get(icons))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
@@ -515,6 +514,20 @@ async fn hide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) ->
 async fn unhide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     s.orch.unhide(kind, id).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Ícones das páginas (Nerd Font reduzida; web/icones.py). Sem prazo de
+/// cache: o navegador confere a versão (ETag) a cada carga, e um ícone novo
+/// aparece na hora (com `max-age`, ele seguia com a fonte velha por um dia).
+async fn icons(headers: HeaderMap) -> Response {
+    const FONT: &[u8] = include_bytes!("../web/icones.woff2");
+    // FNV-1a do arquivo: muda quando a fonte muda
+    let tag = format!("\"{:016x}\"", FONT.iter().fold(0xcbf29ce484222325_u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3)));
+    let headers_out = [("content-type", "font/woff2".to_owned()), ("cache-control", "no-cache".to_owned()), ("etag", tag.clone())];
+    if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag.as_str()) {
+        return (StatusCode::NOT_MODIFIED, headers_out).into_response();
+    }
+    (headers_out, FONT).into_response()
 }
 
 async fn uninstall_preview(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {

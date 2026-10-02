@@ -76,9 +76,9 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/", get(|| async { page(include_str!("../web/index.html")) }))
         .route("/search", get(search))
-        .route("/preferencias", get(|| async { Html(include_str!("../web/prefs.html")) }))
+        .route("/preferencias", get(|| async { page(include_str!("../web/prefs.html")) }))
         .route("/icones.woff2", get(icons))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
@@ -102,7 +102,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status/{kind}/{id}", get(status))
         .route("/status/{kind}/{id}/versions", get(versions))
         .route("/watch", post(watch))
-        .route("/watch/{kind}/{id}", get(|| async { Html(include_str!("../web/player.html")) }))
+        .route("/watch/{kind}/{id}", get(|| async { page(include_str!("../web/player.html")) }))
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
         .route("/watch/{kind}/{id}/lighter", get(lighter))
@@ -514,6 +514,12 @@ async fn hide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) ->
 async fn unhide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     s.orch.unhide(kind, id).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Página embutida no binário: o navegador confere a cada carga (uma versão
+/// nova do Anubis aparece na hora, com os ícones e a fonte novos).
+fn page(html: &'static str) -> Response {
+    ([("cache-control", "no-cache")], Html(html)).into_response()
 }
 
 /// Ícones das páginas (Nerd Font reduzida; web/icones.py). Sem prazo de

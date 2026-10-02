@@ -801,7 +801,17 @@ async function info() {
     // começa quando o formato é conhecido (ou depois de ~20 s sem ffprobe)
     if (d.transcode_height) T = d.transcode_height;
     phase = d.phase;
-    if (!started && (d.media || ++waitedMedia > 10)) { started = true; start(d.media); if (d.phase === 'done') offerBetter(); }
+    // começa quando o formato é conhecido. O servidor sempre responde (o
+    // ffprobe tem 2 min; sem ele, "toca direto"): só sem resposta nenhuma em
+    // ~130 s o player arrisca tocar o arquivo como está
+    if (!started && (d.media || ++waitedMedia > 65)) { started = true; start(d.media); if (d.phase === 'done') offerBetter(); }
+    // começou sem o formato e ele chegou: se o navegador não toca o arquivo
+    // como está (ex. áudio E-AC3 no Android: a imagem vai e o som não),
+    // passa para o convertido no ponto atual
+    else if (started && d.media && !M.mode) {
+      M = d.media;
+      if (needsConvert()) reopen();
+    }
     if (started) syncDub(d.dub);
     if (d.media && d.media.duration) duration = d.media.duration;
     if (d.next && !next) { next = d.next; $('next').textContent = `Próximo: ${d.next[1]} ▶`; $('next').hidden = false; }

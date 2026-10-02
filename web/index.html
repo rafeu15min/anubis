@@ -55,6 +55,12 @@
   button.icon.danger { border-color: color-mix(in srgb, #ff8a8a 60%, transparent); color: #ff8a8a; }
   button.icon.danger:hover { background: color-mix(in srgb, #ff8a8a 15%, transparent); }
   .ep .acts { display: flex; gap: 6px; }
+  .ep small.st { color: var(--info); }
+  /* botão de ícone ocupado: gira no lugar do ícone */
+  button.icon.busy { position: relative; }
+  button.icon.busy .i { visibility: hidden; }
+  button.icon.busy::after { content: ""; position: absolute; width: 16px; height: 16px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: girar .8s linear infinite; }
+  @keyframes girar { to { transform: rotate(360deg); } }
   /* fechar: no canto da janela, à vista mesmo rolando uma lista longa */
   dialog > .x { position: sticky; top: 0; float: right; z-index: 1; width: 40px; height: 40px; min-height: 40px; margin: -8px -8px 0 8px; padding: 0; justify-content: center; border-color: var(--line); border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 16px; }
   #itembody { clear: both; }  /* o cartão começa abaixo do ✕ */
@@ -330,7 +336,17 @@ const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1).replace('.', ','
 async function watch(k, guid, keep = false) {
   const [kind, id] = [k.split(':')[0], +k.split(':')[1]];
   const btns = document.querySelectorAll(`[data-watch="${k}"]`);
-  const say = (t) => btns.forEach((b) => { b.disabled = true; b.textContent = t; });
+  // botão de texto: a mensagem vai nele; botão de ícone (▶ dos episódios):
+  // ele gira e a mensagem aparece embaixo do episódio
+  btns.forEach((b) => { b.dataset.html ??= b.innerHTML; });
+  const say = (t) => btns.forEach((b) => {
+    b.disabled = true;
+    if (!b.classList.contains('icon')) { b.textContent = t; return; }
+    b.classList.add('busy');
+    const row = b.closest('.ep');
+    const st = row && (row.querySelector('.st') || row.children[1].appendChild(Object.assign(document.createElement('small'), { className: 'st' })));
+    if (st) st.textContent = t;
+  });
   say('Procurando versão…');
   // a busca passa por todas as fontes; as protegidas pelo Cloudflare levam ~30 s
   const slow = [setTimeout(() => say('Buscando nas fontes…'), 8000), setTimeout(() => say('Ainda buscando (até 1–2 min)…'), 30000)];
@@ -365,7 +381,13 @@ async function watch(k, guid, keep = false) {
     } else alert(`Não deu para assistir: ${d.error}`);
   } finally {
     slow.forEach(clearTimeout);
-    btns.forEach((b) => { b.disabled = false; b.textContent = 'Assistir'; });
+    btns.forEach((b) => {
+      b.disabled = false;
+      b.classList.remove('busy');
+      b.innerHTML = b.dataset.html;
+      const st = b.closest('.ep') && b.closest('.ep').querySelector('.st');
+      if (st) st.remove();
+    });
   }
 }
 $('#pickclose').onclick = () => $('#pick').close();

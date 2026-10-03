@@ -109,6 +109,7 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     tokio::spawn(scheduler(orch.clone(), wake.clone()));
     tokio::spawn(live::run(orch.clone()));
     tokio::spawn(avail::run(orch.clone()));
+    tokio::spawn(indexers::run(orch.clone()));
     // perfil do Sonarr para séries sem dublagem (quando se aceita o legendado)
     {
         let orch = orch.clone();

@@ -18,6 +18,27 @@ use tracing::{info, warn};
 
 /// a lista fica guardada por 1 min (cada consulta são 4–5 chamadas)
 const TTL: Duration = Duration::from_secs(60);
+/// de quanto em quanto tempo os indexadores de castigo são testados sozinhos
+const RETEST_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Testa de novo, de tempos em tempos, os indexadores de castigo. Uma queda
+/// curta da internet deixava todos de castigo por horas (o Prowlarr estica o
+/// castigo a cada falha): as buscas voltavam vazias muito depois de a
+/// conexão voltar. O teste que passa tira do castigo na hora.
+pub async fn run(orch: Arc<Orchestrator>) {
+    loop {
+        tokio::time::sleep(RETEST_EVERY).await;
+        let down = orch.refresh_indexers().await;
+        if down.is_empty() {
+            continue;
+        }
+        info!("indexadores de castigo: {}; testando de novo", down.join(", "));
+        let still = orch.retest_indexers().await;
+        if !still.is_empty() {
+            warn!("continuam fora: {}", still.join(", "));
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Cache(Mutex<Option<(Instant, Vec<String>)>>);

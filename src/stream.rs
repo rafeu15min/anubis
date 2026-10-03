@@ -340,17 +340,19 @@ pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
     out
 }
 
-/// Aprovadas primeiro; depois episódio avulso antes de pacote; depois as
-/// dubladas (com a regra "preferido", o Radarr aprova as outras também);
-/// depois as que tocam no navegador; depois as com fontes suficientes para
-/// tocar enquanto baixam (um Bluray mal semeado perde para o WEB); depois a
-/// preferência do próprio Radarr/Sonarr e as mais semeadas.
+/// Aprovadas primeiro; depois as dubladas, mesmo num pacote da temporada ou
+/// com poucas fontes (com as regras "preferido" e "tanto faz" o Radarr/Sonarr
+/// aprovam as outras também, e o português vem antes de tudo); depois
+/// episódio avulso antes de pacote; depois as que tocam no navegador; depois
+/// as com fontes suficientes para tocar enquanto baixam (um Bluray mal
+/// semeado perde para o WEB); depois a preferência do próprio Radarr/Sonarr e
+/// as mais semeadas.
 fn sort_candidates(list: &mut [Candidate]) {
     list.sort_by_key(|c| {
         (
             c.rejected,
-            c.pack,
             !c.portuguese(),
+            c.pack,
             std::cmp::Reverse(c.playable),
             c.seeders < ENOUGH_SEEDERS,
             c.raw["releaseWeight"].as_i64().unwrap_or(i64::MAX),
@@ -377,6 +379,58 @@ fn original_language(item: &Value) -> Option<&str> {
 fn original_or_portuguese(list: &mut Vec<Candidate>, original: Option<&str>) {
     let Some(original) = original else { return };
     list.retain(|c| c.portuguese() || c.languages.iter().all(|l| l == "Unknown") || c.languages.iter().any(|l| l == original));
+}
+
+/// Nome de site brasileiro no formato de cena, que o Sonarr entende:
+/// "O Mentalista - 1ª Temporada Completa" → "O Mentalista - S01 Completa";
+/// "Temporada 2 Episódio 5" → "S02E05". O resto do nome fica igual. Sem isso
+/// o Sonarr não acha a temporada, e a versão dublada era descartada.
+fn scene_title(title: &str) -> String {
+    let words: Vec<&str> = title.split_whitespace().collect();
+    let low = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    // "1ª", "2º", "3a" → 1, 2, 3
+    let ordinal = |w: &str| {
+        let d: String = w.chars().take_while(char::is_ascii_digit).collect();
+        (!d.is_empty() && ["ª", "º", "°", "a", "o", ""].contains(&&w[d.len()..])).then(|| d.parse::<u32>().ok()).flatten()
+    };
+    // "5", "05", "5:" → 5 (só número)
+    let number = |w: &str| {
+        let t = w.trim_matches(|c: char| !c.is_alphanumeric());
+        (!t.is_empty() && t.chars().all(|c| c.is_ascii_digit())).then(|| t.parse::<u32>().ok()).flatten()
+    };
+    let season_tag = |t: &str| t.len() > 1 && t.starts_with('S') && t[1..].chars().all(|c| c.is_ascii_digit());
+    let mut out: Vec<String> = vec![];
+    let mut i = 0;
+    while i < words.len() {
+        let (w, next) = (words[i], words.get(i + 1).copied());
+        if let (Some(n), Some(nx)) = (ordinal(w), next)
+            && low(nx) == "temporada"
+        {
+            out.push(format!("S{n:02}"));
+            i += 2;
+            continue;
+        }
+        if low(w) == "temporada"
+            && let Some(n) = next.and_then(number)
+        {
+            out.push(format!("S{n:02}"));
+            i += 2;
+            continue;
+        }
+        if matches!(low(w).as_str(), "episódio" | "episodio" | "ep")
+            && let Some(n) = next.and_then(number)
+        {
+            match out.last_mut() {
+                Some(t) if season_tag(t) => t.push_str(&format!("E{n:02}")),
+                _ => out.push(format!("E{n:02}")),
+            }
+            i += 2;
+            continue;
+        }
+        out.push(w.to_owned());
+        i += 1;
+    }
+    out.join(" ")
 }
 
 /// O nome do arquivo é do episódio `s`x`e`? (S01E05, s1e05, 1x05)
@@ -1418,6 +1472,17 @@ impl Orchestrator {
         Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
     }
 
+    /// As versões que o "assistir" consideraria, na ordem dele, sem baixar
+    /// nada — para entender um "não achou" (filme: id do TMDB; episódio: do Sonarr).
+    pub async fn watch_candidates(&self, kind: Kind, id: i64) -> Result<Vec<Candidate>> {
+        let t = match kind {
+            Kind::Movie => self.movie_target(id, true).await?,
+            Kind::Episode => self.episode_target(id, true).await?,
+            Kind::Series => bail!("peça pelo episódio"),
+        };
+        Ok(t.candidates)
+    }
+
     async fn episode_target(&self, episode_id: i64, search: bool) -> Result<Target> {
         let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
         let ep = sonarr.episode(episode_id).await?;
@@ -1487,14 +1552,16 @@ impl Orchestrator {
         }
         .filter(|pt| norm(pt) != norm(&name));
         use crate::services::ONE_PAGE;
-        const TV: [u32; 2] = [5000, 5070];
+        // sem filtro de categoria: os sites brasileiros não marcam as temporadas
+        // como TV ("O Mentalista - 1ª Temporada" sumia) e até o Pirate Bay perde
+        // episódios; o `judge` já confere série, temporada e episódio
         let (q_ep, q_season) = (format!("{name} S{s:02}E{e:02}"), format!("{name} S{s:02}"));
         let (a, b, c) = tokio::join!(
-            p.search(&q_ep, &TV, ONE_PAGE),
-            p.search(&q_season, &TV, ONE_PAGE),
+            p.search(&q_ep, &[], ONE_PAGE),
+            p.search(&q_season, &[], ONE_PAGE),
             async {
                 match &pt {
-                    Some(pt) => p.search(pt, &TV, ONE_PAGE).await,
+                    Some(pt) => p.search(pt, &[], ONE_PAGE).await,
                     None => Ok(vec![]),
                 }
             }
@@ -1523,7 +1590,7 @@ impl Orchestrator {
         let mut out = vec![];
         for r in found {
             let title = r["title"].as_str().unwrap_or_default();
-            let Ok(parsed) = sonarr.parse(title).await else { continue };
+            let Ok(parsed) = sonarr.parse(&scene_title(title)).await else { continue };
             if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
                 out.push(v);
             }
@@ -2092,6 +2159,27 @@ mod tests {
         let order: Vec<_> = list.iter().map(|c| c.title.as_str()).collect();
         // dublada antes mesmo de tocar direto; recusada continua por último
         assert_eq!(order, ["Filme.1080p.x265-DUB", "Filme.1080p.x264-EN", "Filme.2160p-DUB"]);
+    }
+
+    #[test]
+    fn brazilian_season_names_become_scene_names() {
+        assert_eq!(scene_title("O Mentalista - 1ª Temporada Completa (720p) Baixe do Original (brazilian)"), "O Mentalista - S01 Completa (720p) Baixe do Original (brazilian)");
+        assert_eq!(scene_title("O Mentalista - 6º Temporada (1080p)"), "O Mentalista - S06 (1080p)");
+        assert_eq!(scene_title("Loki Temporada 2 Episódio 5 Dublado"), "Loki S02E05 Dublado");
+        assert_eq!(scene_title("Loki 2a Temporada Ep 01"), "Loki S02E01");
+        // nada a traduzir: igual (só espaços repetidos viram um)
+        assert_eq!(scene_title("Loki.S02E01.1080p.WEB.H264-LAZYCUNTS"), "Loki.S02E01.1080p.WEB.H264-LAZYCUNTS");
+        assert_eq!(scene_title("A Temporada das Bruxas 2024"), "A Temporada das Bruxas 2024");
+    }
+
+    #[test]
+    fn portuguese_comes_first_even_as_a_season_pack_with_few_seeders() {
+        let rel = |title: &str, lang: &str, pack: bool, seeders: i64| {
+            json!({ "protocol": "torrent", "guid": title, "title": title, "size": 1, "seeders": seeders, "rejected": false, "rejections": [],
+                    "releaseWeight": 1, "fullSeason": pack, "languages": [{ "name": lang }], "quality": { "quality": { "name": "WEBDL-1080p" } } })
+        };
+        let list = candidates(vec![rel("EN-EP", "English", false, 300), rel("PT-PACK", "Portuguese (Brazil)", true, 3)]);
+        assert_eq!(list[0].title, "PT-PACK");
     }
 
     #[test]

@@ -20,6 +20,7 @@
 //! GET  /watch/{kind}/{id}/lighter — versões mais leves (o download não acompanha o vídeo)
 //! GET  /watch/{kind}/{id}/stream.mp4?t=S&a=N&h=A — convertido na hora (H.265, AC3…), a partir de S s, faixa de áudio N, altura máxima A
 //! GET  /watch/{kind}/{id}/progress — onde o usuário parou no Jellyfin
+//! GET  /watch/{kind}/{id}/candidates — as versões que o "assistir" consideraria, na ordem (sem baixar)
 //! POST /watch/{kind}/{id}/progress {"t", "duration"} — o player avisa onde está; grava no Jellyfin
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
@@ -109,6 +110,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/better", get(better))
         .route("/watch/{kind}/{id}/stream.mp4", get(converted))
         .route("/watch/{kind}/{id}/progress", get(get_progress).post(post_progress))
+        .route("/watch/{kind}/{id}/candidates", get(watch_candidates))
         .route("/watch/{kind}/{id}/subs", get(subs_list))
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
@@ -370,6 +372,13 @@ async fn video(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>, h
         h.insert("content-range", format!("bytes {start}-{end}/{len}").parse().unwrap());
     }
     res
+}
+
+async fn watch_candidates(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.watch_candidates(kind, id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
 }
 
 /// Onde o usuário parou no Jellyfin (`t` em s; `null` sem progresso).

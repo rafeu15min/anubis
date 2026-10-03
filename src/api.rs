@@ -250,10 +250,10 @@ struct WatchBody {
 async fn watch(State(s): State<AppState>, Json(b): Json<WatchBody>) -> Response {
     match s.orch.watch(b.kind, b.id, b.guid.as_deref(), b.keep).await {
         Ok(Started::Ready) => Json(json!({ "player": format!("watch/{}/{}", kind_str(b.kind), b.id) })).into_response(),
-        Ok(Started::NoApproved(list)) => {
+        Ok(Started::NoApproved(list, dead)) => {
             // consultados agora: a busca que acabou pode ter derrubado algum
             let down = s.orch.refresh_indexers().await;
-            (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list, "indexers_down": down }))).into_response()
+            (StatusCode::CONFLICT, Json(json!({ "no_approved": true, "candidates": list, "dead": dead, "indexers_down": down }))).into_response()
         }
         Err(e) => {
             warn!("assistir {}/{}: {e:#}", kind_str(b.kind), b.id);

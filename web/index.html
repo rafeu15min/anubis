@@ -363,11 +363,15 @@ async function watch(k, guid, keep = false) {
           ${onlyDub ? '' : `<small class="why">${esc(c.reasons.join(' · '))}</small>`}</div>
           <button${onlyDub && i === 0 ? ' class="primary"' : ''} data-watch="${k}" data-guid="${esc(c.guid)}">${onlyDub ? (i === 0 ? 'Assistir legendado' : 'Esta') : 'Assistir esta'}</button></div>`).join('');
       $('#picktitle').textContent = onlyDub ? 'Dublagem não encontrada' : some ? 'Nenhuma versão passa no seu perfil de qualidade' : 'Nenhuma versão disponível';
-      $('#pickmsg').textContent = onlyDub
-        ? 'Nenhuma fonte tem a versão dublada. A primeira é a recomendada; a legenda em português aparece no player se vier no arquivo (as da Amazon costumam trazer).'
+      // dubladas que existem mas não tinham ninguém compartilhando agora
+      const dead = (d.dead || []).length
+        ? `${d.dead.length === 1 ? 'A versão dublada encontrada não tem' : `As ${d.dead.length} versões dubladas encontradas não têm`} ninguém compartilhando agora (${d.dead.join('; ')}). `
+        : '';
+      $('#pickmsg').textContent = dead + (onlyDub
+        ? `${dead ? '' : 'Nenhuma fonte tem a versão dublada. '}A primeira é a recomendada; a legenda em português aparece no player se vier no arquivo (as da Amazon costumam trazer).`
         : some
           ? 'Todas as versões encontradas foram recusadas. Você pode assistir uma delas mesmo assim — o perfil não muda.'
-          : 'As fontes não têm nenhuma versão com gente compartilhando agora.';
+          : 'As fontes não têm nenhuma versão com gente compartilhando agora.');
       // fontes fora do ar: a busca pode ter deixado versões de fora
       const down = d.indexers_down || [];
       $('#pickdown').dataset.k = k;

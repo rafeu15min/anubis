@@ -63,7 +63,7 @@ const PUBLIC_TRACKERS: [&str; 5] = [
 /// Tempo para um torrent achar alguém e mandar os metadados.
 pub(crate) const ADD_TIMEOUT: Duration = Duration::from_secs(120);
 /// No "Assistir", cada versão tem isso antes de dar lugar à próxima (todas
-/// dentro de ADD_TIMEOUT).
+/// dentro de ADD_TIMEOUT); a última da fila tem o tempo que sobrar.
 const TRY_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,8 +248,10 @@ pub struct Candidate {
 pub enum Started {
     /// pronto para o player (baixando ou já na biblioteca)
     Ready,
-    /// nenhuma versão passa no perfil: a página oferece as recusadas
-    NoApproved(Vec<Candidate>),
+    /// nenhuma versão passa no perfil (ou as aprovadas não acharam fontes):
+    /// a página oferece as outras. O segundo: as aprovadas que não
+    /// responderam (sem ninguém compartilhando)
+    NoApproved(Vec<Candidate>, Vec<String>),
 }
 
 /// Troca do arquivo da biblioteca por outra versão.
@@ -1130,7 +1132,7 @@ impl Orchestrator {
             if guid.is_some() {
                 // troca: as versões de agora, e o arquivo atual para depois
                 replaces = Some(Replace { file_id: lib.file_id, inode: crate::disk::file_id(&host).map(|f| f.inode) });
-                target.candidates = self.releases_of(kind, target.arr_id).await?;
+                target.candidates = self.releases_of(kind, target.arr_id, false).await?;
             } else {
                 // toca o que já está no disco na hora; se há versão melhor, o
                 // player pergunta depois (GET …/better)
@@ -1181,17 +1183,40 @@ impl Orchestrator {
             None => target.candidates.iter().filter(|c| !c.rejected).cloned().collect(),
         };
         if picks.is_empty() {
-            return Ok(Started::NoApproved(target.candidates.into_iter().take(10).collect()));
+            return Ok(Started::NoApproved(target.candidates.into_iter().take(10).collect(), vec![]));
         }
-        target.candidates.clear();
+        let mut pool = std::mem::take(&mut target.candidates);
         let per_try = if guid.is_some() { ADD_TIMEOUT } else { TRY_TIMEOUT };
 
         let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
-        let deadline = Instant::now() + ADD_TIMEOUT;
+        let mut deadline = Instant::now() + ADD_TIMEOUT;
         // o mesmo torrent em dois sites é tentado uma vez só
         let mut tried = HashSet::new();
         let mut last_err = None;
-        for pick in picks {
+        // aprovadas que não acharam ninguém (para a página explicar)
+        let mut dead: Vec<Candidate> = vec![];
+        // sem escolha na página: se as aprovadas não acham fontes, a DHT entra
+        // uma vez (português sempre, mesmo devagar)
+        let mut dht_done = guid.is_some() || self.cfg.bitmagnet.is_none();
+        let mut queue: std::collections::VecDeque<Candidate> = picks.into();
+        loop {
+            let Some(pick) = queue.pop_front() else {
+                if !dht_done && !dead.is_empty() {
+                    dht_done = true;
+                    info!("{}: as versões aprovadas não acharam fontes; procurando na DHT", target.title);
+                    match self.releases_of(kind, target.arr_id, true).await {
+                        Ok(more) => {
+                            let gone: HashSet<&str> = dead.iter().map(|c| c.guid.as_str()).collect();
+                            queue.extend(more.iter().filter(|c| !c.rejected && !gone.contains(c.guid.as_str())).cloned());
+                            pool = more;
+                        }
+                        Err(e) => warn!("{}: DHT: {e:#}", target.title),
+                    }
+                    deadline = Instant::now() + ADD_TIMEOUT;
+                    continue;
+                }
+                break;
+            };
             let left = deadline.saturating_duration_since(Instant::now());
             if left < Duration::from_secs(5) {
                 break;
@@ -1211,12 +1236,25 @@ impl Orchestrator {
             }
             let folder = stream_cfg.download_dir.join(folder_name(&pick.title));
             info!("assistir agora: {} — {} ({} MB)", target.title, pick.title, pick.size >> 20);
-            match self.start_torrent(kind, id, target.clone(), pick.title.clone(), source, folder, true, replaces.clone(), vec![], per_try.min(left)).await {
+            // a última que sobrou tem o tempo todo: português mesmo que demore (um
+            // torrent pouco semeado pode levar mais de 40 s para achar alguém)
+            let this_try = if queue.is_empty() { left } else { per_try.min(left) };
+            match self.start_torrent(kind, id, target.clone(), pick.title.clone(), source, folder, true, replaces.clone(), vec![], this_try).await {
                 Err(e) if e.root_cause().is::<tokio::time::error::Elapsed>() => {
                     warn!("{}: {} não achou fontes; tentando a próxima versão", target.title, pick.title);
+                    dead.push(pick);
                     last_err = Some(e);
                 }
                 started => return started,
+            }
+        }
+        // nenhuma aprovada respondeu: a página oferece as outras (o legendado,
+        // quando não há português vivo), dizendo quais não tinham fontes
+        if guid.is_none() && !dead.is_empty() {
+            let gone: HashSet<&str> = dead.iter().map(|c| c.guid.as_str()).collect();
+            let rest: Vec<Candidate> = pool.iter().filter(|c| !gone.contains(c.guid.as_str())).take(10).cloned().collect();
+            if !rest.is_empty() {
+                return Ok(Started::NoApproved(rest, dead.into_iter().map(|c| c.title).collect()));
             }
         }
         match last_err {
@@ -1405,11 +1443,11 @@ impl Orchestrator {
             _ => (self.sonarr.as_ref(), self.cfg.sonarr.as_ref().map(|c| c.quality_profile.clone())),
         };
         let profile = Orchestrator::profile(arr.context("Radarr/Sonarr não configurado")?, &name.unwrap_or_default()).await?;
-        Ok(better_than(&lib, &self.releases_of(job.info.kind, job.info.arr_id).await?, &profile))
+        Ok(better_than(&lib, &self.releases_of(job.info.kind, job.info.arr_id, false).await?, &profile))
     }
 
     pub async fn lighter(&self, job: &Job) -> Result<Vec<Candidate>> {
-        let list = self.releases_of(job.info.kind, job.info.arr_id).await?;
+        let list = self.releases_of(job.info.kind, job.info.arr_id, false).await?;
         let dubbed = list.iter().find(|c| c.title == job.info.release).is_some_and(|c| c.portuguese());
         let mut out: Vec<Candidate> = list
             .into_iter()
@@ -1425,12 +1463,12 @@ impl Orchestrator {
 
     /// Versões de um filme ou episódio já no Radarr/Sonarr (id deles), só em
     /// português ou no idioma original.
-    async fn releases_of(&self, kind: Kind, arr_id: i64) -> Result<Vec<Candidate>> {
+    async fn releases_of(&self, kind: Kind, arr_id: i64, always_dht: bool) -> Result<Vec<Candidate>> {
         let (mut list, item) = match kind {
             Kind::Movie => {
                 let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
                 let movie = radarr.get_json(&format!("movie/{arr_id}")).await?;
-                (self.movie_releases(&movie).await?, movie)
+                (self.movie_releases(&movie, always_dht).await?, movie)
             }
             _ => {
                 // a mesma busca do "assistir" (com o nome em português e, em
@@ -1439,7 +1477,7 @@ impl Orchestrator {
                 let ep = sonarr.episode(arr_id).await?;
                 let series = sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?;
                 let list = match &self.prowlarr {
-                    Some(p) => self.prowlarr_episode(p, &series, arr_id, ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0)).await?,
+                    Some(p) => self.prowlarr_episode(p, &series, arr_id, ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0), always_dht).await?,
                     None => candidates(sonarr.releases(&format!("episodeId={arr_id}")).await?),
                 };
                 (list, series)
@@ -1500,18 +1538,18 @@ impl Orchestrator {
             let library = Some(Library::from(&movie["movieFile"])?);
             return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library, candidates: vec![] });
         }
-        let mut candidates = if search { self.movie_releases(&movie).await? } else { vec![] };
+        let mut candidates = if search { self.movie_releases(&movie, false).await? } else { vec![] };
         original_or_portuguese(&mut candidates, original_language(&movie));
         Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
     }
 
     /// As versões de um filme pelo Radarr e, em último caso (nenhuma
     /// aprovada), o catálogo da DHT (bitmagnet), julgado pelo perfil do filme.
-    async fn movie_releases(&self, movie: &Value) -> Result<Vec<Candidate>> {
+    async fn movie_releases(&self, movie: &Value, always_dht: bool) -> Result<Vec<Candidate>> {
         let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
         let mut list = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
-        if self.cfg.bitmagnet.is_none() || list.iter().any(|c| !c.rejected) {
+        if self.cfg.bitmagnet.is_none() || (!always_dht && list.iter().any(|c| !c.rejected)) {
             return Ok(list);
         }
         let name = movie["title"].as_str().unwrap_or_default().to_owned();
@@ -1592,7 +1630,7 @@ impl Orchestrator {
         }
         // com o Prowlarr: busca direta, rápida e com o nome em português
         if let Some(p) = &self.prowlarr {
-            let mut list = self.prowlarr_episode(p, &series, episode_id, s, e).await?;
+            let mut list = self.prowlarr_episode(p, &series, episode_id, s, e, false).await?;
             original_or_portuguese(&mut list, original_language(&series));
             return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list });
         }
@@ -1616,7 +1654,7 @@ impl Orchestrator {
     /// episódios, qualidade, formatos), e a decisão segue o perfil da série —
     /// a busca do Sonarr fazia uma consulta por variação do nome (inclusive em
     /// espanhol e italiano), uma de cada vez, e não reconhecia o português.
-    async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64) -> Result<Vec<Candidate>> {
+    async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64, always_dht: bool) -> Result<Vec<Candidate>> {
         let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
         let name = series_name(series["title"].as_str().unwrap_or_default());
         let pt = match (&self.tmdb, series["tmdbId"].as_i64().filter(|id| *id > 0)) {
@@ -1669,9 +1707,10 @@ impl Orchestrator {
                 out.push(v);
             }
         }
-        // último caso: nenhuma versão aprovada nas fontes → o catálogo da DHT
-        // (bitmagnet), com as mesmas buscas e o mesmo julgamento
-        if self.cfg.bitmagnet.is_some() && out.iter().all(|v| v["rejected"] == true) {
+        // último caso: nenhuma versão aprovada nas fontes (ou as aprovadas não
+        // acharam fontes: `always_dht`) → o catálogo da DHT (bitmagnet), com as
+        // mesmas buscas e o mesmo julgamento
+        if self.cfg.bitmagnet.is_some() && (always_dht || out.iter().all(|v| v["rejected"] == true)) {
             let mut seen: HashSet<String> = out.iter().filter_map(|v| v["guid"].as_str().map(str::to_lowercase)).collect();
             // na DHT os nomes vêm como os arquivos: programas de variedade sem
             // temporada ("Running Man - 794 [260315]"), daí também o número

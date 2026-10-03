@@ -7,7 +7,8 @@
 //!   roda só com tudo ocioso: `quiet_minutes` (20) sem ninguém no site do
 //!   Anubis nem assistindo no Jellyfin. Um acesso ao site pausa na hora
 //!   (`docker pause` congela onde estava) e ela volta 20 min depois do
-//!   último acesso. Se a internet piorar com ela rodando, pausa por 30 min.
+//!   último acesso. Se a internet piorar com ela rodando, pausa por 30 min —
+//!   menos de madrugada (1h–6h), quando ninguém está usando a internet.
 
 use crate::orchestrator::Orchestrator;
 use anyhow::{Context, Result, bail};
@@ -86,8 +87,10 @@ pub async fn run(orch: Arc<Orchestrator>) {
             orch.dht_touch();
         }
         let d = &orch.dht;
+        let night = is_night(chrono::Timelike::hour(&chrono::Local::now()), cfg.night_from, cfg.night_to);
         let idle = d.last_activity.lock().unwrap().elapsed() >= quiet;
-        let backoff = d.backoff_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
+        // de madrugada a pausa por internet pior não vale
+        let backoff = !night && d.backoff_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
         let running = d.running.load(Ordering::SeqCst);
         if idle && !backoff && !running {
             let r = match state(c).await.as_deref() {
@@ -105,7 +108,7 @@ pub async fn run(orch: Arc<Orchestrator>) {
             }
             continue;
         }
-        if !running {
+        if !running || night {
             continue;
         }
         // rodando: a internet aguenta? (o que travava era a tabela de conexões)
@@ -121,6 +124,11 @@ pub async fn run(orch: Arc<Orchestrator>) {
             }
         }
     }
+}
+
+/// A hora `h` está na madrugada [`from`, `to`)? (atravessa a meia-noite se `from` > `to`)
+fn is_night(h: u32, from: u32, to: u32) -> bool {
+    if from <= to { (from..to).contains(&h) } else { h >= from || h < to }
 }
 
 /// Uma conexão a um servidor conhecido abre rápido? (com a tabela de
@@ -181,6 +189,14 @@ fn unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn night_hours() {
+        assert!(is_night(1, 1, 6) && is_night(5, 1, 6));
+        assert!(!is_night(6, 1, 6) && !is_night(0, 1, 6) && !is_night(23, 1, 6));
+        // atravessando a meia-noite
+        assert!(is_night(23, 22, 6) && is_night(2, 22, 6) && !is_night(12, 22, 6));
+    }
 
     #[test]
     fn reads_bitmagnet_torznab() {

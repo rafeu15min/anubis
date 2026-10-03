@@ -48,6 +48,20 @@ pub struct BitmagnetCfg {
     /// minutos sem ninguém no site nem assistindo para a varredura rodar
     #[serde(default = "default_quiet_minutes")]
     pub quiet_minutes: u64,
+    /// madrugada (horas locais, de `night_from` até antes de `night_to`): a
+    /// pausa de 30 min por internet pior não vale — ninguém está usando
+    #[serde(default = "default_night_from")]
+    pub night_from: u32,
+    #[serde(default = "default_night_to")]
+    pub night_to: u32,
+}
+
+fn default_night_from() -> u32 {
+    1
+}
+
+fn default_night_to() -> u32 {
+    6
 }
 
 fn default_dht_container() -> String {

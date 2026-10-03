@@ -525,6 +525,33 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value
     if !this {
         return None;
     }
+    let mut v = rate(r, &title, pe, parsed, parsed["series"].is_null(), profile, w.original.as_deref());
+    v["fullSeason"] = json!(pack);
+    v["seasonNumber"] = json!(w.season);
+    v["episodeNumbers"] = json!(episodes);
+    Some(v)
+}
+
+/// Uma versão de filme de fora do Radarr (a DHT), julgada como o Radarr
+/// julgaria: é deste filme (reconhecido, ou o nome no título e o ano certo)?
+fn judge_movie(r: &Value, parsed: &Value, profile: &Value, movie: &Value, names: &[String]) -> Option<Value> {
+    let title = r["title"].as_str().unwrap_or_default();
+    let pm = &parsed["parsedMovieInfo"];
+    let same = match parsed["movie"]["id"].as_i64() {
+        Some(id) => Some(id) == movie["id"].as_i64(),
+        None => {
+            names.iter().any(|n| !n.is_empty() && norm(title).contains(n.as_str()))
+                && pm["year"].as_i64().filter(|y| *y > 0).is_none_or(|y| Some(y) == movie["year"].as_i64())
+        }
+    };
+    same.then(|| rate(r, title, pm, parsed, parsed["movie"].is_null(), profile, original_language(movie)))
+}
+
+/// A nota de uma versão pelo perfil: a qualidade está entre as aceitas? Os
+/// formatos personalizados (dublagem, legenda) somam o mínimo? `info` é o
+/// `parsedEpisodeInfo` (Sonarr) ou o `parsedMovieInfo` (Radarr); `unknown`:
+/// o Radarr/Sonarr não reconheceu de que título é.
+fn rate(r: &Value, title: &str, info: &Value, parsed: &Value, unknown: bool, profile: &Value, original: Option<&str>) -> Value {
     // qualidades do perfil, na ordem (da pior para a melhor), e as aceitas
     let mut order: Vec<(String, bool)> = vec![];
     for it in profile["items"].as_array().into_iter().flatten() {
@@ -537,17 +564,17 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value
             }
         }
     }
-    let quality = pe["quality"]["quality"]["name"].as_str().unwrap_or("Unknown");
+    let quality = info["quality"]["quality"]["name"].as_str().unwrap_or("Unknown");
     let rank = order.iter().position(|(q, _)| q == quality);
     let scores: HashMap<i64, i64> =
         profile["formatItems"].as_array().into_iter().flatten().filter_map(|f| Some((f["format"].as_i64()?, f["score"].as_i64().unwrap_or(0)))).collect();
     let mut score: i64 = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| scores.get(&c["id"].as_i64()?)).sum();
-    // série que o Sonarr não reconheceu (nome em português): sem ela, ele não
-    // sabe o idioma original e não marca o formato do original — marca aqui,
-    // tomando o nome sem idioma como original, como ele faria
-    if parsed["series"].is_null() {
-        let langs: Vec<&str> = pe["languages"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
-        if langs.iter().all(|l| *l == "Unknown") || w.original.as_deref().is_some_and(|o| langs.contains(&o)) {
+    // título que o Radarr/Sonarr não reconheceu (nome em português, ou da
+    // DHT): sem ele, não sabem o idioma original e não marcam o formato do
+    // original — marca aqui, tomando o nome sem idioma como original
+    if unknown {
+        let langs: Vec<&str> = info["languages"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
+        if langs.iter().all(|l| *l == "Unknown") || original.is_some_and(|o| langs.contains(&o)) {
             let original = profile["formatItems"].as_array().into_iter().flatten().find(|f| f["name"] == crate::prefs::ORIGINAL_FORMAT);
             score += original.and_then(|f| f["score"].as_i64()).unwrap_or(0);
         }
@@ -564,15 +591,14 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value
     // magnetUrl é um link do Prowlarr que redireciona para ele
     let magnet = [&r["magnetUrl"], &r["guid"]].into_iter().find(|v| v.as_str().is_some_and(|m| m.starts_with("magnet:"))).cloned().unwrap_or(Value::Null);
     let download = if r["downloadUrl"].is_string() { r["downloadUrl"].clone() } else { r["magnetUrl"].clone() };
-    Some(json!({
+    json!({
         "guid": r["guid"], "title": title, "size": r["size"], "seeders": r["seeders"], "protocol": "torrent", "indexer": r["indexer"],
         "magnetUrl": magnet, "downloadUrl": download,
         "rejected": !reasons.is_empty(), "rejections": reasons,
-        "fullSeason": pack, "seasonNumber": w.season, "episodeNumbers": episodes,
-        "languages": pe["languages"], "quality": pe["quality"], "customFormatScore": score,
+        "languages": info["languages"], "quality": info["quality"], "customFormatScore": score,
         // menor = melhor: pontuação dos formatos, depois a qualidade
         "releaseWeight": -(score * 100 + rank.unwrap_or(0) as i64),
-    }))
+    })
 }
 
 /// A pasta do torrent nos nomes de arquivo do qBittorrent ("Pasta/a.mkv",
@@ -1403,12 +1429,20 @@ impl Orchestrator {
         let (mut list, item) = match kind {
             Kind::Movie => {
                 let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
-                (candidates(radarr.releases(&format!("movieId={arr_id}")).await?), radarr.get_json(&format!("movie/{arr_id}")).await?)
+                let movie = radarr.get_json(&format!("movie/{arr_id}")).await?;
+                (self.movie_releases(&movie).await?, movie)
             }
             _ => {
+                // a mesma busca do "assistir" (com o nome em português e, em
+                // último caso, a DHT): numa troca, a versão escolhida veio dela
                 let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
                 let ep = sonarr.episode(arr_id).await?;
-                (candidates(sonarr.releases(&format!("episodeId={arr_id}")).await?), sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?)
+                let series = sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?;
+                let list = match &self.prowlarr {
+                    Some(p) => self.prowlarr_episode(p, &series, arr_id, ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0)).await?,
+                    None => candidates(sonarr.releases(&format!("episodeId={arr_id}")).await?),
+                };
+                (list, series)
             }
         };
         original_or_portuguese(&mut list, original_language(&item));
@@ -1459,7 +1493,6 @@ impl Orchestrator {
     }
 
     async fn movie_target(&self, tmdb: i64, search: bool) -> Result<Target> {
-        let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
         let movie = self.ensure_movie(tmdb).await?;
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
         let title = movie["title"].as_str().unwrap_or_default().to_owned();
@@ -1467,9 +1500,49 @@ impl Orchestrator {
             let library = Some(Library::from(&movie["movieFile"])?);
             return Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library, candidates: vec![] });
         }
-        let mut candidates = if search { candidates(radarr.releases(&format!("movieId={movie_id}")).await?) } else { vec![] };
+        let mut candidates = if search { self.movie_releases(&movie).await? } else { vec![] };
         original_or_portuguese(&mut candidates, original_language(&movie));
         Ok(Target { title, arr_id: movie_id, series_id: None, episode: None, next: None, library: None, candidates })
+    }
+
+    /// As versões de um filme pelo Radarr e, em último caso (nenhuma
+    /// aprovada), o catálogo da DHT (bitmagnet), julgado pelo perfil do filme.
+    async fn movie_releases(&self, movie: &Value) -> Result<Vec<Candidate>> {
+        let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
+        let movie_id = movie["id"].as_i64().context("filme sem id")?;
+        let mut list = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
+        if self.cfg.bitmagnet.is_none() || list.iter().any(|c| !c.rejected) {
+            return Ok(list);
+        }
+        let name = movie["title"].as_str().unwrap_or_default().to_owned();
+        let year = movie["year"].as_i64().filter(|y| *y > 0);
+        let pt = match (&self.tmdb, movie["tmdbId"].as_i64().filter(|id| *id > 0)) {
+            (Some(t), Some(id)) => t.get(&format!("movie/{id}?language=pt-BR")).await.ok().and_then(|v| v["title"].as_str().map(str::to_owned)),
+            _ => None,
+        }
+        .filter(|pt| norm(pt) != norm(&name));
+        let profile = radarr.get_json(&format!("qualityprofile/{}", movie["qualityProfileId"])).await?;
+        let names: Vec<String> = [Some(name.clone()), pt.clone()].into_iter().flatten().map(|n| norm(&n)).collect();
+        let with_year = |n: &str| year.map_or_else(|| n.to_owned(), |y| format!("{n} {y}"));
+        let mut seen: HashSet<String> = list.iter().map(|c| c.guid.to_lowercase()).collect();
+        let mut extra = vec![];
+        for q in [Some(with_year(&name)), pt.as_deref().map(with_year)].into_iter().flatten() {
+            for r in self.bitmagnet_search(&q).await.unwrap_or_else(|e| {
+                warn!("bitmagnet: {e:#}");
+                vec![]
+            }) {
+                if !seen.insert(r["guid"].as_str().unwrap_or_default().to_lowercase()) {
+                    continue;
+                }
+                let Ok(parsed) = radarr.parse(r["title"].as_str().unwrap_or_default()).await else { continue };
+                if let Some(v) = judge_movie(&r, &parsed, &profile, movie, &names) {
+                    extra.push(v);
+                }
+            }
+        }
+        list.extend(candidates(extra));
+        sort_candidates(&mut list);
+        Ok(list)
     }
 
     /// As versões que o "assistir" consideraria, na ordem dele, sem baixar
@@ -2184,6 +2257,32 @@ mod tests {
         let order: Vec<_> = list.iter().map(|c| c.title.as_str()).collect();
         // dublada antes mesmo de tocar direto; recusada continua por último
         assert_eq!(order, ["Filme.1080p.x265-DUB", "Filme.1080p.x264-EN", "Filme.2160p-DUB"]);
+    }
+
+    #[test]
+    fn dht_movie_versions_are_judged_like_radarr() {
+        let q = |id: i64, name: &str, allowed: bool| json!({ "quality": { "id": id, "name": name }, "items": [], "allowed": allowed });
+        let profile = json!({ "minFormatScore": 100, "items": [q(3, "WEBDL-1080p", true), q(19, "Bluray-2160p", false)],
+                              "formatItems": [{ "format": 1, "name": "Anubis · Português (BR)", "score": 100 }, { "format": 2, "name": crate::prefs::ORIGINAL_FORMAT, "score": 50 }] });
+        let movie = json!({ "id": 7, "year": 2026, "originalLanguage": { "name": "English" } });
+        let names = vec![norm("Supergirl"), norm("Supergirl: Mulher de Aço")];
+        let r = |t: &str| json!({ "title": t, "guid": "h", "seeders": 3, "magnetUrl": "magnet:?xt=urn:btih:h" });
+        let parsed = |year: i64, langs: &[&str], cfs: &[i64], movie_id: Option<i64>| json!({
+            "movie": movie_id.map_or(Value::Null, |id| json!({ "id": id })),
+            "customFormats": cfs.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+            "parsedMovieInfo": { "year": year, "languages": langs.iter().map(|l| json!({ "name": l })).collect::<Vec<_>>(), "quality": { "quality": { "name": "WEBDL-1080p" } } }
+        });
+        // não reconhecido, nome e ano certos, dublado: aprovado
+        let v = judge_movie(&r("Supergirl.2026.1080p.WEB-DL.DUAL"), &parsed(2026, &["Portuguese (Brazil)"], &[1], None), &profile, &movie, &names).unwrap();
+        assert_eq!(v["rejected"], false);
+        // não reconhecido, sem idioma: conta como original (50 < 100): recusado
+        let v = judge_movie(&r("Supergirl 2026 1080p WEB-DL"), &parsed(2026, &["Unknown"], &[], None), &profile, &movie, &names).unwrap();
+        assert_eq!((v["rejected"].clone(), v["customFormatScore"].clone()), (json!(true), json!(50)));
+        // outro ano (o filme de 1984): fora
+        assert!(judge_movie(&r("Supergirl 1984 1080p"), &parsed(1984, &["English"], &[], None), &profile, &movie, &names).is_none());
+        // reconhecido pelo Radarr como outro filme: fora; como este: dentro
+        assert!(judge_movie(&r("Supergirl 2026"), &parsed(2026, &["English"], &[], Some(99)), &profile, &movie, &names).is_none());
+        assert!(judge_movie(&r("Supergirl 2026"), &parsed(2026, &["English"], &[], Some(7)), &profile, &movie, &names).is_some());
     }
 
     #[test]

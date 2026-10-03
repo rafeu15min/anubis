@@ -118,3 +118,6 @@ region = "BR"
 # url = "http://10.10.10.2:3333"
 # dht_container = "bitmagnet-dht"
 # quiet_minutes = 20
+# madrugada (1h às 6h): a pausa de 30 min quando a internet piora não vale
+# night_from = 1
+# night_to = 6

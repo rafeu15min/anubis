@@ -38,4 +38,4 @@ se somam (bf144ae).
 ## Depois
 - Renomear o site/apps (Anubis = só a API).
 - Sistema de login que cria usuários no Jellyfin.
-- bitmagnet (parado).
+- bitmagnet: religado em 2026-10-03 (busca de último caso no "assistir" de episódio; varredura só com tudo ocioso). Falta: a mesma busca para filmes.

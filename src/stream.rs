@@ -1556,6 +1556,7 @@ impl Orchestrator {
         // como TV ("O Mentalista - 1ª Temporada" sumia) e até o Pirate Bay perde
         // episódios; o `judge` já confere série, temporada e episódio
         let (q_ep, q_season) = (format!("{name} S{s:02}E{e:02}"), format!("{name} S{s:02}"));
+        let (pt_query, dht_name) = (pt.clone(), name.clone());
         let (a, b, c) = tokio::join!(
             p.search(&q_ep, &[], ONE_PAGE),
             p.search(&q_season, &[], ONE_PAGE),
@@ -1593,6 +1594,30 @@ impl Orchestrator {
             let Ok(parsed) = sonarr.parse(&scene_title(title)).await else { continue };
             if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
                 out.push(v);
+            }
+        }
+        // último caso: nenhuma versão aprovada nas fontes → o catálogo da DHT
+        // (bitmagnet), com as mesmas buscas e o mesmo julgamento
+        if self.cfg.bitmagnet.is_some() && out.iter().all(|v| v["rejected"] == true) {
+            let mut seen: HashSet<String> = out.iter().filter_map(|v| v["guid"].as_str().map(str::to_lowercase)).collect();
+            // na DHT os nomes vêm como os arquivos: programas de variedade sem
+            // temporada ("Running Man - 794 [260315]"), daí também o número
+            // absoluto e o nome sozinho (o `judge` fica só com este episódio)
+            let abs = sonarr.episode(episode_id).await.ok().and_then(|x| x["absoluteEpisodeNumber"].as_i64());
+            for q in [Some(q_ep), Some(q_season), pt_query, abs.map(|a| format!("{dht_name} {a}")), Some(dht_name.clone())].into_iter().flatten() {
+                for r in self.bitmagnet_search(&q).await.unwrap_or_else(|e| {
+                    warn!("bitmagnet: {e:#}");
+                    vec![]
+                }) {
+                    if !seen.insert(r["guid"].as_str().unwrap_or_default().to_lowercase()) {
+                        continue;
+                    }
+                    let title = r["title"].as_str().unwrap_or_default();
+                    let Ok(parsed) = sonarr.parse(&scene_title(title)).await else { continue };
+                    if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
+                        out.push(v);
+                    }
+                }
             }
         }
         Ok(candidates(out))

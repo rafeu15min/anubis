@@ -25,6 +25,7 @@ pub struct Config {
     /// busca direta nos indexadores (o "assistir" de episódios fica bem mais
     /// rápido que pela busca do Sonarr, e acha os nomes em português)
     pub prowlarr: Option<ProwlarrCfg>,
+    pub bitmagnet: Option<BitmagnetCfg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,29 @@ pub struct Config {
 pub struct ProwlarrCfg {
     pub url: String,
     pub api_key: String,
+}
+
+/// bitmagnet: o catálogo da DHT (busca de último caso) e a varredura que o
+/// Anubis liga e pausa (src/bitmagnet.rs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BitmagnetCfg {
+    /// onde está o Torznab dele ("http://10.10.10.2:3333")
+    pub url: String,
+    /// o container só da varredura (a busca fica em outro, sempre ligado)
+    #[serde(default = "default_dht_container")]
+    pub dht_container: String,
+    /// minutos sem ninguém no site nem assistindo para a varredura rodar
+    #[serde(default = "default_quiet_minutes")]
+    pub quiet_minutes: u64,
+}
+
+fn default_dht_container() -> String {
+    "bitmagnet-dht".into()
+}
+
+fn default_quiet_minutes() -> u64 {
+    20
 }
 
 /// "Onde assistir": serviços de streaming do país, pelo TMDB.

@@ -106,3 +106,15 @@ region = "BR"
 # [prowlarr]
 # url = "http://10.10.10.2:9696"
 # api_key = ""
+
+# Opcional: bitmagnet, o catálogo do que circula na DHT do BitTorrent (acha o
+# que os sites não têm). A busca dele entra só em último caso: quando as
+# fontes normais não têm nenhuma versão aprovada do episódio. A varredura da
+# DHT lota a tabela de conexões do roteador; ela fica num container à parte,
+# que o Anubis liga depois de `quiet_minutes` sem ninguém no site nem
+# assistindo no Jellyfin, e pausa na hora em que alguém chega
+# (infra/feuvault/bitmagnet).
+# [bitmagnet]
+# url = "http://10.10.10.2:3333"
+# dht_container = "bitmagnet-dht"
+# quiet_minutes = 20

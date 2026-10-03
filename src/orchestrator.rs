@@ -44,6 +44,8 @@ pub struct Orchestrator {
     pub(crate) availability: crate::avail::Checker,
     /// indexadores fora do ar (1 min)
     pub(crate) indexers: crate::indexers::Cache,
+    /// a varredura da DHT do bitmagnet (liga com tudo ocioso)
+    pub(crate) dht: crate::bitmagnet::Dht,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -87,6 +89,7 @@ impl Orchestrator {
             profile_ids: Mutex::new(None),
             versions_cache: Mutex::new(HashMap::new()),
             indexers: crate::indexers::Cache::default(),
+            dht: crate::bitmagnet::Dht::default(),
             availability: crate::avail::Checker::load(cfg.stream.as_ref().map_or_else(|| std::path::PathBuf::from("/var/lib/anubis"), |s| s.state_dir.clone())),
             cfg,
             running: Mutex::new(()),

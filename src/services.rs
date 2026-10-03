@@ -602,6 +602,12 @@ struct Session {
 }
 
 impl Jellyfin {
+    /// Alguém está assistindo agora (em qualquer aparelho)?
+    pub async fn playing(&self) -> Result<bool> {
+        let sessions: Vec<Session> = send(self.req(Method::GET, "Sessions"), "Jellyfin sessões").await?;
+        Ok(sessions.iter().any(|s| s.now_playing_item.is_some()))
+    }
+
     pub async fn get_json(&self, path: &str) -> Result<Value> {
         send(self.req(Method::GET, path), &format!("Jellyfin {path}")).await
     }

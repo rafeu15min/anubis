@@ -127,7 +127,17 @@ pub fn router(state: AppState) -> Router {
         .route("/storage/run", post(run))
         .route("/hooks/torrent-finished", post(torrent_finished))
         .route("/hooks/arr", post(arr_event))
+        // qualquer acesso ao site (fora os avisos do Radarr/Sonarr/qBittorrent)
+        // pausa a varredura da DHT
+        .layer(axum::middleware::from_fn_with_state(state.clone(), activity))
         .with_state(state)
+}
+
+async fn activity(State(s): State<AppState>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if !req.uri().path().starts_with("/hooks/") {
+        s.orch.dht_touch();
+    }
+    next.run(req).await
 }
 
 fn authorized(state: &AppState, headers: &HeaderMap) -> bool {

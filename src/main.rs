@@ -16,6 +16,7 @@ mod bitmagnet;
 mod config;
 mod discover;
 mod disk;
+mod episode_avail;
 mod dubsync;
 mod external;
 mod foryou;

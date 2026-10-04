@@ -42,6 +42,8 @@ pub struct Orchestrator {
     pub(crate) versions_cache: Mutex<HashMap<(crate::search::Kind, i64), (std::time::Instant, crate::search::Versions)>>,
     /// o que os indexadores têm de cada título da vitrine
     pub(crate) availability: crate::avail::Checker,
+    /// o que as fontes têm de cada episódio (lista de episódios)
+    pub(crate) episode_avail: crate::episode_avail::Cache,
     /// indexadores fora do ar (1 min)
     pub(crate) indexers: crate::indexers::Cache,
     /// a varredura da DHT do bitmagnet (liga com tudo ocioso)
@@ -91,6 +93,7 @@ impl Orchestrator {
             indexers: crate::indexers::Cache::default(),
             dht: crate::bitmagnet::Dht::default(),
             availability: crate::avail::Checker::load(cfg.stream.as_ref().map_or_else(|| std::path::PathBuf::from("/var/lib/anubis"), |s| s.state_dir.clone())),
+            episode_avail: crate::episode_avail::Cache::default(),
             cfg,
             running: Mutex::new(()),
             last: Mutex::new(None),

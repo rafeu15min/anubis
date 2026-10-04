@@ -371,7 +371,7 @@ impl Candidate {
 }
 
 /// O idioma original de um filme ou série do Radarr/Sonarr.
-fn original_language(item: &Value) -> Option<&str> {
+pub(crate) fn original_language(item: &Value) -> Option<&str> {
     item["originalLanguage"]["name"].as_str().filter(|l| !l.is_empty() && *l != "Unknown")
 }
 
@@ -387,7 +387,7 @@ fn original_or_portuguese(list: &mut Vec<Candidate>, original: Option<&str>) {
 /// "O Mentalista - 1ª Temporada Completa" → "O Mentalista - S01 Completa";
 /// "Temporada 2 Episódio 5" → "S02E05". O resto do nome fica igual. Sem isso
 /// o Sonarr não acha a temporada, e a versão dublada era descartada.
-fn scene_title(title: &str) -> String {
+pub(crate) fn scene_title(title: &str) -> String {
     let words: Vec<&str> = title.split_whitespace().collect();
     let low = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
     // "1ª", "2º", "3a" → 1, 2, 3
@@ -492,12 +492,12 @@ struct Wanted {
 }
 
 /// Letras e números, minúsculos: "The Legend of Vox Machina" = "the.legend.of.vox.machina".
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
 /// Nome da série para buscar: sem o ano entre parênteses ("Doctor Who (2005)").
-fn series_name(t: &str) -> String {
+pub(crate) fn series_name(t: &str) -> String {
     match t.rsplit_once(" (") {
         Some((n, y)) if y.trim_end_matches(')').chars().all(|c| c.is_ascii_digit()) => n.to_owned(),
         _ => t.to_owned(),

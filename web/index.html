@@ -56,6 +56,9 @@
   button.icon.danger:hover { background: color-mix(in srgb, #ff8a8a 15%, transparent); }
   .ep .acts { display: flex; gap: 6px; }
   .ep small.st { color: var(--info); }
+  .tag.none { color: var(--muted); border-style: dashed; }
+  summary .tags { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: 1px; }
+  #epscheck { color: var(--muted); font-size: 13px; margin: 0 0 6px; }
   /* botão de ícone ocupado: gira no lugar do ícone */
   button.icon.busy { position: relative; }
   button.icon.busy .i { visibility: hidden; }
@@ -506,20 +509,60 @@ async function episodes(tvdb, title) {
     if (!r.ok) throw new Error(d.error);
     const today = new Date().toISOString().slice(0, 10);
     $('#epslist').innerHTML = d.seasons.map((s, i) => `<details ${i === 0 ? 'open' : ''}>
-        <summary>${s.number === 0 ? 'Especiais' : `Temporada ${s.number}`} <span class="meta">· ${s.episodes.length} episódios</span></summary>
+        <summary>${s.number === 0 ? 'Especiais' : `Temporada ${s.number}`} <span class="meta">· ${s.episodes.length} episódios</span><span class="tags"></span></summary>
         ${s.episodes.map((e) => {
           const future = e.air_date && e.air_date > today;
           const trash = e.has_file ? `<button class="icon danger" data-uninstall="episode:${e.id}" title="Apagar da biblioteca" aria-label="Apagar da biblioteca"><i class="i i-trash"></i></button>` : '';
           const btn = future ? `<span class="meta">estreia ${esc(e.air_date)}</span>` : `<span class="acts">${trash}<button class="icon" data-watch="episode:${e.id}" title="Assistir" aria-label="Assistir"><i class="i i-play"></i></button></span>`;
           const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + watchTag(e.watch);
-          return `<div class="ep"><span class="n">${e.number}</span>
+          return `<div class="ep" data-ep="${e.id}"${e.has_file || future ? ' data-have' : ''}><span class="n">${e.number}</span>
             <div>${esc(e.title || 'Episódio ' + e.number)}${tags ? ` <span class="tags">${tags}</span>` : ''}<small>${esc(e.air_date || '')}</small></div>${btn}</div>`;
         }).join('')}</details>`).join('') || '<p class="msg">Nenhum episódio.</p>';
+    episodeAvailability(tvdb);
   } catch (e) {
     $('#epslist').innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
   }
 }
 $('#epsclose').onclick = () => $('#eps').close();
+
+// o que as fontes têm de cada episódio que falta: "só legendado" e "sem
+// fonte" ao lado de "na biblioteca"; a temporada ganha o selo quando ele vale
+// para todos os que faltam nela. O servidor avalia em segundo plano (202):
+// a página pergunta de novo enquanto a janela está aberta
+const AVAIL_TAG = { subbed: '<span class="tag sub">só legendado</span>', nothing: '<span class="tag none">sem fonte</span>' };
+async function episodeAvailability(tvdb) {
+  const note = (t) => {
+    let n = $('#epscheck');
+    if (!n) { n = Object.assign(document.createElement('p'), { id: 'epscheck' }); $('#epslist').prepend(n); }
+    n.textContent = t;
+    n.hidden = !t;
+  };
+  for (let i = 0; i < 60 && currentTvdb === tvdb && $('#eps').open; i++) {
+    let r;
+    try { r = await fetch(`series/${tvdb}/availability`); } catch { return; }
+    if (r.status === 202) { note('Conferindo as fontes de cada episódio…'); await new Promise((ok) => setTimeout(ok, 4000)); continue; }
+    note('');
+    if (!r.ok || currentTvdb !== tvdb) return;
+    const eps = (await r.json()).episodes || {};
+    document.querySelectorAll('#epslist .ep[data-ep]').forEach((row) => {
+      const a = eps[row.dataset.ep];
+      if (!a || !AVAIL_TAG[a] || row.hasAttribute('data-have')) return;
+      let tags = row.querySelector('.tags');
+      if (!tags) {
+        tags = Object.assign(document.createElement('span'), { className: 'tags' });
+        row.children[1].insertBefore(tags, row.children[1].querySelector('small'));
+      }
+      tags.insertAdjacentHTML('beforeend', AVAIL_TAG[a]);
+    });
+    document.querySelectorAll('#epslist details').forEach((d) => {
+      const states = [...d.querySelectorAll('.ep[data-ep]:not([data-have])')].map((row) => eps[row.dataset.ep]).filter(Boolean);
+      const all = states.length && states.every((a) => a === states[0]) ? states[0] : null;
+      if (all && AVAIL_TAG[all]) d.querySelector('summary .tags').innerHTML = AVAIL_TAG[all];
+    });
+    return;
+  }
+  note('');
+}
 
 // vitrine por categoria: prontos para assistir + Destaques, Lançamentos e
 // Populares no Brasil (TMDB), em carrossel; um toque abre o cartão completo

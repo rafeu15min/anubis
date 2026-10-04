@@ -23,6 +23,7 @@
 //! GET  /watch/{kind}/{id}/candidates — as versões que o "assistir" consideraria, na ordem (sem baixar)
 //! POST /watch/{kind}/{id}/progress {"t", "duration"} — o player avisa onde está; grava no Jellyfin
 //! GET  /series/{tvdb}/episodes  — temporadas e episódios (para escolher o que assistir)
+//! GET  /series/{tvdb}/availability — o que as fontes têm de cada episódio que falta (202 enquanto avalia)
 //! POST /series/{tvdb}/subbed    — sem dublado em nenhuma fonte: aceita o legendado
 //! POST /movie/{tmdb}/subbed      — o mesmo para filmes
 //! GET /hidden · POST/DELETE /hidden/{kind}/{id} — "não quero ver" (fora da vitrine)
@@ -115,6 +116,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/{kind}/{id}/subs/{n}", get(sub_vtt))
         .route("/watch/{kind}/{id}/subs/{n}/raw", get(sub_raw))
         .route("/series/{tvdb}/episodes", get(episodes))
+        .route("/series/{tvdb}/availability", get(episode_availability))
         .route("/series/{tvdb}/subbed", post(series_subbed))
         .route("/movie/{tmdb}/subbed", post(movie_subbed))
         .route("/where/{kind}/{id}", get(where_to_watch))
@@ -632,6 +634,13 @@ async fn episodes(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response 
     match s.orch.episodes(tvdb).await {
         Ok(e) => Json(e).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn episode_availability(State(s): State<AppState>, Path(tvdb): Path<i64>) -> Response {
+    match s.orch.episode_availability(tvdb).await {
+        Some(eps) => Json(json!({ "episodes": eps.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<std::collections::HashMap<_, _>>() })).into_response(),
+        None => (StatusCode::ACCEPTED, Json(json!({ "checking": true }))).into_response(),
     }
 }
 

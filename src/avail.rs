@@ -32,7 +32,7 @@ const GAP: std::time::Duration = std::time::Duration::from_secs(15);
 /// O 1337x fica fora da checagem (é o que bloqueia o IP); as outras fontes
 /// bastam para saber se o título existe. O Radarr/Sonarr e o "Assistir"
 /// continuam usando ele.
-fn skipped(indexer: &str) -> bool {
+pub(crate) fn skipped(indexer: &str) -> bool {
     indexer.to_lowercase().contains("1337x")
 }
 // indexador de castigo não precisa de pausa aqui: o Prowlarr já não o consulta
@@ -198,8 +198,13 @@ impl Checker {
     }
 
     async fn record(&self, w: &Want, avail: Avail) {
+        self.set(w.kind, w.id, avail).await;
+    }
+
+    /// Grava o que se sabe do título (também o resumo dos episódios de uma série).
+    pub(crate) async fn set(&self, kind: Kind, id: i64, avail: Avail) {
         let mut map = self.map.lock().await;
-        let k = key(w.kind, w.id);
+        let k = key(kind, id);
         // "não sei" não apaga o que já se sabia: só checa de novo mais cedo
         let kept = match (avail, map.get(&k)) {
             (Avail::Unknown, Some(old)) if old.avail != Avail::Unknown => old.avail,
@@ -287,8 +292,8 @@ fn language_name(iso: &str) -> Option<&'static str> {
     })
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Audio {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Audio {
     Portuguese,
     Original,
     Other,
@@ -296,7 +301,7 @@ enum Audio {
 
 /// Sites brasileiros (o torrent-indexer escreve os idiomas no fim do nome,
 /// "(brazilian, eng)"): DUAL, DUBLADO e NACIONAL também são áudio em português.
-fn br_audio(release: &str) -> Audio {
+pub(crate) fn br_audio(release: &str) -> Audio {
     let w = words(release);
     if w.iter().any(|x| matches!(x.as_str(), "brazilian" | "portuguese" | "dual" | "dublado" | "dublada" | "nacional")) {
         Audio::Portuguese
@@ -307,7 +312,7 @@ fn br_audio(release: &str) -> Audio {
 
 /// Os idiomas que o `parse` do Radarr/Sonarr leu no nome; sem idioma no nome
 /// é o original (como eles fazem).
-fn arr_audio(languages: &[&str], original: Option<&str>) -> Audio {
+pub(crate) fn arr_audio(languages: &[&str], original: Option<&str>) -> Audio {
     if languages.iter().any(|l| l.starts_with("Portuguese")) {
         Audio::Portuguese
     } else if languages.iter().all(|l| *l == "Unknown") || original.is_some_and(|o| languages.contains(&o)) {
@@ -410,7 +415,7 @@ impl Orchestrator {
     }
 }
 
-fn is_br(r: &Value) -> bool {
+pub(crate) fn is_br(r: &Value) -> bool {
     r["indexer"].as_str().is_some_and(|i| i.ends_with("(BR)"))
 }
 

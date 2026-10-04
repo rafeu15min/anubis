@@ -90,10 +90,15 @@ fn now() -> i64 {
 }
 
 /// Português no arquivo: no que o Radarr/Sonarr entenderam do nome ou nas
-/// faixas que o mediainfo leu ("por/eng").
-fn has_portuguese(file: &Value) -> bool {
+/// faixas que o mediainfo leu ("por/eng" na API; ["por", "eng"] no webhook).
+pub(crate) fn has_portuguese(file: &Value) -> bool {
+    let audio = &file["mediaInfo"]["audioLanguages"];
+    let tracks: Vec<String> = match audio.as_array() {
+        Some(list) => list.iter().filter_map(|l| l.as_str().map(str::to_lowercase)).collect(),
+        None => audio.as_str().unwrap_or_default().to_lowercase().split(['/', ',', ' ']).map(str::to_owned).collect(),
+    };
     file["languages"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.starts_with("Portuguese")))
-        || file["mediaInfo"]["audioLanguages"].as_str().is_some_and(|a| a.to_lowercase().split(['/', ',', ' ']).any(|l| ["por", "pob", "pt", "ptb", "portuguese"].contains(&l)))
+        || tracks.iter().any(|l| ["por", "pob", "pt", "ptb", "portuguese"].contains(&l.as_str()))
 }
 
 fn portuguese_original(item: &Value) -> bool {
@@ -185,6 +190,24 @@ impl Orchestrator {
         self.autodub.urgent.lock().await.extend(keys.iter().cloned());
         self.autodub.wake.notify_one();
         Ok(keys)
+    }
+
+    /// Webhook "Download" do Radarr/Sonarr: o arquivo que entrou não tem
+    /// português → a dublagem é procurada na hora, sem esperar a passada.
+    pub async fn autodub_after_import(&self, ev: &Value) {
+        let (kind, ids, file) = if !ev["movie"].is_null() {
+            (Kind::Movie, ev["movie"]["tmdbId"].as_i64().into_iter().collect::<Vec<_>>(), &ev["movieFile"])
+        } else {
+            (Kind::Episode, ev["episodes"].as_array().into_iter().flatten().filter_map(|e| e["id"].as_i64()).collect(), &ev["episodeFile"])
+        };
+        if file.is_null() || has_portuguese(file) {
+            return;
+        }
+        for id in ids {
+            if let Err(e) = self.autodub_now(kind, id).await {
+                warn!("dublagem depois do import: {e:#}");
+            }
+        }
     }
 
     /// O que a dublagem automática sabe de cada título (para conferir).
@@ -368,5 +391,8 @@ mod tests {
         assert!(has_portuguese(&json!({ "languages": [{ "name": "English" }], "mediaInfo": { "audioLanguages": "eng/por" } })));
         assert!(!has_portuguese(&json!({ "languages": [{ "name": "English" }], "mediaInfo": { "audioLanguages": "eng" } })));
         assert!(!has_portuguese(&json!({ "languages": [], "mediaInfo": { "audioLanguages": "" } })));
+        // o webhook manda a lista
+        assert!(has_portuguese(&json!({ "languages": [{ "name": "English" }], "mediaInfo": { "audioLanguages": ["eng", "por"] } })));
+        assert!(!has_portuguese(&json!({ "languages": [{ "name": "English" }], "mediaInfo": { "audioLanguages": ["eng"] } })));
     }
 }

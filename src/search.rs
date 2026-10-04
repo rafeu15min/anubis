@@ -71,6 +71,12 @@ pub struct EpisodeRow {
     pub title: Option<String>,
     pub air_date: Option<String>,
     pub has_file: bool,
+    /// na biblioteca: o arquivo tem áudio em português
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portuguese: Option<bool>,
+    /// na fila do Sonarr: 0..1 do download (1 = entrando na biblioteca)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloading: Option<f64>,
     /// o que o usuário do Jellyfin já viu dele
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watch: Option<Progress>,
@@ -132,6 +138,9 @@ pub struct Status {
     /// aviso para a página (ex.: nenhuma fonte tem versão dublada)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// na biblioteca (filme, episódio): o arquivo tem áudio em português
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portuguese: Option<bool>,
 }
 
 /// O que a busca nos indexadores achou para um pedido parado em "procurando":
@@ -198,8 +207,8 @@ fn summarize(releases: &[Value]) -> Versions {
 /// progresso 0..1, tamanho, segundos restantes). O link do Jellyfin fica de fora.
 fn compute(kind: Kind, item: &Value, queue: &[Value], torrent: impl Fn(&str) -> Option<(f64, f64, i64)>) -> Status {
     let (have_any, episodes) = match kind {
-        Kind::Movie => (item["hasFile"].as_bool().unwrap_or(false), None),
-        Kind::Series | Kind::Episode => {
+        Kind::Movie | Kind::Episode => (item["hasFile"].as_bool().unwrap_or(false), None),
+        Kind::Series => {
             let st = &item["statistics"];
             let files = st["episodeFileCount"].as_i64().unwrap_or(0);
             (files > 0, Some((files, st["episodeCount"].as_i64().unwrap_or(0))))
@@ -240,7 +249,7 @@ fn compute(kind: Kind, item: &Value, queue: &[Value], torrent: impl Fn(&str) -> 
     } else {
         State::Searching
     };
-    Status { state, progress, eta, episodes, jellyfin_url: None, note: None }
+    Status { state, progress, eta, episodes, jellyfin_url: None, note: None, portuguese: None }
 }
 
 /// resultado da busca de versões guardado por este tempo (é uma busca de verdade nos indexadores)
@@ -380,10 +389,14 @@ impl Orchestrator {
     }
 
     /// Pede o item: adiciona ao Radarr/Sonarr e manda buscar. Se já estava lá,
-    /// só manda buscar de novo o que falta.
-    pub async fn request(&self, kind: Kind, id: i64) -> Result<Status> {
+    /// só manda buscar de novo o que falta. Episódio (id no Sonarr) e série: a
+    /// busca do "assistir" (nome em português, sites brasileiros) escolhe e
+    /// entrega ao Sonarr; o que ela não achar, o Sonarr busca.
+    pub async fn request(self: &std::sync::Arc<Self>, kind: Kind, id: i64) -> Result<Status> {
         if kind == Kind::Episode {
-            bail!("episódios são pedidos pelo \"assistir agora\"");
+            self.download_episode(id).await?;
+            crate::live::refresh_arr(self).await;
+            return self.status(kind, id).await;
         }
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
@@ -398,11 +411,10 @@ impl Orchestrator {
                     Kind::Series | Kind::Episode => arr.monitor_series_all(lib_id).await?,
                 }
             }
-            let cmd = match kind {
-                Kind::Movie => json!({ "name": "MoviesSearch", "movieIds": [lib_id] }),
-                Kind::Series | Kind::Episode => json!({ "name": "SeriesSearch", "seriesId": lib_id }),
-            };
-            arr.command(cmd).await?;
+            match kind {
+                Kind::Movie => arr.command(json!({ "name": "MoviesSearch", "movieIds": [lib_id] })).await?,
+                Kind::Series | Kind::Episode => self.download_series(lib_id),
+            }
             crate::live::refresh_arr(self).await;
             return self.status(kind, id).await;
         }
@@ -425,10 +437,16 @@ impl Orchestrator {
             Kind::Series | Kind::Episode => {
                 item["seasonFolder"] = json!(true);
                 item["seriesType"] = json!(if anime { "anime" } else { "standard" });
-                item["addOptions"] = json!({ "monitor": "all", "searchForMissingEpisodes": true });
+                // a busca vem depois, pelo Anubis (`download_series`)
+                item["addOptions"] = json!({ "monitor": "all", "searchForMissingEpisodes": false });
             }
         }
-        arr.add(what, item).await?;
+        let added = arr.add(what, item).await?;
+        if kind == Kind::Series
+            && let Some(sid) = added["id"].as_i64()
+        {
+            self.download_series(sid);
+        }
         // a central refaz as listas antes de responder (senão o item novo
         // pareceria ausente até a próxima atualização)
         crate::live::refresh_arr(self).await;
@@ -437,7 +455,7 @@ impl Orchestrator {
 
     pub async fn status(&self, kind: Kind, id: i64) -> Result<Status> {
         if kind == Kind::Episode {
-            bail!("o estado de episódios vem do player");
+            return self.episode_status(id).await;
         }
         self.live.touch();
         // da central (listas recentes do Radarr/Sonarr + qBittorrent), sem consultar ninguém
@@ -452,13 +470,16 @@ impl Orchestrator {
             drop(torrents);
             if st.state == State::Available {
                 st.jellyfin_url = self.cached_jellyfin_url(kind, id, &item).await;
+                if kind == Kind::Movie {
+                    st.portuguese = Some(crate::autodub::has_portuguese(&item["movieFile"]));
+                }
             }
             st.note = self.dub_note(kind, &item).await;
             return Ok(st);
         }
         if snap.fresh() {
             // a central está em dia e não o tem: não está no Radarr/Sonarr
-            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None });
+            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None, portuguese: None });
         }
         drop(snap);
 
@@ -466,7 +487,7 @@ impl Orchestrator {
         let arr = self.arr(kind)?;
         let (what, id_param) = if kind == Kind::Movie { ("movie", "tmdbId") } else { ("series", "tvdbId") };
         let Some(item) = arr.find(what, id_param, id).await? else {
-            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None });
+            return Ok(Status { state: State::NotRequested, progress: None, eta: None, episodes: None, jellyfin_url: None, note: None, portuguese: None });
         };
         let lib_id = item["id"].as_i64().context("item sem id")?;
         let queue = arr.queue(&format!("{}={lib_id}", if kind == Kind::Movie { "movieId" } else { "seriesId" })).await?;
@@ -481,6 +502,22 @@ impl Orchestrator {
     }
 
     /// Aviso do que foi para o legendado.
+    /// Episódio (id no Sonarr): na biblioteca, na fila ou monitorado (procurando).
+    async fn episode_status(&self, id: i64) -> Result<Status> {
+        let sonarr = self.arr(Kind::Episode)?;
+        let ep = sonarr.episode(id).await?;
+        let queue = sonarr.queue(&format!("episodeIds={id}")).await.unwrap_or_default();
+        let torrents = self.live.torrents.lock().await;
+        let mut st = compute(Kind::Episode, &ep, &queue, |h| torrents.get(&h.to_lowercase()).map(|t| (t["progress"].as_f64().unwrap_or(0.0), t["size"].as_f64().unwrap_or(0.0), t["eta"].as_i64().unwrap_or(8_640_000))));
+        drop(torrents);
+        if st.state == State::Available
+            && let Some(file) = ep["episodeFileId"].as_i64().filter(|f| *f > 0)
+        {
+            st.portuguese = sonarr.episode_file(file).await.ok().map(|f| crate::autodub::has_portuguese(&f));
+        }
+        Ok(st)
+    }
+
     async fn dub_note(&self, kind: Kind, item: &Value) -> Option<String> {
         let ids = (*self.profile_ids.lock().await)?;
         let fallback = match kind {
@@ -570,6 +607,25 @@ impl Orchestrator {
             Ok(user) => self.jellyfin_episodes(&series, &user).await.unwrap_or_default(),
             Err(_) => Default::default(),
         };
+        // português de cada arquivo (nome ou faixas lidas pelo mediainfo)
+        let portuguese: std::collections::HashMap<i64, bool> = sonarr
+            .get_json(&format!("episodefile?seriesId={series_id}"))
+            .await
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|f| (f["id"].as_i64().unwrap_or(0), crate::autodub::has_portuguese(f)))
+            .collect();
+        // na fila: quanto já baixou (um pacote conta para todos os episódios dele)
+        let mut queue: std::collections::HashMap<i64, f64> = Default::default();
+        for q in sonarr.queue(&format!("seriesId={series_id}")).await.unwrap_or_default() {
+            let (size, left) = (q["size"].as_f64().unwrap_or(0.0), q["sizeleft"].as_f64().unwrap_or(0.0));
+            let p = if matches!(q["trackedDownloadState"].as_str(), Some("importPending" | "importing")) || size <= 0.0 { if size > 0.0 { 1.0 } else { 0.0 } } else { 1.0 - left / size };
+            if let Some(id) = q["episodeId"].as_i64() {
+                queue.insert(id, p);
+            }
+        }
         let mut seasons: std::collections::BTreeMap<i64, Vec<EpisodeRow>> = Default::default();
         for e in raw {
             let season = e["seasonNumber"].as_i64().unwrap_or(0);
@@ -580,6 +636,8 @@ impl Orchestrator {
                 title: e["title"].as_str().map(str::to_owned),
                 air_date: e["airDate"].as_str().map(str::to_owned),
                 has_file: e["hasFile"].as_bool().unwrap_or(false),
+                portuguese: e["episodeFileId"].as_i64().and_then(|f| portuguese.get(&f).copied()),
+                downloading: e["id"].as_i64().and_then(|id| queue.get(&id).copied()),
                 watch: watched.get(&(season, number)).and_then(|j| j.progress.clone()),
             });
         }

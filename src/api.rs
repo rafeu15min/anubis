@@ -729,6 +729,7 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
             let kind = match kind {
                 "movie" => Kind::Movie,
                 "series" => Kind::Series,
+                "episode" => Kind::Episode,
                 _ => return None,
             };
             Some((kind, id.parse().ok()?))
@@ -868,6 +869,12 @@ async fn arr_event(State(s): State<AppState>, Query(q): Query<HookToken>, header
     s.orch.live.dirty.notify_one();
     // importou (pelo "Baixar" ou pelo "Assistir"): o Jellyfin varre a biblioteca
     let ev: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if ev["eventType"] == "Download" {
+        // entrou sem português: a dublagem é procurada na hora
+        let orch = s.orch.clone();
+        let ev = ev.clone();
+        tokio::spawn(async move { orch.autodub_after_import(&ev).await });
+    }
     if ev["eventType"] == "Download"
         && let Some(path) = ev["movie"]["folderPath"].as_str().or(ev["series"]["path"].as_str())
     {

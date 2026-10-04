@@ -121,6 +121,19 @@ impl Arr {
     pub async fn series_by_id(&self, id: i64) -> Result<Value> {
         self.get(&format!("series/{id}")).await
     }
+    /// Sonarr: monitora a série sem mexer nos episódios (um "baixar" de
+    /// episódio avulso: o Sonarr só aceita versões de série monitorada).
+    pub async fn set_series_monitored(&self, series_id: i64) -> Result<()> {
+        let body = json!({ "seriesIds": [series_id], "monitored": true });
+        send::<Value>(self.req(Method::PUT, "series/editor").json(&body), &format!("{} monitorar série", self.name)).await?;
+        Ok(())
+    }
+    /// Entrega uma versão pronta (`release/push`): o Sonarr/Radarr julga pelo
+    /// perfil e, aprovada, manda ao cliente de download como se a tivesse achado.
+    pub async fn push_release(&self, release: &Value) -> Result<Value> {
+        let req = self.req(Method::POST, "release/push").json(release).timeout(Duration::from_secs(120));
+        send(req, &format!("{} entregar versão", self.name)).await
+    }
     /// Liga o monitoramento de episódios (depois do import pelo "assistir agora").
     pub async fn monitor_episodes(&self, ids: &[i64]) -> Result<()> {
         let body = json!({ "episodeIds": ids, "monitored": true });

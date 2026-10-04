@@ -104,9 +104,22 @@ hardlink e, quando ninguém assiste há 5 minutos, o torrent passa ao qBittorren
 para semear. Se nenhuma versão passa no perfil de qualidade, a página lista as
 recusadas com o motivo e deixa escolher uma mesmo assim.
 
-Séries: "Episódios" lista as temporadas; cada episódio tem "Assistir" (usa a
-versão do episódio ou, sem ela, o pacote da temporada baixando só aquele
-arquivo) e o player oferece o próximo. O que o navegador não toca (H.265,
+**Botões (ícones, iguais em filmes, séries, animes e episódios):** ▶ sempre
+(o "Assistir" acima); ⬇ no que não está no servidor (pede ao Radarr/Sonarr,
+que baixa pelo qBittorrent; 🔔 quando nenhuma fonte tem agora: pede e fica de
+olho); 🗑 no que está; 🎙, discreto, no que está sem português (procura a
+dublagem na hora). Baixando, o ⬇ vira a porcentagem. Séries e animes abrem
+numa janela só, com as temporadas embutidas; no topo, "▶ T2·E3" toca o
+próximo episódio não assistido (tudo visto: T1·E1), e o ⬇ baixa os episódios
+já exibidos que faltam. O ⬇ de um episódio, e o da série por temporada, usa
+a busca do "Assistir" (nome em português, sites brasileiros, nomes como "1ª
+Temporada" convertidos para o formato de cena) e entrega a versão escolhida
+ao Sonarr (`release/push`), com o nome da série no Sonarr quando o português
+não é reconhecido; o Sonarr baixa e importa como sempre. Nada aceito por ele:
+o Sonarr busca sozinho e o episódio fica monitorado.
+
+Séries: o ▶ de cada episódio usa a versão do episódio ou, sem ela, o pacote
+da temporada baixando só aquele arquivo, e o player oferece o próximo. O que o navegador não toca (H.265,
 áudio AC3/DTS, MKV) é convertido na hora pelo ffmpeg do container do Jellyfin
 (`docker exec`, com um vigia que o encerra quando o player fecha). Pedidos em
 andamento sobrevivem a reinícios (`/var/lib/anubis`).
@@ -117,10 +130,12 @@ embutidas no MKV; tudo vira WebVTT (SRT em Windows-1252 incluso), acompanha os
 pulos no modo convertido e o idioma escolhido fica lembrado. O Bazarr pula
 legenda quando o áudio já é português.
 
-**Dublagem automática** (`src/autodub.rs`, sem botão): filmes e episódios da
+**Dublagem automática** (`src/autodub.rs`): filmes e episódios da
 biblioteca sem áudio em português (nem no nome nem nas faixas que o mediainfo
 leu; fora os de idioma original português e os especiais) ganham a faixa PT-BR
-quando uma dublagem aparece nas fontes. A cada 6 h, um título por vez, com o
+quando uma dublagem aparece nas fontes. Um arquivo que entra sem português
+(webhook "Download" do Radarr/Sonarr) é procurado na hora, como o 🎙 da
+página; o resto, a cada 6 h, um título por vez, com o
 site ocioso há 10 min e 30 s entre as buscas (no máximo 30 por passada); a
 busca é a do "Assistir" com a DHT sempre consultada, só versões com áudio em
 português, inclusive as que dizem ter zero fontes (os sites brasileiros
@@ -258,7 +273,7 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 |---|---|
 | `GET /` | página de busca |
 | `GET /search?q=TERMO` | filmes e séries encontrados, e se já foram pedidos |
-| `POST /request` | pede um item: `{"kind":"movie"\|"series","id":N}` (tmdbId/tvdbId) |
+| `POST /request` | pede um item: `{"kind":"movie"\|"series"\|"episode","id":N}` (tmdbId/tvdbId/id do episódio no Sonarr) |
 | `GET /requests` | pedidos e biblioteca (a lista "Seus filmes e séries", igual em qualquer aparelho) |
 | `GET /discover/{filmes\|series\|animes}` | vitrine: prontos para assistir, destaques, lançamentos, populares no Brasil |
 | `GET /jellyfin/open?next=…` | abre o Jellyfin já logado (sessão deste navegador, pela página-ponte) |

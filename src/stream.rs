@@ -447,6 +447,20 @@ pub(crate) fn scene_title(title: &str) -> String {
     out.join(" ")
 }
 
+/// `title` com `name` no lugar do que vem antes da marca de temporada
+/// ("O Mentalista - S01 Completa" → "The Mentalist S01 Completa"); `None`
+/// sem marca.
+fn with_series_name(title: &str, name: &str) -> Option<String> {
+    let b = title.as_bytes();
+    let at = (0..b.len()).find(|&i| {
+        let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        let after = b.get(i + 1 + digits).copied();
+        boundary && (b[i] == b'S' || b[i] == b's') && (1..=2).contains(&digits) && after.is_none_or(|c| !c.is_ascii_alphanumeric() || c == b'E' || c == b'e')
+    })?;
+    (at > 0).then(|| format!("{name} {}", &title[at..]))
+}
+
 /// O nome do arquivo é do episódio `s`x`e`? (S01E05, s1e05, 1x05)
 fn is_episode(name: &str, s: i64, e: i64) -> bool {
     let n = name.to_lowercase();
@@ -1502,6 +1516,121 @@ impl Orchestrator {
         Ok(list)
     }
 
+    /// "Baixar" de um episódio (id no Sonarr): a busca do "assistir" (nome em
+    /// português, sites brasileiros, nomes convertidos para o formato de cena)
+    /// escolhe, e a versão vai ao Sonarr pelo `release/push` — ele baixa e
+    /// importa como sempre. Nada aceito por ele: o Sonarr busca sozinho e fica
+    /// de olho (o episódio fica monitorado).
+    pub async fn download_episode(&self, episode_id: i64) -> Result<()> {
+        let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+        let ep = sonarr.episode(episode_id).await?;
+        let series_id = ep["seriesId"].as_i64().context("episódio sem série")?;
+        let series = sonarr.series_by_id(series_id).await?;
+        let (s, e) = (ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0));
+        sonarr.set_series_monitored(series_id).await?;
+        sonarr.monitor_episodes(&[episode_id]).await?;
+        if let Some(p) = &self.prowlarr {
+            let mut list = candidates(self.prowlarr_episode(p, &series, episode_id, s, e, false).await?);
+            original_or_portuguese(&mut list, original_language(&series));
+            // a ordem do "assistir": dublada antes, avulso antes de pacote
+            for c in list.iter().filter(|c| !c.rejected).take(3) {
+                match self.push_to_sonarr(&series, c).await {
+                    Ok(()) => {
+                        info!("baixar: {} S{s:02}E{e:02} — {}", series["title"].as_str().unwrap_or_default(), c.title);
+                        return Ok(());
+                    }
+                    Err(err) => warn!("baixar: {}: {err:#}", c.title),
+                }
+            }
+        }
+        sonarr.command(json!({ "name": "EpisodeSearch", "episodeIds": [episode_id] })).await
+    }
+
+    /// "Baixar" de uma série (id no Sonarr), em segundo plano: para cada
+    /// temporada com episódios faltando, o pacote que a busca do "assistir"
+    /// achar vai ao Sonarr; depois o Sonarr busca o resto (o que já está na
+    /// fila ele pula).
+    pub fn download_series(self: &Arc<Self>, series_id: i64) {
+        let orch = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = orch.push_series_packs(series_id).await {
+                warn!("baixar série {series_id}: {e:#}");
+            }
+            if let Some(sonarr) = &orch.sonarr
+                && let Err(e) = sonarr.command(json!({ "name": "SeriesSearch", "seriesId": series_id })).await
+            {
+                warn!("baixar série {series_id}: {e:#}");
+            }
+        });
+    }
+
+    async fn push_series_packs(&self, series_id: i64) -> Result<()> {
+        /// temporadas buscadas pelo Anubis (o resto fica com o Sonarr)
+        const MAX_SEASONS: usize = 10;
+        let (Some(sonarr), Some(p)) = (&self.sonarr, &self.prowlarr) else { return Ok(()) };
+        let series = sonarr.series_by_id(series_id).await?;
+        let today = chrono::Utc::now().to_rfc3339();
+        // o primeiro episódio faltando (e já exibido) de cada temporada
+        let mut first: std::collections::BTreeMap<i64, (i64, i64)> = Default::default();
+        for x in sonarr.episodes_raw(series_id).await? {
+            let s = x["seasonNumber"].as_i64().unwrap_or(0);
+            let aired = x["airDateUtc"].as_str().is_some_and(|d| *d < *today.as_str());
+            if s > 0 && aired && x["hasFile"] != true && x["monitored"] == true {
+                let e = (x["episodeNumber"].as_i64().unwrap_or(0), x["id"].as_i64().unwrap_or(0));
+                first.entry(s).and_modify(|v| *v = (*v).min(e)).or_insert(e);
+            }
+        }
+        for (s, (e, episode_id)) in first.into_iter().take(MAX_SEASONS) {
+            let mut list = candidates(self.prowlarr_episode(p, &series, episode_id, s, e, false).await?);
+            original_or_portuguese(&mut list, original_language(&series));
+            for c in list.iter().filter(|c| !c.rejected && c.pack).take(2) {
+                match self.push_to_sonarr(&series, c).await {
+                    Ok(()) => {
+                        info!("baixar série: {} T{s} — {}", series["title"].as_str().unwrap_or_default(), c.title);
+                        break;
+                    }
+                    Err(err) => warn!("baixar série: {}: {err:#}", c.title),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Entrega a versão ao Sonarr com um nome que ele reconheça: o de cena
+    /// (`scene_title`) e, se ele ainda não souber de que série é (nome em
+    /// português), o nome da série no Sonarr no lugar do que vem antes do
+    /// SxxEyy — a versão já foi julgada como desta série pelo `judge`.
+    async fn push_to_sonarr(&self, series: &Value, c: &Candidate) -> Result<()> {
+        let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+        let series_id = series["id"].as_i64();
+        let mut title = scene_title(&c.title);
+        if sonarr.parse(&title).await?["series"]["id"].as_i64() != series_id {
+            title = with_series_name(&title, series["title"].as_str().unwrap_or_default()).context("nome sem temporada (SxxEyy)")?;
+            if sonarr.parse(&title).await?["series"]["id"].as_i64() != series_id {
+                bail!("o Sonarr não reconheceu \"{title}\"");
+            }
+        }
+        let r = &c.raw;
+        let body = json!({
+            "title": title,
+            "downloadUrl": r["downloadUrl"],
+            "magnetUrl": r["magnetUrl"],
+            "infoHash": r["infoHash"],
+            "protocol": "torrent",
+            "publishDate": r["publishDate"].as_str().map_or_else(|| chrono::Utc::now().to_rfc3339(), str::to_owned),
+            "size": c.size,
+            "seeders": c.seeders,
+            "indexer": r["indexer"],
+        });
+        let res = sonarr.push_release(&body).await?;
+        let d = res.as_array().and_then(|a| a.first()).unwrap_or(&res);
+        if d["approved"] == true {
+            return Ok(());
+        }
+        let why: Vec<&str> = d["rejections"].as_array().into_iter().flatten().filter_map(|x| x.as_str().or(x["reason"].as_str())).collect();
+        bail!("recusada pelo Sonarr: {}", why.join("; "))
+    }
+
     /// As dublagens de um título da biblioteca (filme: id no Radarr; episódio:
     /// no Sonarr): versões com áudio em português, inclusive as de zero
     /// fontes, com a DHT sempre consultada. Só o áudio interessa, então a
@@ -2268,6 +2397,15 @@ mod tests {
         assert_eq!(magnet_hash(&TorrentSource::File(bytes::Bytes::from_static(b"d4:infoe"))), None);
     }
     use super::*;
+
+    #[test]
+    fn puts_the_series_name_before_the_season() {
+        assert_eq!(with_series_name("O Mentalista - S01 Completa (720p) (brazilian)", "The Mentalist").as_deref(), Some("The Mentalist S01 Completa (720p) (brazilian)"));
+        assert_eq!(with_series_name("O.Mentalista.S02E05.1080p.WEB-DL.DUAL", "The Mentalist").as_deref(), Some("The Mentalist S02E05.1080p.WEB-DL.DUAL"));
+        // "Season" e nomes com S no meio não são marca
+        assert_eq!(with_series_name("Supernatural Season 1", "Supernatural"), None);
+        assert_eq!(with_series_name("S01E01 sem nome", "X"), None);
+    }
 
     #[test]
     fn prefers_approved_single_episodes_then_browser_playable() {

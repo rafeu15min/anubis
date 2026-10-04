@@ -14,11 +14,12 @@
   }
   * { box-sizing: border-box; }
   /* ícones: Nerd Font reduzida aos usados (web/icones.py) */
-  @font-face { font-family: 'Anubis Icones'; src: url('icones.woff2?v=2') format('woff2'); font-display: block; }
+  @font-face { font-family: 'Anubis Icones'; src: url('icones.woff2?v=3') format('woff2'); font-display: block; }
   .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
   .i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
   .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
   .i-up::before { content: "\f164"; } .i-down::before { content: "\f165"; } .i-trash::before { content: "\f1f8"; }
+  .i-download::before { content: "\f019"; } .i-bell::before { content: "\f0f3"; } .i-microphone::before { content: "\f130"; }
   .i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
   .i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
@@ -55,7 +56,16 @@
   button.icon.on { background: var(--accent); color: #111; }
   button.icon.danger { border-color: color-mix(in srgb, #ff8a8a 60%, transparent); color: #ff8a8a; }
   button.icon.danger:hover { background: color-mix(in srgb, #ff8a8a 15%, transparent); }
-  .ep .acts { display: flex; gap: 6px; }
+  .acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  /* baixando: a porcentagem no lugar do ícone */
+  button.icon.prog { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+  /* discreto: procurar a dublagem agora */
+  button.icon.mini { width: 32px; min-height: 32px; font-size: 13px; border-color: var(--line); color: var(--muted); }
+  button.icon.mini:hover { color: var(--accent); border-color: var(--accent); }
+  /* ▶ da série: o episódio que vai tocar escrito ao lado */
+  button.primary.next { gap: 8px; padding: 8px 14px; font-variant-numeric: tabular-nums; }
+  #itemeps:empty { display: none; }
+  #itemeps { margin-top: 10px; }
   .ep small.st { color: var(--info); }
   .tag.none { color: var(--muted); border-style: dashed; }
   summary .tags { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: 1px; }
@@ -149,8 +159,8 @@
   <div class="row">
     <button id="itemlike" class="icon" title="Gostei (o que se parece com ele aparece mais no Para você)" aria-label="Gostei" aria-pressed="false"><i class="i i-up"></i></button>
     <button id="itemhide" class="icon quiet" title="Não quero ver (sai da vitrine)" aria-label="Não quero ver"><i class="i i-down"></i></button>
-    <button id="itemtrash" class="icon danger" style="margin-left:auto" title="Apagar da biblioteca" aria-label="Apagar da biblioteca" hidden><i class="i i-trash"></i></button>
   </div>
+  <div id="itemeps"></div>
 </dialog>
 <dialog id="pick">
   <button id="pickclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
@@ -159,11 +169,6 @@
   <p class="meta" id="pickdown" style="color:#ffb36b"></p>
   <div id="rels"></div>
   <div id="pickwhere"></div>
-</dialog>
-<dialog id="eps">
-  <button id="epsclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
-  <h3 id="epstitle"></h3>
-  <div id="epslist"><p class="msg">Carregando…</p></div>
 </dialog>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
@@ -202,6 +207,7 @@ const save = () => {
   if (typeof watchLive === 'function') watchLive();
 };
 const keyOf = (it) => `${it.kind}:${it.id}`;
+const lastStatus = {};
 
 const STATE = {
   not_requested: 'Ainda não pedido',
@@ -265,6 +271,33 @@ function statusHtml(st) {
   return `<span class="state">${txt}</span>${bar}${note}${offer}`;
 }
 
+// ações em ícone, iguais em filmes, séries e episódios: ▶ sempre; ⬇ no que não
+// está no servidor (🔔 se nenhuma fonte tem agora: pede e fica de olho); 🗑 no
+// que está; 🎙 discreto: procurar a dublagem agora (no servidor sem português)
+const ICON = (cls, attrs, icon, title, inner) =>
+  `<button class="icon ${cls}" ${attrs} title="${title}" aria-label="${title}">${inner ?? `<i class="i i-${icon}"></i>`}</button>`;
+function actions(k, o) {
+  const st = o.st;
+  const btns = [o.play ?? ICON('primary', `data-watch="${k}"`, 'play', 'Assistir')];
+  if (o.available) btns.push(ICON('danger', `data-uninstall="${k}"`, 'trash', 'Apagar do servidor'));
+  else if (st && st.state === 'downloading') btns.push(ICON('prog', 'disabled', '', 'Baixando', st.progress != null ? `${Math.round(st.progress * 100)}%` : '…'));
+  else if (st && st.state === 'importing') btns.push(ICON('busy', 'disabled', 'download', 'Entrando na biblioteca'));
+  else if (o.requested || (st && st.state === 'searching')) btns.push(ICON('quiet', 'disabled', 'bell', 'Pedido: baixa quando achar uma versão'));
+  else btns.push(o.avail === 'nothing' ? ICON('', `data-req="${k}"`, 'bell', 'Pedir quando aparecer') : ICON('', `data-req="${k}"`, 'download', 'Baixar'));
+  if (o.extra) btns.push(o.extra);
+  if (o.available && o.portuguese === false) btns.push(ICON('mini', `data-dub="${k}"`, 'microphone', 'Procurar dublagem agora'));
+  return `<span class="acts" data-acts="${k}">${btns.join('')}</span>`;
+}
+// as do cartão (filme ou série); na série o ▶ abre a janela com os episódios
+// e, nela, vira "▶ T2·E3" (o próximo a assistir)
+function cardActions(it, st) {
+  const k = keyOf(it);
+  const available = st && st.state !== 'not_requested' ? st.state === 'available' || !!it.available : !!it.available;
+  const requested = !!(it.requested || tracked[k]) && !available;
+  const play = it.kind === 'movie' ? undefined : ICON('primary play-series', `data-open="${k}"`, 'play', 'Episódios');
+  return actions(k, { available, avail: it.avail, requested, st, play, portuguese: st && st.portuguese });
+}
+
 function card(it, st) {
   const k = keyOf(it);
   const poster = it.poster ? `<img src="${esc(it.poster)}" alt="" loading="lazy">` : '<div class="noposter"></div>';
@@ -274,15 +307,9 @@ function card(it, st) {
       : it.avail === 'nothing' ? ' <span class="tag">sem fonte</span>'
       : it.avail === 'unknown' ? ` <span class="tag">${it.uncertain ? 'não deu para conferir agora — tento de novo em 1 h' : 'conferindo as fontes…'}</span>` : '')
     + (it.available ? ' <span class="tag">na biblioteca</span>' : '');
-  // filmes: assistir agora (padrão) ou só baixar; séries: episódios (assistir
-  // um de cada vez) ou pedir a série inteira
-  const watch = it.kind === 'movie'
-    ? `<button class="primary" data-watch="${k}">Assistir</button>`
-    : `<button class="primary" data-eps="${it.id}" data-title="${esc(it.title)}">Episódios</button>`;
-  const none = it.avail === 'nothing' && !it.requested && !tracked[k];
-  const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${none ? 'Pedir quando aparecer' : it.kind === 'movie' ? 'Só baixar' : 'Baixar a série'}</button>`;
-  const why = none ? `<small class="meta" style="flex-basis:100%">Nenhuma das fontes conferidas tem este título agora. Pedindo, o ${it.kind === 'movie' ? 'Radarr' : 'Sonarr'} fica de olho e baixa quando ele aparecer.</small>` : '';
-  const action = watch + req;
+  const none = it.avail === 'nothing' && !it.requested && !tracked[k] && !it.available;
+  const why = none ? `<small class="meta" style="flex-basis:100%">Nenhuma das fontes conferidas tem este título agora. Pedindo (🔔), o ${it.kind === 'movie' ? 'Radarr' : 'Sonarr'} fica de olho e baixa quando ele aparecer.</small>` : '';
+  const action = cardActions(it, st);
   return `<article class="card" data-key="${k}">
     ${poster}
     <div>
@@ -316,15 +343,19 @@ async function search(term) {
 }
 
 async function request(k) {
-  const it = lastResults[k];
+  const it = lastResults[k] || tracked[k];
   if (!it) return;
-  document.querySelectorAll(`[data-req="${k}"]`).forEach((b) => { b.disabled = true; b.textContent = 'Pedindo…'; });
+  const btns = document.querySelectorAll(`[data-req="${k}"]`);
+  const busy = (on) => btns.forEach((b) => { b.disabled = on; b.classList.toggle('busy', on); });
+  busy(true);
   const r = await fetch('request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: it.kind, id: it.id }) });
   const st = await r.json();
-  if (!r.ok) { alert(`Não deu para pedir: ${st.error}`); return; }
-  tracked[k] = { ...it, requested: true, openWhenReady: true };
+  if (!r.ok) { busy(false); alert(`Não deu para pedir: ${st.error}`); return; }
+  // pronto ao terminar: abre o Jellyfin — não numa série que já tinha episódios
+  tracked[k] = { ...it, requested: true, openWhenReady: !it.available };
   save();
   render(tracked[k], st);
+  if (it.kind === 'series' && openKey === k && $('#item').open) setTimeout(() => { if ($('#item').open && openKey === k) loadEpisodes(it); }, 10000);
 }
 
 // "assistir agora": o Anubis escolhe a versão, começa a baixar e abre o player
@@ -342,6 +373,8 @@ async function watch(k, guid, keep = false) {
     const row = b.closest('.ep');
     const st = row && (row.querySelector('.st') || row.children[1].appendChild(Object.assign(document.createElement('small'), { className: 'st' })));
     if (st) st.textContent = t;
+    const status = !row && b.closest('.card')?.querySelector('.status');
+    if (status) status.innerHTML = `<span class="state">${esc(t)}</span>`;
   });
   say('Procurando versão…');
   // a busca passa por todas as fontes; as protegidas pelo Cloudflare levam ~30 s
@@ -433,34 +466,100 @@ function watchTag(w) {
   return '<span class="tag seen"><i class="i i-check"></i>assistido</span>';
 }
 
-// temporadas e episódios de uma série
+// temporadas e episódios de uma série, dentro da própria janela dela
 let currentTvdb = null;
-async function episodes(tvdb, title) {
+// da série aberta: o próximo a assistir, se falta episódio já exibido, se
+// algum está sem português (as ações do topo dependem disso)
+let seriesInfo = null;
+const today = () => new Date().toISOString().slice(0, 10);
+function epActions(e) {
+  if (e.air_date && e.air_date > today()) return `<span class="meta">estreia ${esc(e.air_date)}</span>`;
+  const st = e.downloading != null ? { state: e.downloading >= 1 ? 'importing' : 'downloading', progress: e.downloading } : e.st;
+  return actions(`episode:${e.id}`, { available: e.has_file, avail: e.avail, st, portuguese: e.portuguese });
+}
+function epRow(e) {
+  const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + watchTag(e.watch) + (e.avail && AVAIL_TAG[e.avail] && !e.has_file ? AVAIL_TAG[e.avail] : '');
+  return `<div class="ep" data-ep="${e.id}"${e.has_file || (e.air_date && e.air_date > today()) ? ' data-have' : ''}><span class="n">${e.number}</span>
+    <div>${esc(e.title || 'Episódio ' + e.number)}${tags ? ` <span class="tags">${tags}</span>` : ''}<small>${esc(e.air_date || '')}</small></div>${epActions(e)}</div>`;
+}
+// topo da série: ▶ T2·E3 (o próximo não assistido; tudo visto: T1·E1), ⬇ dos
+// episódios que faltam, 🗑 da série, 🎙 dos episódios sem português
+function seriesActions(it, st) {
+  const k = keyOf(it), n = seriesInfo.next;
+  const label = n ? `T${n.season}·E${n.number}` : '';
+  const play = n
+    ? `<button class="primary next" data-watch="episode:${n.id}" title="Assistir ${label}" aria-label="Assistir ${label}"><i class="i i-play"></i>${label}</button>`
+    : ICON('primary', 'disabled', 'play', 'Nenhum episódio exibido ainda');
+  const available = seriesInfo.have > 0;
+  const extra = available && seriesInfo.missing > 0 && !(st && ['downloading', 'importing'].includes(st.state))
+    ? ICON('', `data-req="${k}"`, 'download', `Baixar os ${seriesInfo.missing} episódios que faltam`) : '';
+  return actions(k, { available, avail: it.avail, requested: !available && !!(it.requested || tracked[k]), st, play, extra, portuguese: seriesInfo.noPt ? false : undefined });
+}
+async function loadEpisodes(it) {
+  const tvdb = it.id, k = keyOf(it);
   currentTvdb = tvdb;
-  $('#epstitle').textContent = title;
-  $('#epslist').innerHTML = '<p class="msg">Carregando episódios…</p>';
-  $('#eps').showModal();
+  const box = $('#itemeps');
+  if (!box.children.length) box.innerHTML = '<p class="msg">Carregando episódios…</p>';
   try {
     const r = await fetch(`series/${tvdb}/episodes`);
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
-    const today = new Date().toISOString().slice(0, 10);
-    $('#epslist').innerHTML = d.seasons.map((s, i) => `<details ${i === 0 ? 'open' : ''}>
-        <summary>${s.number === 0 ? 'Especiais' : `Temporada ${s.number}`} <span class="meta">· ${s.episodes.length} episódios</span><span class="tags"></span></summary>
-        ${s.episodes.map((e) => {
-          const future = e.air_date && e.air_date > today;
-          const trash = e.has_file ? `<button class="icon danger" data-uninstall="episode:${e.id}" title="Apagar da biblioteca" aria-label="Apagar da biblioteca"><i class="i i-trash"></i></button>` : '';
-          const btn = future ? `<span class="meta">estreia ${esc(e.air_date)}</span>` : `<span class="acts">${trash}<button class="icon" data-watch="episode:${e.id}" title="Assistir" aria-label="Assistir"><i class="i i-play"></i></button></span>`;
-          const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + watchTag(e.watch);
-          return `<div class="ep" data-ep="${e.id}"${e.has_file || future ? ' data-have' : ''}><span class="n">${e.number}</span>
-            <div>${esc(e.title || 'Episódio ' + e.number)}${tags ? ` <span class="tags">${tags}</span>` : ''}<small>${esc(e.air_date || '')}</small></div>${btn}</div>`;
-        }).join('')}</details>`).join('') || '<p class="msg">Nenhum episódio.</p>';
+    if (currentTvdb !== tvdb) return;
+    const aired = d.seasons.filter((x) => x.number > 0).flatMap((x) => x.episodes.map((e) => ({ ...e, season: x.number }))).filter((e) => !e.air_date || e.air_date <= today());
+    const all = d.seasons.flatMap((x) => x.episodes);
+    seriesInfo = {
+      k,
+      next: aired.find((e) => !(e.watch && e.watch.played)) || aired[0],
+      have: all.filter((e) => e.has_file).length,
+      missing: aired.filter((e) => !e.has_file && e.downloading == null).length,
+      noPt: all.some((e) => e.has_file && e.portuguese === false),
+    };
+    const open = [...box.querySelectorAll('details[open]')].map((x) => x.dataset.season);
+    box.innerHTML = d.seasons.map((x, i) => `<details data-season="${x.number}" ${(open.length ? open.includes(String(x.number)) : i === 0) ? 'open' : ''}>
+        <summary>${x.number === 0 ? 'Especiais' : `Temporada ${x.number}`} <span class="meta">· ${x.episodes.length} episódios</span><span class="tags"></span></summary>
+        ${x.episodes.map(epRow).join('')}</details>`).join('') || '<p class="msg">Nenhum episódio.</p>';
+    document.querySelectorAll(`#itembody [data-acts="${k}"]`).forEach((el) => { el.outerHTML = seriesActions(it, lastStatus[k]); });
     episodeAvailability(tvdb);
+    // baixando: a lista se atualiza até terminar
+    if (d.seasons.some((x) => x.episodes.some((e) => e.downloading != null || e.st))) setTimeout(() => { if (currentTvdb === tvdb && $('#item').open) loadEpisodes(it); }, 10000);
   } catch (e) {
-    $('#epslist').innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
+    box.innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
   }
 }
-$('#epsclose').onclick = () => $('#eps').close();
+// ⬇ de um episódio: a busca do "assistir" escolhe e o Sonarr baixa
+async function requestEpisode(b, id) {
+  b.disabled = true;
+  b.classList.add('busy');
+  try {
+    const r = await fetch('request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'episode', id }) });
+    const st = await r.json();
+    if (!r.ok) throw new Error(st.error);
+    const row = b.closest('.ep');
+    if (row) row.querySelector('[data-acts]').outerHTML = actions(`episode:${id}`, { available: st.state === 'available', st, portuguese: st.portuguese });
+    const it = lastResults[openKey] || tracked[openKey];
+    if (it) setTimeout(() => { if ($('#item').open) loadEpisodes(it); }, 10000);
+  } catch (e) {
+    alert(`Não deu para baixar: ${e.message}`);
+    b.disabled = false;
+    b.classList.remove('busy');
+  }
+}
+// 🎙 procurar a dublagem agora (filme, episódio ou a série toda)
+async function dubNow(b, k) {
+  const [kind, id] = k.split(':');
+  b.disabled = true;
+  b.classList.add('busy');
+  try {
+    const r = await fetch(`autodub/${kind}/${id}`, { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    b.title = d.queued.length ? 'Procurando dublagem: quando entrar, o português passa a tocar primeiro' : 'Nada sem português aqui';
+  } catch (e) {
+    b.title = `Não deu: ${e.message}`;
+  }
+  b.classList.remove('busy');
+  b.setAttribute('aria-label', b.title);
+}
 
 // o que as fontes têm de cada episódio que falta: "só legendado" e "sem
 // fonte" ao lado de "na biblioteca"; a temporada ganha o selo quando ele vale
@@ -470,20 +569,22 @@ const AVAIL_TAG = { subbed: '<span class="tag sub">só legendado</span>', nothin
 async function episodeAvailability(tvdb) {
   const note = (t) => {
     let n = $('#epscheck');
-    if (!n) { n = Object.assign(document.createElement('p'), { id: 'epscheck' }); $('#epslist').prepend(n); }
+    if (!n) { n = Object.assign(document.createElement('p'), { id: 'epscheck' }); $('#itemeps').prepend(n); }
     n.textContent = t;
     n.hidden = !t;
   };
-  for (let i = 0; i < 60 && currentTvdb === tvdb && $('#eps').open; i++) {
+  for (let i = 0; i < 60 && currentTvdb === tvdb && $('#item').open; i++) {
     let r;
     try { r = await fetch(`series/${tvdb}/availability`); } catch { return; }
     if (r.status === 202) { note('Conferindo as fontes de cada episódio…'); await new Promise((ok) => setTimeout(ok, 4000)); continue; }
     note('');
     if (!r.ok || currentTvdb !== tvdb) return;
     const eps = (await r.json()).episodes || {};
-    document.querySelectorAll('#epslist .ep[data-ep]').forEach((row) => {
+    document.querySelectorAll('#itemeps .ep[data-ep]').forEach((row) => {
       const a = eps[row.dataset.ep];
-      if (!a || !AVAIL_TAG[a] || row.hasAttribute('data-have')) return;
+      if (!a || !AVAIL_TAG[a] || row.hasAttribute('data-have') || row.querySelector('.tag.sub, .tag.none')) return;
+      // nenhuma fonte tem: o ⬇ vira 🔔 (pede e fica de olho)
+      if (a === 'nothing') row.querySelectorAll('[data-req]').forEach((b) => { b.outerHTML = ICON('', `data-req="${b.dataset.req}"`, 'bell', 'Pedir quando aparecer'); });
       let tags = row.querySelector('.tags');
       if (!tags) {
         tags = Object.assign(document.createElement('span'), { className: 'tags' });
@@ -491,7 +592,7 @@ async function episodeAvailability(tvdb) {
       }
       tags.insertAdjacentHTML('beforeend', AVAIL_TAG[a]);
     });
-    document.querySelectorAll('#epslist details').forEach((d) => {
+    document.querySelectorAll('#itemeps details').forEach((d) => {
       const states = [...d.querySelectorAll('.ep[data-ep]:not([data-have])')].map((row) => eps[row.dataset.ep]).filter(Boolean);
       const all = states.length && states.every((a) => a === states[0]) ? states[0] : null;
       if (all && AVAIL_TAG[all]) d.querySelector('summary .tags').innerHTML = AVAIL_TAG[all];
@@ -617,16 +718,23 @@ async function acceptSubbed(btn, key) {
 
 let openKey = null;
 function openItem(k) {
-  const it = lastResults[k];
+  const it = lastResults[k] || tracked[k];
   if (!it) return;
+  if ($('#item').open && openKey === k) return;  // o ▶ da série na própria janela dela
   openKey = k;
+  seriesInfo = null;
+  currentTvdb = null;
   likeButton();
-  $('#itemtrash').hidden = !it.available;
-  $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
-  $('#item').showModal();
-  if (it.requested) refresh(it, false);
+  $('#itembody').innerHTML = `<div class="grid">${card(it, lastStatus[k])}</div>`;
+  $('#itemeps').innerHTML = '';
+  if (!$('#item').open) $('#item').showModal();
+  if (it.requested || it.available) refresh(it, false);
   if (it.avail === 'unknown') checkNow(k);
+  if (it.kind === 'series') loadEpisodes(it);
 }
+// fechou: para de acompanhar os episódios
+// (o evento chega depois: se outra janela já abriu, não é com ela)
+$('#item').addEventListener('close', () => { if ($('#item').open) return; currentTvdb = null; seriesInfo = null; $('#itemeps').innerHTML = ''; });
 // título ainda não conferido: passa na frente da fila e o cartão mostra o resultado
 async function checkNow(k) {
   const [kind, id] = k.split(':');
@@ -636,7 +744,10 @@ async function checkNow(k) {
     if (!it || !d.avail) return;
     it.avail = d.avail;
     it.uncertain = d.avail === 'unknown';
-    if (openKey === k && $('#item').open) $('#itembody').innerHTML = `<div class="grid">${card(it)}</div>`;
+    if (openKey === k && $('#item').open) {
+      $('#itembody').innerHTML = `<div class="grid">${card(it, lastStatus[k])}</div>`;
+      if (seriesInfo && seriesInfo.k === k) document.querySelectorAll(`#itembody [data-acts="${k}"]`).forEach((el) => { el.outerHTML = seriesActions(it, lastStatus[k]); });
+    }
     document.querySelectorAll(`#showcase [data-open="${k}"]`).forEach((t) => {
       t.classList.toggle('none', it.avail === 'nothing');
       t.querySelector('.m').innerHTML = tileMeta(it, false);
@@ -669,13 +780,6 @@ function uninstalled(k) {
   untrack(k);
   showCategory(currentCat);
 }
-$('#itemtrash').onclick = async () => {
-  const k = openKey, b = $('#itemtrash');
-  if (!k) return;
-  b.disabled = true;
-  try { if (await uninstall(k)) { $('#item').close(); uninstalled(k); } }
-  catch (e) { alert(`Não deu: ${e.message}`); } finally { b.disabled = false; }
-};
 
 // "gostei": liga e desliga; vira semente do "Para você" (peso de favorito)
 const liked = new Set();
@@ -718,6 +822,7 @@ $('#itemhide').onclick = async () => {
 // atualiza o cartão do item onde ele aparecer (pedidos e resultados)
 function render(it, st) {
   const k = keyOf(it);
+  if (st) lastStatus[k] = st;
   if (tracked[k]) {
     const list = $('#tracked');
     const old = list.querySelector(`[data-key="${k}"]`);
@@ -730,6 +835,12 @@ function render(it, st) {
     $('#tracking').hidden = !list.children.length;
   }
   document.querySelectorAll(`#results [data-key="${k}"] .status, #itembody [data-key="${k}"] .status`).forEach((el) => { el.innerHTML = statusHtml(st); });
+  if (st) {
+    document.querySelectorAll(`#results [data-key="${k}"] [data-acts]`).forEach((el) => { el.outerHTML = cardActions(it, st); });
+    document.querySelectorAll(`#itembody [data-key="${k}"] [data-acts]`).forEach((el) => {
+      el.outerHTML = seriesInfo && seriesInfo.k === k ? seriesActions(it, st) : cardActions(it, st);
+    });
+  }
 }
 
 // a busca de versões é lenta (vai aos indexadores): uma por item, refeita a cada 15 min
@@ -856,9 +967,12 @@ document.addEventListener('click', (e) => {
     rail.scrollBy({ left: +nav.dataset.scroll * rail.clientWidth * 0.9, behavior: 'smooth' });
   }
   const b = e.target.closest('[data-req]');
-  if (b) request(b.dataset.req);
-  const ep = e.target.closest('[data-eps]');
-  if (ep) episodes(ep.dataset.eps, ep.dataset.title);
+  if (b) {
+    if (b.dataset.req.startsWith('episode:')) requestEpisode(b, +b.dataset.req.split(':')[1]);
+    else request(b.dataset.req);
+  }
+  const db = e.target.closest('[data-dub]');
+  if (db) dubNow(db, db.dataset.dub);
   const rt = e.target.closest('[data-retest]');
   if (rt) { retestIndexers(rt); return; }
   const sb = e.target.closest('[data-subbed]');
@@ -868,8 +982,15 @@ document.addEventListener('click', (e) => {
   const un = e.target.closest('[data-uninstall]');
   if (un) {
     un.disabled = true;
-    uninstall(un.dataset.uninstall)
-      .then((done) => { if (done) episodes(currentTvdb, $('#epstitle').textContent); })
+    const k = un.dataset.uninstall;
+    uninstall(k)
+      .then((done) => {
+        if (!done) return;
+        const it = lastResults[openKey] || tracked[openKey];
+        if (k.startsWith('episode:')) { if (it) loadEpisodes(it); return; }
+        $('#item').close();
+        uninstalled(k);
+      })
       .catch((err) => alert(`Não deu: ${err.message}`))
       .finally(() => { un.disabled = false; });
     return;

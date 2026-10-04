@@ -729,6 +729,7 @@ async function uninstall(k, ask = 'Apagar da biblioteca?') {
 function uninstalled(k) {
   const it = lastResults[k];
   if (it) { it.available = false; it.requested = false; }
+  untrack(k);
   showCategory(currentCat);
 }
 $('#itemtrash').onclick = async () => {
@@ -822,9 +823,21 @@ async function refresh(it, openable = true) {
   } catch {}
 }
 
+// sai de "Pedidos em andamento" (e da conexão ao vivo)
+function untrack(k) {
+  if (!tracked[k]) return;
+  delete tracked[k];
+  const old = $('#tracked').querySelector(`[data-key="${k}"]`);
+  if (old) old.remove();
+  $('#tracking').hidden = !$('#tracked').children.length;
+  save();
+}
+
 // aplica um estado (da consulta ou da conexão ao vivo) ao cartão
 async function apply(it, st, openable = true) {
   const t = tracked[keyOf(it)];
+  // o servidor não tem mais o pedido (apagado aqui, em outro aparelho ou no Radarr/Sonarr)
+  if (t && st.state === 'not_requested' && !st.mux) { untrack(keyOf(it)); render(it, st); return; }
   if (st.mux) {
     st.mux.tmdb = it.id;
     // ainda juntando: não conta como pronto

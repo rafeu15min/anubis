@@ -322,6 +322,16 @@ fn pick_tracks(video: &[Track], dub: &[Track]) -> Result<(usize, usize, usize)> 
     })
 }
 
+/// Layout AAC padrão para `channels` canais (e quantos ficam): até 2 como
+/// vêm, mais que isso em 5.1 — o maior que os navegadores tocam.
+fn aac_layout(channels: u32) -> (&'static str, u32) {
+    match channels {
+        0 | 1 => ("mono", 1),
+        2 => ("stereo", 2),
+        _ => ("5.1", 6),
+    }
+}
+
 // ------------------------------------------------------------ ffmpeg
 
 impl Orchestrator {
@@ -469,13 +479,17 @@ impl Orchestrator {
             // atempo = velocidade de reprodução (duração ÷ speed); mantém o tom
             chain.push_str(&format!(",atempo={:.9}", sync.speed));
         }
+        // layout padrão: sem ele (dublagem com layout "unknown") o AAC grava os
+        // canais num PCE, que os navegadores recusam ("não tocou no navegador")
+        let (layout, channels) = aac_layout(pt.channels);
+        chain.push_str(&format!(",aformat=channel_layouts={layout}"));
         let mp4 = video.extension().and_then(|e| e.to_str()).is_some_and(|e| ["mp4", "m4v", "mov"].contains(&e.to_lowercase().as_str()));
         let mut args: Vec<String> = vec!["-nostdin".into(), "-y".into(), "-loglevel".into(), "error".into(), "-i".into(), self.tool_path(video)?, "-i".into(), self.tool_path(dub)?];
         args.extend(["-filter_complex".into(), format!("[1:a:{}]{chain}[dub]", pt.n)]);
         args.extend(["-map", "0:v:0", "-map", "[dub]", "-map", "0:a", "-map", "0:s?", "-map", "0:t?", "-map_metadata", "0", "-map_chapters", "0"].map(String::from));
         // tudo copiado, menos a dublagem; legendas de MP4 (mov_text) não entram em MKV
         args.extend(["-c", "copy", "-c:a:0", "aac"].map(String::from));
-        args.extend(["-b:a:0".into(), format!("{}k", (pt.channels.clamp(1, 6) * 64).max(128))]);
+        args.extend(["-b:a:0".into(), format!("{}k", (channels * 64).max(128))]);
         if mp4 {
             args.extend(["-c:s", "srt"].map(String::from));
         }
@@ -984,6 +998,15 @@ mod tests {
         // um corte entre os pontos: dois confiáveis discordando
         assert_eq!(agree(&[p(1.2, 30.0), p(1.2, 28.0), p(5.0, 25.0)]), None);
         assert_eq!(agree(&[p(1.2, 30.0), p(3.0, 4.0), p(9.0, 3.0)]), None);
+    }
+
+    #[test]
+    fn standard_aac_layouts() {
+        assert_eq!(aac_layout(2), ("stereo", 2));
+        assert_eq!(aac_layout(6), ("5.1", 6));
+        // 7.1 desce para 5.1; 4.0 sobe (o AAC de 4 canais também iria num PCE)
+        assert_eq!(aac_layout(8), ("5.1", 6));
+        assert_eq!(aac_layout(4), ("5.1", 6));
     }
 
     #[test]

@@ -892,13 +892,16 @@ impl Streamer {
             ),
             _ => args.extend(["-c:v", "copy"].map(String::from)),
         }
-        // áudio: AAC/MP3 passam; o resto (AC3, DTS, TrueHD…) vira AAC estéreo.
-        // Com a dublagem deslocada, sempre convertido (o corte cai no meio de pacotes)
+        // áudio: AAC/MP3 estéreo passam; o resto (AC3, DTS, TrueHD, AAC de mais
+        // canais — que pode vir num PCE, recusado pelos navegadores) vira AAC
+        // estéreo. Com a dublagem deslocada, sempre convertido (o corte cai no
+        // meio de pacotes)
         if let Some(d) = dub_delay {
             args.extend(["-af".into(), format!("adelay=delays={}:all=1", (d * 1000.0).round())]);
         }
         let codec = media.audios.get(track).map(|a| a.codec.as_str()).or(media.audio.as_deref());
-        if dub.is_none() && codec.is_some_and(|a| a == "aac" || a == "mp3") {
+        let stereo = media.audios.get(track).is_none_or(|a| a.channels <= 2);
+        if dub.is_none() && stereo && codec.is_some_and(|a| a == "aac" || a == "mp3") {
             args.extend(["-c:a", "copy"].map(String::from));
         } else {
             args.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"].map(String::from));

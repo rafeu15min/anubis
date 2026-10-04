@@ -34,6 +34,8 @@
 //! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
 //! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
 //! GET  /mux/{tmdb}  ·  DELETE   — andamento · desistir (apaga os downloads)
+//! GET  /autodub                — dublagem automática: o que sabe de cada título
+//! POST /autodub/{kind}/{id}    — dublagem na hora: movie (tmdb), episode (Sonarr), series (tvdb)
 //! GET  /preferencias            — página de preferências
 //! GET  /prefs  ·  PUT /prefs     — idioma do áudio (filmes/séries) e legendas
 //! GET  /history                 — histórico de outros serviços (Netflix, AniList)
@@ -123,6 +125,8 @@ pub fn router(state: AppState) -> Router {
         .route("/mux", post(start_mux))
         .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
         .route("/mux/{tmdb}/options", get(mux_options))
+        .route("/autodub", get(|State(s): State<AppState>| async move { Json(s.orch.autodub_state().await) }))
+        .route("/autodub/{kind}/{id}", post(autodub_now))
         .route("/health", get(health))
         .route("/storage", get(storage))
         .route("/storage/plan", get(plan))
@@ -654,6 +658,13 @@ async fn where_to_watch(State(s): State<AppState>, Path((kind, id)): Path<(Kind,
     }
 }
 
+async fn autodub_now(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
+    match s.orch.autodub_now(kind, id).await {
+        Ok(keys) => (StatusCode::ACCEPTED, Json(json!({ "queued": keys }))).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
 async fn mux_options(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
     match s.orch.mux_options(tmdb).await {
         Ok(o) => Json(o).into_response(),
@@ -676,14 +687,14 @@ async fn start_mux(State(s): State<AppState>, Json(b): Json<MuxBody>) -> Respons
 }
 
 async fn mux_status(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
-    match s.orch.mux_status(tmdb).await {
+    match s.orch.mux_status(Kind::Movie, tmdb).await {
         Some(v) => Json(v).into_response(),
         None => error(StatusCode::NOT_FOUND, "nada sendo juntado aqui"),
     }
 }
 
 async fn cancel_mux(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
-    match s.orch.cancel_mux(tmdb).await {
+    match s.orch.cancel_mux(Kind::Movie, tmdb).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => error(StatusCode::CONFLICT, format!("{e:#}")),
     }
@@ -737,7 +748,7 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
                     Err(e) => json!({ "error": format!("{e:#}") }),
                 };
                 if kind == Kind::Movie
-                    && let Some(m) = s.orch.mux_status(id).await
+                    && let Some(m) = s.orch.mux_status(Kind::Movie, id).await
                 {
                     v["mux"] = m;
                 }

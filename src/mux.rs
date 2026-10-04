@@ -1,8 +1,13 @@
-//! "Juntar dublagem": o vídeo de uma versão (a melhor imagem, em qualquer
-//! idioma) com o áudio em PT-BR de outra. Sob demanda, pela página; só filmes.
+//! "Juntar dublagem": o vídeo de uma versão (em qualquer idioma) com o áudio
+//! em PT-BR de outra. Dois usos:
+//! - a dublagem automática (`autodub`): o vídeo é o arquivo que já está na
+//!   biblioteca (filme ou episódio) e só a dublagem é baixada;
+//! - o pedido avulso de um filme (POST /mux, fora da página): as duas versões
+//!   vêm da busca do Radarr e as duas são baixadas.
 //!
-//! 1. As duas versões vêm da busca do Radarr (a mesma do "assistir").
-//! 2. O Anubis baixa as duas com o librqbit (só o vídeo de cada torrent).
+//! 1. As versões vêm da mesma busca do "assistir".
+//! 2. O Anubis baixa com o librqbit só o vídeo de cada torrent (num pacote de
+//!    temporada, só o episódio). Download parado por `STALL`: desiste.
 //! 3. Sincronia: em três pontos do filme, procura onde o áudio da dublagem cai
 //!    no áudio do vídeo (música e efeitos são os mesmos; a dublagem troca só
 //!    as vozes). A mesma distância nos pontos é um atraso fixo, que o ffmpeg
@@ -10,10 +15,13 @@
 //!    dublagem é ajustada e conferida de novo. Nada bate (cortes diferentes:
 //!    versão estendida, cena a mais): não junta, e diz por quê.
 //! 4. Junta com o ffmpeg (vídeo copiado; áudio PT-BR primeiro, o original
-//!    depois) e entrega ao Radarr pelo import manual, com o idioma marcado.
-//! 5. Apaga os dois downloads.
+//!    depois) e entrega ao Radarr/Sonarr pelo import manual, com o idioma
+//!    marcado; no lugar do arquivo da biblioteca, quando é ele o vídeo (e o
+//!    torrent que o semeava sai, se não semeia mais nada da biblioteca).
+//! 5. Apaga os downloads.
 
 use crate::orchestrator::Orchestrator;
+use crate::search::Kind;
 use crate::services::{Method, TorrentSource, url_encode};
 use crate::stream::{Candidate, candidates, folder_name, video_file};
 use anyhow::{Context, Result, bail};
@@ -46,8 +54,11 @@ const MIN_SHARPNESS: f32 = 10.0;
 const TOLERANCE: f64 = 0.1;
 /// quadros por segundo comuns entre versões
 const FRAME_RATES: [f64; 3] = [24000.0 / 1001.0, 24.0, 25.0];
-/// id do idioma "Portuguese (Brazil)" no Radarr
+/// id do idioma "Portuguese (Brazil)" no Radarr e no Sonarr
 const RADARR_PT_BR: i64 = 30;
+const SONARR_PT_BR: i64 = 33;
+/// download sem avançar por este tempo: ninguém compartilhando
+const STALL: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,13 +85,58 @@ struct Source {
     host_file: PathBuf,
 }
 
+/// O que recebe a dublagem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Target {
+    Movie { tmdb: i64, movie_id: i64 },
+    /// ids do Sonarr
+    Episode { episode_id: i64, series_id: i64, season: i64, episode: i64 },
+}
+
+impl Target {
+    /// chave dos pedidos: filme pelo id do TMDB, episódio pelo do Sonarr
+    pub fn key(&self) -> (Kind, i64) {
+        match *self {
+            Target::Movie { tmdb, .. } => (Kind::Movie, tmdb),
+            Target::Episode { episode_id, .. } => (Kind::Episode, episode_id),
+        }
+    }
+    fn episode(&self) -> Option<(i64, i64)> {
+        match *self {
+            Target::Episode { season, episode, .. } => Some((season, episode)),
+            Target::Movie { .. } => None,
+        }
+    }
+    /// para nomes de pasta e de container
+    fn label(&self) -> String {
+        match *self {
+            Target::Movie { tmdb, .. } => format!("{tmdb}"),
+            Target::Episode { episode_id, .. } => format!("ep{episode_id}"),
+        }
+    }
+}
+
+/// O arquivo da biblioteca usado como vídeo (a dublagem automática).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryVideo {
+    /// caminho no host
+    pub file: PathBuf,
+    /// id do arquivo no Radarr (movieFile) ou no Sonarr (episodeFile)
+    pub file_id: i64,
+    /// dado do arquivo: o torrent que o semeia sai depois da troca
+    pub inode: Option<(u64, u64)>,
+}
+
 /// O que é gravado para retomar depois de um reinício.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MuxInfo {
-    tmdb: i64,
-    movie_id: i64,
+    target: Target,
     title: String,
-    video: Source,
+    /// vídeo baixado, ou (`library`) o que já está na biblioteca
+    video: Option<Source>,
+    #[serde(default)]
+    library: Option<LibraryVideo>,
     audio: Source,
     step: Step,
     error: Option<String>,
@@ -123,8 +179,18 @@ impl MuxJob {
         i.step = step;
         i.error = error;
     }
-    fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         !matches!(self.info.lock().unwrap().step, Step::Done | Step::Failed)
+    }
+    pub fn step(&self) -> Step {
+        self.info.lock().unwrap().step
+    }
+    pub fn error(&self) -> Option<String> {
+        self.info.lock().unwrap().error.clone()
+    }
+    fn sources(&self) -> Vec<Source> {
+        let i = self.info();
+        i.video.into_iter().chain([i.audio]).collect()
     }
 }
 
@@ -387,7 +453,7 @@ impl Orchestrator {
     /// legendas originais. A dublagem é recodificada (AAC): cortar o atraso e
     /// ajustar a velocidade com precisão pede filtro, e copiar um áudio
     /// "cortado" dependeria de onde caem os pacotes.
-    async fn join(&self, tmdb: i64, video: &Path, dub: &Path, pt: &Track, sync: &SyncReport) -> Result<PathBuf> {
+    async fn join(&self, label: &str, video: &Path, dub: &Path, pt: &Track, sync: &SyncReport) -> Result<PathBuf> {
         let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
         let name = format!("{} (brazilian)", folder_name(video.file_stem().and_then(|s| s.to_str()).unwrap_or("filme")));
         let dir = stream_cfg.download_dir.join(&name);
@@ -417,7 +483,7 @@ impl Orchestrator {
         args.push(self.tool_path(&out)?);
 
         let t = self.streamer()?.transcode.ffmpeg.clone();
-        let res = self.media_tool(&t, Some(&format!("anubis-juntar-{tmdb}"))).await?.args(&args).kill_on_drop(true).output().await?;
+        let res = self.media_tool(&t, Some(&format!("anubis-juntar-{label}"))).await?.args(&args).kill_on_drop(true).output().await?;
         if !res.status.success() {
             let _ = std::fs::remove_dir_all(&dir);
             bail!("ffmpeg: {}", String::from_utf8_lossy(&res.stderr).trim());
@@ -458,7 +524,7 @@ impl Orchestrator {
         if video_guid == audio_guid {
             bail!("escolha versões diferentes para o vídeo e a dublagem");
         }
-        let old = self.muxes.lock().await.get(&tmdb).cloned();
+        let old = self.muxes.lock().await.get(&(Kind::Movie, tmdb)).cloned();
         if old.as_ref().is_some_and(|j| j.active()) {
             bail!("este filme já está sendo juntado");
         }
@@ -470,8 +536,8 @@ impl Orchestrator {
         let find = |g: &str| all.iter().find(|c| c.guid == g).cloned().context("a versão sumiu dos indexadores — busque de novo");
         let (v, a) = (find(video_guid)?, find(audio_guid)?);
         let base = stream_cfg.download_dir.join(format!(".juntar-{tmdb}"));
-        let (video, vh) = self.mux_source(&v, &base).await?;
-        let (audio, ah) = self.mux_source(&a, &base).await?;
+        let (video, vh) = self.mux_source(&v, &base, None, crate::stream::ADD_TIMEOUT).await?;
+        let (audio, ah) = self.mux_source(&a, &base, None, crate::stream::ADD_TIMEOUT).await?;
         // tentativa anterior (que falhou): fica só o que for reaproveitado
         if let Some(old) = old {
             let keep: HashSet<String> = [video.info_hash.clone(), audio.info_hash.clone()].into();
@@ -479,19 +545,43 @@ impl Orchestrator {
         }
         let title = movie["title"].as_str().unwrap_or_default().to_owned();
         info!("juntar dublagem: {title} — vídeo {} + áudio {}", v.title, a.title);
-        let job = MuxJob::new(MuxInfo { tmdb, movie_id, title, video, audio, step: Step::Downloading, error: None }, vec![vh, ah]);
-        self.muxes.lock().await.insert(tmdb, job.clone());
+        let target = Target::Movie { tmdb, movie_id };
+        let job = MuxJob::new(MuxInfo { target, title, video: Some(video), library: None, audio, step: Step::Downloading, error: None }, vec![vh, ah]);
+        self.muxes.lock().await.insert(target.key(), job.clone());
         self.save_muxes().await;
         tokio::spawn(run(self.clone(), job));
         Ok(())
     }
 
-    async fn mux_source(&self, c: &Candidate, base: &Path) -> Result<(Source, Arc<ManagedTorrent>)> {
+    /// Dublagem automática: baixa só a dublagem `dub` e a embute no arquivo
+    /// da biblioteca. Segue sozinho até o Radarr/Sonarr; o job diz como acabou.
+    pub async fn start_dub(self: &Arc<Self>, target: Target, title: String, library: LibraryVideo, dub: &Candidate) -> Result<Arc<MuxJob>> {
+        let key = target.key();
+        let old = self.muxes.lock().await.get(&key).cloned();
+        if old.as_ref().is_some_and(|j| j.active()) {
+            bail!("já recebendo dublagem");
+        }
+        let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
+        let base = stream_cfg.download_dir.join(format!(".juntar-{}", target.label()));
+        // sem ninguém esperando: a dublagem tem mais tempo para achar quem a tenha
+        let (audio, ah) = self.mux_source(dub, &base, target.episode(), Duration::from_secs(10 * 60)).await?;
+        if let Some(old) = old {
+            self.discard_sources(&old, &[audio.info_hash.clone()].into()).await;
+        }
+        info!("dublagem automática: {title} — {}", dub.title);
+        let job = MuxJob::new(MuxInfo { target, title, video: None, library: Some(library), audio, step: Step::Downloading, error: None }, vec![ah]);
+        self.muxes.lock().await.insert(key, job.clone());
+        self.save_muxes().await;
+        tokio::spawn(run(self.clone(), job.clone()));
+        Ok(job)
+    }
+
+    async fn mux_source(&self, c: &Candidate, base: &Path, episode: Option<(i64, i64)>, wait: Duration) -> Result<(Source, Arc<ManagedTorrent>)> {
         let streamer = self.streamer()?;
         let source = self.fetch_source(&c.raw).await?;
         let folder = base.join(folder_name(&c.title));
-        let h = self.add_torrent(&source, &folder, crate::stream::ADD_TIMEOUT).await?;
-        let (file_id, _, rel) = h.with_metadata(|m| video_file(&m.file_infos, None))?.context("o torrent não tem vídeo")?;
+        let h = self.add_torrent(&source, &folder, wait).await?;
+        let (file_id, _, rel) = h.with_metadata(|m| video_file(&m.file_infos, episode))?.context("o torrent não tem o vídeo")?;
         let only_file = h.with_metadata(|m| m.file_infos.len())? > 1;
         if only_file {
             streamer.api.api_torrent_action_update_only_files(TorrentIdOrHash::Id(h.id()), &HashSet::from([file_id])).await?;
@@ -510,8 +600,8 @@ impl Orchestrator {
     }
 
     /// Estado para a página.
-    pub async fn mux_status(&self, tmdb: i64) -> Option<Value> {
-        let job = self.muxes.lock().await.get(&tmdb).cloned()?;
+    pub async fn mux_status(&self, kind: Kind, id: i64) -> Option<Value> {
+        let job = self.muxes.lock().await.get(&(kind, id)).cloned()?;
         let info = job.info();
         let handles = job.handles.lock().unwrap().clone();
         let progress = |hash: &str| {
@@ -520,12 +610,17 @@ impl Orchestrator {
                 if s.total_bytes > 0 { s.progress_bytes as f64 / s.total_bytes as f64 } else { 0.0 }
             })
         };
-        let jellyfin_url = if info.step == Step::Done { self.status(crate::search::Kind::Movie, tmdb).await.ok().and_then(|s| s.jellyfin_url) } else { None };
+        let jellyfin_url = if info.step == Step::Done && kind == Kind::Movie { self.status(kind, id).await.ok().and_then(|s| s.jellyfin_url) } else { None };
+        let video = match &info.video {
+            Some(v) => json!({ "title": v.title, "progress": progress(&v.info_hash) }),
+            None => json!({ "title": "o arquivo da biblioteca", "progress": 1.0 }),
+        };
         Some(json!({
             "title": info.title,
+            "auto": info.library.is_some(),
             "step": info.step,
             "error": info.error,
-            "video": { "title": info.video.title, "progress": progress(&info.video.info_hash) },
+            "video": video,
             "audio": { "title": info.audio.title, "progress": progress(&info.audio.info_hash) },
             "sync": *job.sync.lock().unwrap(),
             "jellyfin_url": jellyfin_url,
@@ -533,10 +628,10 @@ impl Orchestrator {
     }
 
     /// Desiste (ou limpa uma tentativa que falhou): apaga os downloads.
-    pub async fn cancel_mux(&self, tmdb: i64) -> Result<()> {
-        let job = self.muxes.lock().await.remove(&tmdb).context("nada sendo juntado aqui")?;
+    pub async fn cancel_mux(&self, kind: Kind, id: i64) -> Result<()> {
+        let job = self.muxes.lock().await.remove(&(kind, id)).context("nada sendo juntado aqui")?;
         if matches!(job.info().step, Step::Joining | Step::Importing) {
-            self.muxes.lock().await.insert(tmdb, job);
+            self.muxes.lock().await.insert((kind, id), job);
             bail!("já está juntando — espere terminar");
         }
         self.discard_sources(&job, &HashSet::new()).await;
@@ -554,14 +649,14 @@ impl Orchestrator {
                 warn!("{}: não tirei o torrent do librqbit: {e:#}", info.title);
             }
         }
-        for s in [&info.video, &info.audio].into_iter().filter(|s| !keep.contains(&s.info_hash)) {
+        for s in job.sources().iter().filter(|s| !keep.contains(&s.info_hash)) {
             let _ = std::fs::remove_dir_all(&s.folder);
             if let Some(f) = &s.torrent_file {
                 let _ = std::fs::remove_file(f);
             }
         }
         // a pasta .juntar-N fica vazia quando nada foi reaproveitado
-        if let Some(base) = info.video.folder.parent() {
+        if let Some(base) = info.audio.folder.parent() {
             let _ = std::fs::remove_dir(base);
         }
     }
@@ -585,7 +680,7 @@ impl Orchestrator {
         let saved: Vec<MuxInfo> = serde_json::from_slice(&bytes).with_context(|| format!("lendo {}", path.display()))?;
         for info in saved {
             let mut handles = vec![];
-            for s in [&info.video, &info.audio] {
+            for s in info.video.iter().chain([&info.audio]) {
                 match streamer.find_handle(&s.info_hash) {
                     Some(h) => handles.push(h),
                     None if info.step != Step::Failed => match self.readd(s).await {
@@ -595,9 +690,9 @@ impl Orchestrator {
                     None => {}
                 }
             }
-            let (tmdb, step) = (info.tmdb, info.step);
+            let (key, step) = (info.target.key(), info.step);
             let job = MuxJob::new(info, handles);
-            self.muxes.lock().await.insert(tmdb, job.clone());
+            self.muxes.lock().await.insert(key, job.clone());
             if step != Step::Failed {
                 tokio::spawn(run(self.clone(), job));
             }
@@ -621,17 +716,22 @@ impl Orchestrator {
     async fn run_mux(&self, job: &MuxJob) -> Result<()> {
         let info = job.info();
         let handles = job.handles.lock().unwrap().clone();
-        if handles.len() < 2 {
+        if handles.len() < job.sources().len() {
             bail!("um dos downloads se perdeu — comece de novo");
         }
         job.set(Step::Downloading, None);
         for h in &handles {
-            h.wait_until_completed().await?;
+            wait_or_stall(h).await?;
         }
 
         job.set(Step::Checking, None);
         self.save_muxes().await;
-        let (video, dub) = (&info.video.host_file, &info.audio.host_file);
+        let video = match (&info.library, &info.video) {
+            (Some(l), _) => &l.file,
+            (None, Some(v)) => &v.host_file,
+            (None, None) => bail!("sem vídeo"),
+        };
+        let dub = &info.audio.host_file;
         let (v, d) = (self.probe_file(video).await?, self.probe_file(dub).await?);
         let (pt, dtrack, vtrack) = pick_tracks(&v.tracks, &d.tracks)?;
         let sync = self.check_sync(video, &v, vtrack, dub, &d, dtrack).await?;
@@ -640,12 +740,21 @@ impl Orchestrator {
 
         job.set(Step::Joining, None);
         let pt = d.tracks.iter().find(|t| t.n == pt).cloned().context("faixa da dublagem sumiu")?;
-        let out = self.join(info.tmdb, video, dub, &pt, &sync).await?;
+        let out = self.join(&info.target.label(), video, dub, &pt, &sync).await?;
 
         job.set(Step::Importing, None);
-        self.import_joined(&info, &out).await?;
+        let imported = match info.target {
+            Target::Movie { .. } => self.import_joined(&info, &out).await,
+            Target::Episode { .. } => self.import_episode(&info, &out).await,
+        };
         if let Some(dir) = out.parent() {
             let _ = std::fs::remove_dir_all(dir);
+        }
+        imported?;
+        if let Some(inode) = info.library.as_ref().and_then(|l| l.inode)
+            && let Err(e) = self.drop_replaced_torrent(inode).await
+        {
+            warn!("{}: torrent da versão sem dublagem não removido: {e:#}", info.title);
         }
         self.discard_sources(job, &HashSet::new()).await;
         job.set(Step::Done, None);
@@ -657,6 +766,7 @@ impl Orchestrator {
     /// Import manual no Radarr: o idioma vai marcado (PT-BR + o original), sem
     /// depender do nome do arquivo.
     async fn import_joined(&self, info: &MuxInfo, out: &Path) -> Result<()> {
+        let Target::Movie { movie_id, .. } = info.target else { bail!("não é filme") };
         let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
         let folder = self.cfg.container_path(out.parent().context("arquivo sem pasta")?).context("a pasta de download está fora dos [[paths]]")?;
         // só a pasta: com movieId o Radarr lista a pasta do filme na biblioteca
@@ -675,20 +785,79 @@ impl Orchestrator {
         );
         let file = json!({
             "path": item["path"],
-            "movieId": info.movie_id,
+            "movieId": movie_id,
             "quality": item["quality"],
             "languages": languages,
             "releaseGroup": item["releaseGroup"],
             "indexerFlags": 0,
         });
+        let old = info.library.as_ref().map(|l| l.file_id);
         radarr.send_json(Method::POST, "command", &json!({ "name": "ManualImport", "files": [file], "importMode": "move" })).await?;
         for _ in 0..120 {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            if !out.exists() && radarr.movie(info.movie_id).await?["hasFile"].as_bool() == Some(true) {
-                return radarr.set_movie_monitored(info.movie_id, true).await;
+            let now = radarr.movie(movie_id).await?["movieFile"]["id"].as_i64();
+            if !out.exists() && now.is_some() && now != old {
+                return radarr.set_movie_monitored(movie_id, true).await;
             }
         }
         bail!("o Radarr não importou em 10 min (veja System → Events no Radarr)")
+    }
+
+    /// O mesmo no Sonarr, dizendo de que série e episódio é.
+    async fn import_episode(&self, info: &MuxInfo, out: &Path) -> Result<()> {
+        let Target::Episode { episode_id, series_id, .. } = info.target else { bail!("não é episódio") };
+        let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+        let folder = self.cfg.container_path(out.parent().context("arquivo sem pasta")?).context("a pasta de download está fora dos [[paths]]")?;
+        let items = sonarr.get_json(&format!("manualimport?folder={}&filterExistingFiles=false", url_encode(&folder))).await?;
+        let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let item = items
+            .as_array()
+            .and_then(|a| a.iter().find(|i| i["path"].as_str().is_some_and(|p| p.ends_with(name))))
+            .context("o Sonarr não viu o arquivo juntado")?;
+        let mut languages = vec![json!({ "id": SONARR_PT_BR, "name": "Portuguese (Brazil)" })];
+        languages.extend(
+            item["languages"].as_array().into_iter().flatten().filter(|l| l["id"].as_i64().is_some_and(|id| id > 0) && !l["name"].as_str().unwrap_or_default().starts_with("Portuguese")).cloned(),
+        );
+        let file = json!({
+            "path": item["path"],
+            "seriesId": series_id,
+            "episodeIds": [episode_id],
+            "quality": item["quality"],
+            "languages": languages,
+            "releaseGroup": item["releaseGroup"],
+            "releaseType": "singleEpisode",
+            "indexerFlags": 0,
+        });
+        let old = info.library.as_ref().map(|l| l.file_id);
+        sonarr.send_json(Method::POST, "command", &json!({ "name": "ManualImport", "files": [file], "importMode": "move" })).await?;
+        for _ in 0..120 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let now = sonarr.episode(episode_id).await?["episodeFileId"].as_i64().filter(|id| *id > 0);
+            if !out.exists() && now.is_some() && now != old {
+                return sonarr.monitor_episodes(&[episode_id]).await;
+            }
+        }
+        bail!("o Sonarr não importou em 10 min (veja System → Events no Sonarr)")
+    }
+}
+
+/// Espera o download terminar; parado por `STALL`, desiste.
+async fn wait_or_stall(h: &Arc<ManagedTorrent>) -> Result<()> {
+    let (mut seen, mut since) = (h.stats().progress_bytes, std::time::Instant::now());
+    let done = h.wait_until_completed();
+    tokio::pin!(done);
+    loop {
+        tokio::select! {
+            r = &mut done => return r,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                let now = h.stats().progress_bytes;
+                if now != seen {
+                    (seen, since) = (now, std::time::Instant::now());
+                } else if since.elapsed() >= STALL {
+                    bail!("o download ficou {} min parado: ninguém compartilhando", STALL.as_secs() / 60);
+                }
+            }
+        }
     }
 }
 
@@ -755,7 +924,7 @@ mod tests {
 
         let track = d.tracks.iter().find(|t| t.n == pt).unwrap().clone();
         let t0 = std::time::Instant::now();
-        let out = orch.join(0, &video, &dub, &track, &sync).await.unwrap();
+        let out = orch.join("teste", &video, &dub, &track, &sync).await.unwrap();
         eprintln!("juntado em {:.0} s: {}", t0.elapsed().as_secs_f64(), out.display());
         // a dublagem juntada contra a faixa PT-BR original do vídeo (mesmo som): atraso zero
         let o = orch.probe_file(&out).await.unwrap();
@@ -770,9 +939,9 @@ mod tests {
         // opcional: entrega a um filme de teste do Radarr (apague depois)
         if let Ok(id) = std::env::var("IMPORT_MOVIE_ID") {
             let src = Source { title: String::new(), info_hash: String::new(), magnet: None, torrent_file: None, folder: PathBuf::new(), file_id: 0, only_file: false, host_file: PathBuf::new() };
-            let info = MuxInfo { tmdb: 0, movie_id: id.parse().unwrap(), title: "teste".into(), video: src.clone(), audio: src, step: Step::Importing, error: None };
+            let info = MuxInfo { target: Target::Movie { tmdb: 0, movie_id: id.parse().unwrap() }, title: "teste".into(), video: Some(src.clone()), library: None, audio: src, step: Step::Importing, error: None };
             orch.import_joined(&info, &out).await.unwrap();
-            let file = &orch.radarr.as_ref().unwrap().movie(info.movie_id).await.unwrap()["movieFile"];
+            let file = &orch.radarr.as_ref().unwrap().movie(id.parse().unwrap()).await.unwrap()["movieFile"];
             eprintln!("importado: {} · idiomas {}", file["path"], file["languages"]);
         }
     }

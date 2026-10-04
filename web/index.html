@@ -38,10 +38,11 @@
   .meta { color: var(--muted); font-size: 13px; }
   .ov { margin: 6px 0; font-size: 13px; color: #c9c5d3; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+  /* o display dos botões (inline-flex) passaria por cima do atributo hidden */
+  [hidden] { display: none !important; }
   button, a.btn { padding: 8px 14px; min-height: 40px; border-radius: 8px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
   button:hover, a.btn:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   button:disabled { opacity: .5; cursor: default; }
-  a.btn.ok { border-color: var(--ok); color: var(--ok); }
   .state { font-size: 13px; color: var(--info); }
   .progress { height: 6px; width: 100%; border-radius: 3px; background: var(--line); overflow: hidden; }
   .progress i { display: block; height: 100%; background: var(--info); transition: width .6s; }
@@ -159,13 +160,6 @@
   <div id="rels"></div>
   <div id="pickwhere"></div>
 </dialog>
-<dialog id="mux">
-  <button id="muxclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
-  <h3 id="muxtitle"></h3>
-  <p class="meta">A imagem de uma versão com o áudio em português de outra. O Anubis baixa as duas, confere se as falas caem no mesmo lugar e só junta se baterem.</p>
-  <div id="muxbody"></div>
-  <div class="row" style="justify-content:flex-end"><button class="primary" id="muxgo" hidden>Juntar</button></div>
-</dialog>
 <dialog id="eps">
   <button id="epsclose" class="x" title="Fechar" aria-label="Fechar"><i class="i i-x"></i></button>
   <h3 id="epstitle"></h3>
@@ -217,31 +211,30 @@ const STATE = {
   available: 'Disponível',
 };
 
+// a dublagem automática (ou um pedido avulso pela API) embutindo o áudio PT-BR
 const MUX = {
-  downloading: 'Juntar dublagem: baixando as duas versões',
-  checking: 'Juntar dublagem: conferindo a sincronia…',
-  joining: 'Juntar dublagem: juntando…',
-  importing: 'Juntar dublagem: entrando na biblioteca…',
-  done: 'Dublagem juntada',
-  failed: 'Não deu para juntar a dublagem',
+  downloading: 'Dublagem: baixando',
+  checking: 'Dublagem: conferindo a sincronia…',
+  joining: 'Dublagem: embutindo…',
+  importing: 'Dublagem: entrando na biblioteca…',
+  done: 'Dublagem embutida',
+  failed: 'Não deu para embutir a dublagem',
 };
 const pct = (p) => `${Math.round(p * 100)}%`;
 
 function muxHtml(m) {
   let txt = MUX[m.step] || m.step;
-  if (m.step === 'downloading') txt += ` · vídeo ${pct(m.video.progress)} · dublagem ${pct(m.audio.progress)}`;
+  if (m.step === 'downloading') txt += m.auto ? ` ${pct(m.audio.progress)}` : ` · vídeo ${pct(m.video.progress)} · dublagem ${pct(m.audio.progress)}`;
   if (m.sync && m.step !== 'failed') {
     // positivo: a dublagem começava atrasada (o Anubis corta esse início)
     txt += Math.abs(m.sync.offset) < 0.05 ? ' · já em sincronia'
       : ` · dublagem ${m.sync.offset > 0 ? 'atrasada' : 'adiantada'} ${Math.abs(m.sync.offset).toFixed(2)} s, corrigida`;
     if (Math.abs(m.sync.speed - 1) > 1e-6) txt += ', velocidade ajustada';
   }
-  const bar = m.step === 'downloading' ? `<div class="progress"><i style="width:${((m.video.progress + m.audio.progress) * 50).toFixed(1)}%"></i></div>` : '';
+  const done = m.auto ? m.audio.progress : (m.video.progress + m.audio.progress) / 2;
+  const bar = m.step === 'downloading' ? `<div class="progress"><i style="width:${(done * 100).toFixed(1)}%"></i></div>` : '';
   const err = m.error ? `<small class="err">${esc(m.error)}</small>` : '';
-  const cancel = m.step === 'downloading' || m.step === 'failed'
-    ? `<button data-muxcancel="${m.tmdb}">${m.step === 'failed' ? 'Apagar os downloads' : 'Desistir'}</button>` : '';
-  const link = m.jellyfin_url ? `<a class="btn ok" href="${esc(jf(m.jellyfin_url))}">Abrir no Jellyfin</a>` : '';
-  return `<span class="state">${txt}</span>${bar}${err}${cancel}${link}`;
+  return `<span class="state">${txt}</span>${bar}${err}`;
 }
 
 // pedido parado em "procurando": o que os indexadores têm e por que foi recusado
@@ -259,17 +252,17 @@ function versionsDown(v) {
 
 function statusHtml(st) {
   if (!st) return '';
-  if (st.mux) return muxHtml(st.mux);
+  if (st.mux && st.mux.step !== 'done') return muxHtml(st.mux);
+  if (st.state === 'available') return '';
   let txt = STATE[st.state] || st.state;
   if (st.state === 'searching' && st.versions) txt = versionsDown(st.versions);
   if (st.state === 'downloading' && st.progress != null) txt += ` ${Math.round(st.progress * 100)}%` + (st.eta ? ` · falta ${esc(st.eta)}` : '');
   if (st.episodes) txt += ` · ${st.episodes[0]}/${st.episodes[1]} episódios`;
   const bar = st.progress != null && st.state !== 'available' ? `<div class="progress"><i style="width:${(st.progress * 100).toFixed(1)}%"></i></div>` : '';
-  const link = st.jellyfin_url ? `<a class="btn ok" href="${esc(jf(st.jellyfin_url))}">Abrir no Jellyfin</a>` : '';
   const note = st.note ? `<small class="meta" style="flex-basis:100%">${esc(st.note)}</small>` : '';
   const offer = st.offerSubbed ? `<span class="state" style="flex-basis:100%;color:#ffb36b">Dublagem não encontrada em nenhuma fonte.</span>
     <button data-subbed="${st.offerSubbed}">Instalar legendado</button><small class="meta" style="flex-basis:100%">Baixa a versão legendada agora e troca pela dublada se ela surgir.</small>` : '';
-  return `<span class="state">${txt}</span>${bar}${link}${note}${offer}`;
+  return `<span class="state">${txt}</span>${bar}${note}${offer}`;
 }
 
 function card(it, st) {
@@ -279,7 +272,8 @@ function card(it, st) {
   const tags = [it.kind === 'movie' ? 'filme' : it.anime ? 'anime' : 'série', ...(it.genres || []).slice(0, 2)].map((g) => `<span class="tag">${esc(g)}</span>`).join(' ')
     + (it.avail === 'subbed' ? ' <span class="tag sub" title="Os indexadores só têm no idioma original, com legenda">somente legendado</span>'
       : it.avail === 'nothing' ? ' <span class="tag">sem fonte</span>'
-      : it.avail === 'unknown' ? ` <span class="tag">${it.uncertain ? 'não deu para conferir agora — tento de novo em 1 h' : 'conferindo as fontes…'}</span>` : '');
+      : it.avail === 'unknown' ? ` <span class="tag">${it.uncertain ? 'não deu para conferir agora — tento de novo em 1 h' : 'conferindo as fontes…'}</span>` : '')
+    + (it.available ? ' <span class="tag">na biblioteca</span>' : '');
   // filmes: assistir agora (padrão) ou só baixar; séries: episódios (assistir
   // um de cada vez) ou pedir a série inteira
   const watch = it.kind === 'movie'
@@ -288,8 +282,7 @@ function card(it, st) {
   const none = it.avail === 'nothing' && !it.requested && !tracked[k];
   const req = it.requested || tracked[k] ? '' : `<button data-req="${k}">${none ? 'Pedir quando aparecer' : it.kind === 'movie' ? 'Só baixar' : 'Baixar a série'}</button>`;
   const why = none ? `<small class="meta" style="flex-basis:100%">Nenhuma das fontes conferidas tem este título agora. Pedindo, o ${it.kind === 'movie' ? 'Radarr' : 'Sonarr'} fica de olho e baixa quando ele aparecer.</small>` : '';
-  const mux = it.kind === 'movie' ? `<button data-mux="${it.id}" data-title="${esc(it.title)}">Juntar dublagem</button>` : '';
-  const action = watch + req + mux;
+  const action = watch + req;
   return `<article class="card" data-key="${k}">
     ${poster}
     <div>
@@ -430,62 +423,6 @@ async function loadWhere(el, kind, id) {
           ${d.link ? `<a href="${esc(d.link)}" target="_blank" rel="noopener">Links para cada serviço</a> · ` : ''}dados do JustWatch via TMDB</p>`
         : '<p class="meta">Não está em nenhum serviço de streaming no Brasil agora.</p>');
   } catch {}
-}
-
-// "juntar dublagem": escolher o vídeo e a dublagem
-async function muxOptions(id, title) {
-  $('#muxtitle').textContent = `Juntar dublagem · ${title}`;
-  $('#muxbody').innerHTML = '<p class="msg">Buscando versões nos indexadores…</p>';
-  $('#muxgo').hidden = true;
-  $('#mux').showModal();
-  try {
-    const r = await fetch(`mux/${id}/options`);
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error);
-    // o vídeo fica sem escolha prévia: a melhor imagem costuma ter dezenas de GB
-    const row = (c, name, checked) => `<label class="rel">
-        <div><b>${esc(c.title)}</b><small>${esc(c.quality)} · ${c.size ? size(c.size) : 'tamanho não informado'} · ${c.seeders} fontes · ${esc(c.languages.join(', ') || 'idioma não informado')}</small></div>
-        <input type="radio" name="${name}" value="${esc(c.guid)}" ${checked ? 'checked' : ''}></label>`;
-    if (!d.audio.length || !d.video.length) {
-      $('#muxbody').innerHTML = `<p class="msg">${d.audio.length ? 'Nenhuma versão sem dublagem para usar como vídeo.' : 'Nenhuma versão com áudio em português nos indexadores agora.'}</p><div id="muxwhere"></div>`;
-      if (!d.audio.length) loadWhere($('#muxwhere'), 'movie', id);
-      return;
-    }
-    $('#muxbody').innerHTML = `<h4>Vídeo (a imagem)</h4>${d.video.map((c) => row(c, 'v', false)).join('')}
-      <h4>Dublagem (o áudio em português)</h4>${d.audio.map((c, i) => row(c, 'a', i === 0)).join('')}`;
-    $('#muxgo').dataset.id = id;
-    $('#muxgo').hidden = false;
-  } catch (e) {
-    $('#muxbody').innerHTML = `<p class="msg err">Falhou: ${esc(e.message)}</p>`;
-  }
-}
-
-async function muxStart() {
-  const id = +$('#muxgo').dataset.id;
-  const video = $('input[name=v]:checked')?.value, audio = $('input[name=a]:checked')?.value;
-  if (!video || !audio) { alert('Escolha uma versão para o vídeo e uma para a dublagem.'); return; }
-  $('#muxgo').disabled = true;
-  try {
-    const r = await fetch('mux', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, video, audio }) });
-    const d = await r.json();
-    if (!r.ok) { alert(`Não deu para juntar: ${d.error}`); return; }
-    const k = `movie:${id}`;
-    tracked[k] = { ...(lastResults[k] || tracked[k] || { kind: 'movie', id, title: $('#muxtitle').textContent }), requested: true, mux: true, done: null };
-    save();
-    $('#mux').close();
-    refresh(tracked[k], false);
-  } finally {
-    $('#muxgo').disabled = false;
-  }
-}
-$('#muxclose').onclick = () => $('#mux').close();
-$('#muxgo').onclick = muxStart;
-
-async function muxCancel(id) {
-  const r = await fetch(`mux/${id}`, { method: 'DELETE' });
-  if (!r.ok) { alert((await r.json()).error); return; }
-  const t = tracked[`movie:${id}`];
-  if (t) { t.mux = false; save(); refresh(t, false); }
 }
 
 // o que o usuário do Jellyfin já viu: assistido, ou parado no meio (a fatia
@@ -785,7 +722,7 @@ function render(it, st) {
     const list = $('#tracked');
     const old = list.querySelector(`[data-key="${k}"]`);
     // pronto sai daqui: aparece em "Prontos para assistir"
-    if ((st && st.state === 'available' && !st.mux) || (!st && tracked[k].done)) { if (old) old.remove(); }
+    if ((st && st.state === 'available') || (!st && tracked[k].done)) { if (old) old.remove(); }
     else {
       const html = card({ ...it, requested: true }, st);
       if (old) old.outerHTML = html; else list.insertAdjacentHTML('afterbegin', html);
@@ -814,11 +751,6 @@ async function refresh(it, openable = true) {
     const r = await fetch(`status/${it.kind}/${it.id}`);
     const st = await r.json();
     if (!r.ok) return;
-    const t = tracked[keyOf(it)];
-    if (t && t.mux) {
-      const m = await fetch(`mux/${it.id}`);
-      if (m.ok) st.mux = await m.json();
-    }
     await apply(it, st, openable);
   } catch {}
 }
@@ -838,11 +770,9 @@ async function apply(it, st, openable = true) {
   const t = tracked[keyOf(it)];
   // o servidor não tem mais o pedido (apagado aqui, em outro aparelho ou no Radarr/Sonarr)
   if (t && st.state === 'not_requested' && !st.mux) { untrack(keyOf(it)); render(it, st); return; }
-  if (st.mux) {
-    st.mux.tmdb = it.id;
-    // ainda juntando: não conta como pronto
-    if (st.mux.step !== 'done') st.state = 'searching';
-  }
+  // pedido avulso ainda juntando: não conta como pronto (a dublagem
+  // automática é de algo que já está na biblioteca)
+  if (st.mux && !st.mux.auto && st.mux.step !== 'done') st.state = 'searching';
   if (st.state === 'searching' && !st.mux) {
     st.versions = await versions(it);
     // filme, série ou anime: há versões com fontes, mas nenhuma dublada
@@ -935,10 +865,6 @@ document.addEventListener('click', (e) => {
   if (sb) acceptSubbed(sb, sb.dataset.subbed);
   const op = e.target.closest('[data-open]');
   if (op) openItem(op.dataset.open);
-  const mx = e.target.closest('[data-mux]');
-  if (mx) muxOptions(mx.dataset.mux, mx.dataset.title);
-  const mc = e.target.closest('[data-muxcancel]');
-  if (mc) muxCancel(mc.dataset.muxcancel);
   const un = e.target.closest('[data-uninstall]');
   if (un) {
     un.disabled = true;

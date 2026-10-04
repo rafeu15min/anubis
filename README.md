@@ -34,7 +34,7 @@ TMDB; em animes, os em exibição mais populares), Lançamentos (filmes lançado
 em digital no Brasil nos últimos 60 dias; séries e animes estreados nos
 últimos 60/90 dias) e Populares no Brasil (o que está nos streamings
 brasileiros). Anime = animação japonesa. Um toque no pôster abre o cartão
-completo (assistir, pedir, episódios, juntar dublagem). As listas ficam 6 h em
+completo (assistir, pedir, episódios). As listas ficam 6 h em
 memória; a primeira abertura de séries/animes leva alguns segundos (o id do
 TVDB de cada série vem do TMDB), e a página já pré-carrega as outras abas.
 
@@ -117,25 +117,34 @@ embutidas no MKV; tudo vira WebVTT (SRT em Windows-1252 incluso), acompanha os
 pulos no modo convertido e o idioma escolhido fica lembrado. O Bazarr pula
 legenda quando o áudio já é português.
 
-**Juntar dublagem** (filmes, botão no cartão): a imagem de uma versão com o
-áudio em português de outra — para quando a dublada só existe em qualidade
-pior. A página lista as versões do Radarr em duas colunas (vídeo, melhor
-imagem primeiro; dublagem, as com áudio em português) e o Anubis baixa as
-duas (só o vídeo de cada torrent). Antes de juntar, confere a sincronia: em
-três pontos do filme (20%, 50%, 80%) procura onde o áudio da dublagem cai no
-do vídeo, pelos "ataques" do som (música e efeitos são os mesmos na
+**Dublagem automática** (`src/autodub.rs`, sem botão): filmes e episódios da
+biblioteca sem áudio em português (nem no nome nem nas faixas que o mediainfo
+leu; fora os de idioma original português e os especiais) ganham a faixa PT-BR
+quando uma dublagem aparece nas fontes. A cada 6 h, um título por vez, com o
+site ocioso há 10 min e 30 s entre as buscas (no máximo 30 por passada); a
+busca é a do "Assistir" com a DHT sempre consultada, só versões com áudio em
+português, inclusive as que dizem ter zero fontes (os sites brasileiros
+informam 0 em quase tudo) — sem ninguém esperando, dá para tentar. Só a
+dublagem é baixada (num pacote de temporada, só o episódio); parada 20 min,
+desiste daquela versão. Antes de embutir, confere a sincronia contra o arquivo
+da biblioteca: em três pontos (20%, 50%, 80%) procura onde o áudio da dublagem
+cai no do vídeo, pelos "ataques" do som (música e efeitos são os mesmos na
 dublagem). Mesmo atraso nos pontos: corta ou acrescenta esse tempo. Duração
-indicando outra velocidade (25 × 23,976 quadros/s): ajusta e confere de
-novo. Nada bate (versão estendida, cena a mais): não junta e mostra o que
-mediu. O arquivo final tem o vídeo copiado, a dublagem como primeira faixa
-(AAC) e os áudios e legendas originais; entra no Radarr pelo import manual,
-com o idioma marcado como PT-BR, e os dois downloads são apagados. O ffmpeg
-roda numa cópia descartável da imagem do Jellyfin (`docker run`) com o
-`/data` montado como o Radarr o vê.
+indicando outra velocidade (25 × 23,976 quadros/s): ajusta e confere de novo.
+Nada bate (versão estendida, cena a mais): tenta a próxima dublagem (até 3).
+O arquivo final tem o vídeo copiado, a dublagem como primeira faixa (AAC) e os
+áudios e legendas originais; entra no Radarr/Sonarr pelo import manual no
+lugar do antigo, com o idioma marcado como PT-BR, e o torrent que semeava o
+antigo sai do qBittorrent se não semeia mais nada da biblioteca. Sem dublagem
+nas fontes, tenta de novo em 2 dias; uma dublagem que não serviu fica de fora
+por 30 dias (`state_dir/dublagem.json`). `POST /autodub/{kind}/{id}` pede na
+hora (filme, episódio ou a série inteira). O ffmpeg roda numa cópia
+descartável da imagem do Jellyfin (`docker run`) com o `/data` montado como o
+Radarr o vê. O mesmo mecanismo junta duas versões baixadas de um filme
+(`POST /mux`, só pela API).
 
 **Onde assistir** (opcional, com `[tmdb]` na config): quando não há versão
-para baixar — no "Assistir" sem versão aceita e no "Juntar dublagem" sem
-áudio em português —, a página mostra em quais serviços de streaming do
+para baixar — no "Assistir" sem versão aceita —, a página mostra em quais serviços de streaming do
 Brasil o título está (assinatura, grátis, aluguel, compra), com os dados do
 JustWatch via TMDB. O TMDB não informa o idioma do áudio.
 
@@ -264,6 +273,8 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /mux/{tmdb}/options` | versões para juntar: vídeo e dublagem PT-BR |
 | `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
 | `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |
+| `GET /autodub` | dublagem automática: o que sabe de cada título e o que está embutindo |
+| `POST /autodub/{kind}/{id}` | dublagem na hora: `movie` (tmdb), `episode` (id no Sonarr) ou `series` (tvdb) |
 | `GET /preferencias` | página de preferências |
 | `GET /history` · `POST`/`DELETE /history/netflix` e `/history/crunchyroll` · `PUT /history/anilist` | histórico de outros serviços (Netflix, Crunchyroll, AniList); o envio responde 202 e a busca no TMDB segue em segundo plano, com o andamento em `GET /history` |
 | `GET /prefs` · `PUT /prefs` | idioma do áudio (filmes/séries) e legendas |
@@ -316,6 +327,7 @@ src/season.rs        "Temporada de … para você": animes da temporada (AniList
 src/external.rs      histórico de fora: CSV da Netflix e lista do AniList (Crunchyroll)
 src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
+src/autodub.rs       dublagem automática da biblioteca sem português
 src/api.rs           rotas HTTP
 web/index.html       página de busca (embutida no binário)
 web/player.html      player

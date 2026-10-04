@@ -26,8 +26,10 @@ pub struct Orchestrator {
     pub(crate) jellyfin_login: Option<(String, String)>,
     /// motor do "assistir agora" (só no modo serve, com [stream] configurado)
     pub(crate) streamer: Option<std::sync::Arc<Streamer>>,
-    /// "juntar dublagem" em andamento ou que falharam, por tmdbId
-    pub(crate) muxes: Mutex<HashMap<i64, std::sync::Arc<crate::mux::MuxJob>>>,
+    /// "juntar dublagem" em andamento ou que falharam (filme: tmdbId; episódio: id no Sonarr)
+    pub(crate) muxes: Mutex<HashMap<(crate::search::Kind, i64), std::sync::Arc<crate::mux::MuxJob>>>,
+    /// a dublagem automática dos títulos da biblioteca sem português
+    pub(crate) autodub: crate::autodub::AutoDub,
     /// última busca de versões de um pedido parado (evita repetir nos indexadores)
     /// central de estado (pedidos e downloads) que as rotas consultam
     pub(crate) live: crate::live::Live,
@@ -84,6 +86,7 @@ impl Orchestrator {
             prowlarr: cfg.prowlarr.as_ref().map(|p| crate::services::Prowlarr::new(&p.url, &p.api_key)).transpose()?,
             streamer,
             muxes: Mutex::new(HashMap::new()),
+            autodub: Default::default(),
             live: crate::live::Live::default(),
             showcase_cache: crate::discover::Cache::default(),
             for_you_cache: crate::foryou::Cache::default(),

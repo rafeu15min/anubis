@@ -41,6 +41,11 @@ impl Default for Dht {
 }
 
 impl Dht {
+    /// Há quanto tempo ninguém usa o site.
+    pub fn idle_for(&self) -> Duration {
+        self.last_activity.lock().unwrap().elapsed()
+    }
+
     /// Alguém no site (ou assistindo): a varredura pausa na hora.
     pub fn touch(&self, container: &str) {
         *self.last_activity.lock().unwrap() = Instant::now();

@@ -321,9 +321,15 @@ fn magnet_hash(source: &TorrentSource) -> Option<String> {
 }
 
 pub(crate) fn candidates(releases: Vec<Value>) -> Vec<Candidate> {
+    all_candidates(releases.into_iter().filter(|r| r["seeders"].as_i64().unwrap_or(0) > 0).collect())
+}
+
+/// Como `candidates`, mas também as que dizem ter zero fontes: os sites
+/// brasileiros informam 0 em quase tudo, inclusive no que baixa bem.
+pub(crate) fn all_candidates(releases: Vec<Value>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = releases
         .into_iter()
-        .filter(|r| r["protocol"] == "torrent" && r["seeders"].as_i64().unwrap_or(0) > 0)
+        .filter(|r| r["protocol"] == "torrent")
         .map(|r| Candidate {
             guid: r["guid"].as_str().unwrap_or_default().to_owned(),
             title: r["title"].as_str().unwrap_or_default().to_owned(),
@@ -361,6 +367,12 @@ fn sort_candidates(list: &mut [Candidate]) {
             std::cmp::Reverse(c.seeders),
         )
     });
+}
+
+/// Gravações de cinema e afins: o áudio vem do ambiente da sala.
+fn bad_audio(quality: &str) -> bool {
+    let q = quality.to_uppercase();
+    ["CAM", "TELESYNC", "TELECINE", "WORKPRINT", "DVDSCR", "REGIONAL"].iter().any(|k| q.contains(k))
 }
 
 impl Candidate {
@@ -1477,7 +1489,7 @@ impl Orchestrator {
                 let ep = sonarr.episode(arr_id).await?;
                 let series = sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?;
                 let list = match &self.prowlarr {
-                    Some(p) => self.prowlarr_episode(p, &series, arr_id, ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0), always_dht).await?,
+                    Some(p) => candidates(self.prowlarr_episode(p, &series, arr_id, ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0), always_dht).await?),
                     None => candidates(sonarr.releases(&format!("episodeId={arr_id}")).await?),
                 };
                 (list, series)
@@ -1487,10 +1499,36 @@ impl Orchestrator {
         Ok(list)
     }
 
+    /// As dublagens de um título da biblioteca (filme: id no Radarr; episódio:
+    /// no Sonarr): versões com áudio em português, inclusive as de zero
+    /// fontes, com a DHT sempre consultada. Só o áudio interessa, então a
+    /// qualidade da imagem não conta (fora gravações de cinema, de áudio ruim);
+    /// as com fontes primeiro, depois as menores.
+    pub(crate) async fn dub_sources(&self, kind: Kind, arr_id: i64) -> Result<Vec<Candidate>> {
+        let raw = match kind {
+            Kind::Movie => {
+                let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
+                self.movie_releases_raw(&radarr.get_json(&format!("movie/{arr_id}")).await?, true).await?
+            }
+            _ => {
+                let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
+                let ep = sonarr.episode(arr_id).await?;
+                let (s, e) = (ep["seasonNumber"].as_i64().unwrap_or(0), ep["episodeNumber"].as_i64().unwrap_or(0));
+                match &self.prowlarr {
+                    Some(p) => self.prowlarr_episode(p, &sonarr.series_by_id(ep["seriesId"].as_i64().unwrap_or(0)).await?, arr_id, s, e, true).await?,
+                    None => sonarr.releases(&format!("episodeId={arr_id}")).await?,
+                }
+            }
+        };
+        let mut list: Vec<Candidate> = all_candidates(raw).into_iter().filter(|c| c.portuguese() && !bad_audio(&c.quality)).collect();
+        list.sort_by_key(|c| (c.seeders == 0, c.size == 0, c.size));
+        Ok(list)
+    }
+
     /// Depois de uma troca: o torrent que semeava o arquivo antigo sai do
     /// qBittorrent com os dados — só se nenhum arquivo dele continua na
     /// biblioteca (um pacote de temporada com outros episódios fica).
-    async fn drop_replaced_torrent(&self, inode: (u64, u64)) -> Result<()> {
+    pub(crate) async fn drop_replaced_torrent(&self, inode: (u64, u64)) -> Result<()> {
         self.qbit.login().await?;
         for t in self.qbit.torrents().await? {
             let files: Vec<crate::disk::FileId> = self
@@ -1546,10 +1584,15 @@ impl Orchestrator {
     /// As versões de um filme pelo Radarr e, em último caso (nenhuma
     /// aprovada), o catálogo da DHT (bitmagnet), julgado pelo perfil do filme.
     async fn movie_releases(&self, movie: &Value, always_dht: bool) -> Result<Vec<Candidate>> {
+        Ok(candidates(self.movie_releases_raw(movie, always_dht).await?))
+    }
+
+    /// As versões cruas (também as de zero fontes) de `movie_releases`.
+    async fn movie_releases_raw(&self, movie: &Value, always_dht: bool) -> Result<Vec<Value>> {
         let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
         let movie_id = movie["id"].as_i64().context("filme sem id")?;
-        let mut list = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
-        if self.cfg.bitmagnet.is_none() || (!always_dht && list.iter().any(|c| !c.rejected)) {
+        let mut list = radarr.releases(&format!("movieId={movie_id}")).await?;
+        if self.cfg.bitmagnet.is_none() || (!always_dht && candidates(list.clone()).iter().any(|c| !c.rejected)) {
             return Ok(list);
         }
         let name = movie["title"].as_str().unwrap_or_default().to_owned();
@@ -1562,7 +1605,7 @@ impl Orchestrator {
         let profile = radarr.get_json(&format!("qualityprofile/{}", movie["qualityProfileId"])).await?;
         let names: Vec<String> = [Some(name.clone()), pt.clone()].into_iter().flatten().map(|n| norm(&n)).collect();
         let with_year = |n: &str| year.map_or_else(|| n.to_owned(), |y| format!("{n} {y}"));
-        let mut seen: HashSet<String> = list.iter().map(|c| c.guid.to_lowercase()).collect();
+        let mut seen: HashSet<String> = list.iter().filter_map(|r| r["guid"].as_str().map(str::to_lowercase)).collect();
         let mut extra = vec![];
         for q in [Some(with_year(&name)), pt.as_deref().map(with_year)].into_iter().flatten() {
             for r in self.bitmagnet_search(&q).await.unwrap_or_else(|e| {
@@ -1578,8 +1621,7 @@ impl Orchestrator {
                 }
             }
         }
-        list.extend(candidates(extra));
-        sort_candidates(&mut list);
+        list.extend(extra);
         Ok(list)
     }
 
@@ -1630,7 +1672,7 @@ impl Orchestrator {
         }
         // com o Prowlarr: busca direta, rápida e com o nome em português
         if let Some(p) = &self.prowlarr {
-            let mut list = self.prowlarr_episode(p, &series, episode_id, s, e, false).await?;
+            let mut list = candidates(self.prowlarr_episode(p, &series, episode_id, s, e, false).await?);
             original_or_portuguese(&mut list, original_language(&series));
             return Ok(Target { title, arr_id: episode_id, series_id: Some(series_id), episode: Some((s, e)), next, library: None, candidates: list });
         }
@@ -1654,7 +1696,7 @@ impl Orchestrator {
     /// episódios, qualidade, formatos), e a decisão segue o perfil da série —
     /// a busca do Sonarr fazia uma consulta por variação do nome (inclusive em
     /// espanhol e italiano), uma de cada vez, e não reconhecia o português.
-    async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64, always_dht: bool) -> Result<Vec<Candidate>> {
+    async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64, always_dht: bool) -> Result<Vec<Value>> {
         let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
         let name = series_name(series["title"].as_str().unwrap_or_default());
         let pt = match (&self.tmdb, series["tmdbId"].as_i64().filter(|id| *id > 0)) {
@@ -1732,7 +1774,7 @@ impl Orchestrator {
                 }
             }
         }
-        Ok(candidates(out))
+        Ok(out)
     }
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar

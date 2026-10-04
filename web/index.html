@@ -59,9 +59,10 @@
   .acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   /* baixando: a porcentagem no lugar do ícone */
   button.icon.prog { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
-  /* discreto: procurar a dublagem agora */
-  button.icon.mini { width: 32px; min-height: 32px; font-size: 13px; border-color: var(--line); color: var(--muted); }
-  button.icon.mini:hover { color: var(--accent); border-color: var(--accent); }
+  /* discreto, entre as etiquetas: sem português → procurar a dublagem agora */
+  button.tag.dub { min-height: 0; padding: 1px 7px; font: inherit; font-size: 11px; line-height: inherit; color: #ffb36b; border-color: color-mix(in srgb, #ffb36b 45%, transparent); background: transparent; vertical-align: baseline; }
+  button.tag.dub:hover { background: color-mix(in srgb, #ffb36b 12%, transparent); }
+  button.tag.dub:disabled { opacity: .8; }
   /* ▶ da série: o episódio que vai tocar escrito ao lado */
   button.primary.next { gap: 8px; padding: 8px 14px; font-variant-numeric: tabular-nums; }
   #itemeps:empty { display: none; }
@@ -276,6 +277,17 @@ function statusHtml(st) {
 // que está; 🎙 discreto: procurar a dublagem agora (no servidor sem português)
 const ICON = (cls, attrs, icon, title, inner) =>
   `<button class="icon ${cls}" ${attrs} title="${title}" aria-label="${title}">${inner ?? `<i class="i i-${icon}"></i>`}</button>`;
+// 🎙 entre as etiquetas: está no servidor sem português; um toque procura a dublagem
+const dubTag = (k, label = 'sem dublagem') =>
+  `<button class="tag dub" data-dub="${k}" title="Procurar dublagem agora" aria-label="Sem dublagem: procurar agora"><i class="i i-microphone"></i>${label}</button>`;
+// liga ou desliga a etiqueta na linha de etiquetas de um cartão
+function setDubTag(cardEl, k, show, label) {
+  const row = cardEl && cardEl.querySelector('.row');
+  if (!row) return;
+  const old = row.querySelector('.tag.dub');
+  if (old && !old.disabled) old.remove();
+  if (show && !row.querySelector('.tag.dub')) row.insertAdjacentHTML('beforeend', ' ' + dubTag(k, label));
+}
 function actions(k, o) {
   const st = o.st;
   const btns = [o.play ?? ICON('primary', `data-watch="${k}"`, 'play', 'Assistir')];
@@ -285,7 +297,6 @@ function actions(k, o) {
   else if (o.requested || (st && st.state === 'searching')) btns.push(ICON('quiet', 'disabled', 'bell', 'Pedido: baixa quando achar uma versão'));
   else btns.push(o.avail === 'nothing' ? ICON('', `data-req="${k}"`, 'bell', 'Pedir quando aparecer') : ICON('', `data-req="${k}"`, 'download', 'Baixar'));
   if (o.extra) btns.push(o.extra);
-  if (o.available && o.portuguese === false) btns.push(ICON('mini', `data-dub="${k}"`, 'microphone', 'Procurar dublagem agora'));
   return `<span class="acts" data-acts="${k}">${btns.join('')}</span>`;
 }
 // as do cartão (filme ou série); na série o ▶ abre a janela com os episódios
@@ -295,7 +306,7 @@ function cardActions(it, st) {
   const available = st && st.state !== 'not_requested' ? st.state === 'available' || !!it.available : !!it.available;
   const requested = !!(it.requested || tracked[k]) && !available;
   const play = it.kind === 'movie' ? undefined : ICON('primary play-series', `data-open="${k}"`, 'play', 'Episódios');
-  return actions(k, { available, avail: it.avail, requested, st, play, portuguese: st && st.portuguese });
+  return actions(k, { available, avail: it.avail, requested, st, play });
 }
 
 function card(it, st) {
@@ -475,10 +486,11 @@ const today = () => new Date().toISOString().slice(0, 10);
 function epActions(e) {
   if (e.air_date && e.air_date > today()) return `<span class="meta">estreia ${esc(e.air_date)}</span>`;
   const st = e.downloading != null ? { state: e.downloading >= 1 ? 'importing' : 'downloading', progress: e.downloading } : e.st;
-  return actions(`episode:${e.id}`, { available: e.has_file, avail: e.avail, st, portuguese: e.portuguese });
+  return actions(`episode:${e.id}`, { available: e.has_file, avail: e.avail, st });
 }
 function epRow(e) {
-  const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + watchTag(e.watch) + (e.avail && AVAIL_TAG[e.avail] && !e.has_file ? AVAIL_TAG[e.avail] : '');
+  const tags = (e.has_file ? '<span class="tag">na biblioteca</span>' : '') + (e.has_file && e.portuguese === false ? dubTag(`episode:${e.id}`) : '')
+    + watchTag(e.watch) + (e.avail && AVAIL_TAG[e.avail] && !e.has_file ? AVAIL_TAG[e.avail] : '');
   return `<div class="ep" data-ep="${e.id}"${e.has_file || (e.air_date && e.air_date > today()) ? ' data-have' : ''}><span class="n">${e.number}</span>
     <div>${esc(e.title || 'Episódio ' + e.number)}${tags ? ` <span class="tags">${tags}</span>` : ''}<small>${esc(e.air_date || '')}</small></div>${epActions(e)}</div>`;
 }
@@ -493,7 +505,7 @@ function seriesActions(it, st) {
   const available = seriesInfo.have > 0;
   const extra = available && seriesInfo.missing > 0 && !(st && ['downloading', 'importing'].includes(st.state))
     ? ICON('', `data-req="${k}"`, 'download', `Baixar os ${seriesInfo.missing} episódios que faltam`) : '';
-  return actions(k, { available, avail: it.avail, requested: !available && !!(it.requested || tracked[k]), st, play, extra, portuguese: seriesInfo.noPt ? false : undefined });
+  return actions(k, { available, avail: it.avail, requested: !available && !!(it.requested || tracked[k]), st, play, extra });
 }
 async function loadEpisodes(it) {
   const tvdb = it.id, k = keyOf(it);
@@ -512,8 +524,9 @@ async function loadEpisodes(it) {
       next: aired.find((e) => !(e.watch && e.watch.played)) || aired[0],
       have: all.filter((e) => e.has_file).length,
       missing: aired.filter((e) => !e.has_file && e.downloading == null).length,
-      noPt: all.some((e) => e.has_file && e.portuguese === false),
+      noPt: all.filter((e) => e.has_file && e.portuguese === false).length,
     };
+    setDubTag($(`#itembody [data-key="${k}"]`), k, seriesInfo.noPt > 0, seriesInfo.noPt === 1 ? '1 episódio sem dublagem' : `${seriesInfo.noPt} episódios sem dublagem`);
     const open = [...box.querySelectorAll('details[open]')].map((x) => x.dataset.season);
     box.innerHTML = d.seasons.map((x, i) => `<details data-season="${x.number}" ${(open.length ? open.includes(String(x.number)) : i === 0) ? 'open' : ''}>
         <summary>${x.number === 0 ? 'Especiais' : `Temporada ${x.number}`} <span class="meta">· ${x.episodes.length} episódios</span><span class="tags"></span></summary>
@@ -535,7 +548,7 @@ async function requestEpisode(b, id) {
     const st = await r.json();
     if (!r.ok) throw new Error(st.error);
     const row = b.closest('.ep');
-    if (row) row.querySelector('[data-acts]').outerHTML = actions(`episode:${id}`, { available: st.state === 'available', st, portuguese: st.portuguese });
+    if (row) row.querySelector('[data-acts]').outerHTML = actions(`episode:${id}`, { available: st.state === 'available', st });
     const it = lastResults[openKey] || tracked[openKey];
     if (it) setTimeout(() => { if ($('#item').open) loadEpisodes(it); }, 10000);
   } catch (e) {
@@ -548,16 +561,18 @@ async function requestEpisode(b, id) {
 async function dubNow(b, k) {
   const [kind, id] = k.split(':');
   b.disabled = true;
-  b.classList.add('busy');
+  const label = (t) => { b.innerHTML = `<i class="i i-microphone"></i>${t}`; };
+  label('procurando…');
   try {
     const r = await fetch(`autodub/${kind}/${id}`, { method: 'POST' });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error);
-    b.title = d.queued.length ? 'Procurando dublagem: quando entrar, o português passa a tocar primeiro' : 'Nada sem português aqui';
+    label(d.queued.length ? 'procurando dublagem' : 'nada sem português');
+    b.title = d.queued.length ? 'Quando a dublagem entrar, o português passa a tocar primeiro' : 'Nada sem português aqui';
   } catch (e) {
-    b.title = `Não deu: ${e.message}`;
+    label('não deu');
+    b.title = e.message;
   }
-  b.classList.remove('busy');
   b.setAttribute('aria-label', b.title);
 }
 
@@ -835,6 +850,9 @@ function render(it, st) {
     $('#tracking').hidden = !list.children.length;
   }
   document.querySelectorAll(`#results [data-key="${k}"] .status, #itembody [data-key="${k}"] .status`).forEach((el) => { el.innerHTML = statusHtml(st); });
+  if (st && it.kind === 'movie') {
+    document.querySelectorAll(`#results [data-key="${k}"], #itembody [data-key="${k}"]`).forEach((c) => setDubTag(c, k, st.state === 'available' && st.portuguese === false));
+  }
   if (st) {
     document.querySelectorAll(`#results [data-key="${k}"] [data-acts]`).forEach((el) => { el.outerHTML = cardActions(it, st); });
     document.querySelectorAll(`#itembody [data-key="${k}"] [data-acts]`).forEach((el) => {

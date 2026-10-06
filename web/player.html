@@ -35,6 +35,8 @@
   .controls { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
   .controls .spacer { flex: 1; }
   button { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent; color: var(--text); cursor: pointer; }
+  /* o display dos botões venceria o hidden (o "Próximo" vazio no último episódio) */
+  [hidden] { display: none !important; }
   button:hover { background: rgba(255,255,255,.12); }
   button svg { width: 26px; height: 26px; fill: currentColor; }
   button.big svg { width: 34px; height: 34px; }
@@ -243,7 +245,8 @@ function syncDub(dub) {
 }
 
 v.addEventListener('waiting', () => document.body.classList.add('waiting'));
-v.addEventListener('playing', () => document.body.classList.remove('waiting'));
+// voltou a tocar (pulou para outro ponto, trocou a qualidade): o aviso de erro sai
+v.addEventListener('playing', () => { document.body.classList.remove('waiting'); $('msg').classList.remove('on'); });
 v.addEventListener('canplay', () => document.body.classList.remove('waiting'));
 v.addEventListener('play', () => $('playicon').setAttribute('d', PAUSE));
 v.addEventListener('pause', () => $('playicon').setAttribute('d', PLAY));
@@ -251,7 +254,9 @@ v.addEventListener('error', () => {
   if (!v.src) return;
   document.body.classList.remove('waiting');
   const m = $('msg');
-  m.innerHTML = 'Este arquivo não tocou no navegador. O download continua; quando terminar, ele abre no Jellyfin.';
+  m.innerHTML = phase === 'downloading'
+    ? 'Este arquivo não tocou no navegador. O download continua; quando terminar, ele abre no Jellyfin.'
+    : 'Este trecho não tocou no navegador. Volte ou avance um pouco, ou abra no Jellyfin.';
   m.classList.add('on');
 });
 let saved = 0;

@@ -484,9 +484,13 @@ impl Orchestrator {
         let (layout, channels) = aac_layout(pt.channels);
         chain.push_str(&format!(",aformat=channel_layouts={layout}"));
         let mp4 = video.extension().and_then(|e| e.to_str()).is_some_and(|e| ["mp4", "m4v", "mov"].contains(&e.to_lowercase().as_str()));
-        let mut args: Vec<String> = vec!["-nostdin".into(), "-y".into(), "-loglevel".into(), "error".into(), "-i".into(), self.tool_path(video)?, "-i".into(), self.tool_path(dub)?];
+        // legendas numa terceira leitura do vídeo: vindas da mesma do vídeo, as
+        // esparsas (minutos sem pacote) fazem o ffmpeg ler o vídeo adiante da
+        // dublagem, e ela acaba gravada longe da cena (Loki S02E05: os últimos
+        // 10 min no fim do arquivo; o player, que pula até a cena, quebra)
+        let mut args: Vec<String> = vec!["-nostdin".into(), "-y".into(), "-loglevel".into(), "error".into(), "-i".into(), self.tool_path(video)?, "-i".into(), self.tool_path(dub)?, "-i".into(), self.tool_path(video)?];
         args.extend(["-filter_complex".into(), format!("[1:a:{}]{chain}[dub]", pt.n)]);
-        args.extend(["-map", "0:v:0", "-map", "[dub]", "-map", "0:a", "-map", "0:s?", "-map", "0:t?", "-map_metadata", "0", "-map_chapters", "0"].map(String::from));
+        args.extend(["-map", "0:v:0", "-map", "[dub]", "-map", "0:a", "-map", "2:s?", "-map", "2:t?", "-map_metadata", "0", "-map_chapters", "0"].map(String::from));
         // tudo copiado, menos a dublagem; legendas de MP4 (mov_text) não entram em MKV
         args.extend(["-c", "copy", "-c:a:0", "aac"].map(String::from));
         args.extend(["-b:a:0".into(), format!("{}k", (channels * 64).max(128))]);

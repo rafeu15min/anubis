@@ -865,18 +865,27 @@ impl Streamer {
         let t = &self.transcode;
         let input = self.input(job);
         let source_h = media.height.unwrap_or(u32::MAX);
-        let encode = media.mode == Mode::Transcode || height.is_some_and(|h| h < source_h);
+        let track = audio.unwrap_or(0);
+        let dub = if track == 0 { job.dub_offset() } else { None };
+        // vídeo copiado só começa num keyframe (o anterior a `start`), e o
+        // áudio convertido começaria exatamente em `start`: o buraco entre os
+        // dois vira um primeiro pacote longo, e o navegador toca o som emendado
+        // (adiantado até o intervalo entre keyframes). Sem a dublagem, o áudio
+        // começa no mesmo keyframe (-noaccurate_seek); com ela, que vem de outra
+        // leitura, o vídeo é convertido para os dois começarem em `start`
+        let encode = media.mode == Mode::Transcode || height.is_some_and(|h| h < source_h) || (dub.is_some() && start > 0.0);
         let max_h = height.map_or(t.max_height, |h| h.min(source_h));
         let mut args: Vec<String> = vec!["-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into()];
         let vaapi = encode && t.encoder == "vaapi";
         if vaapi {
             args.extend(["-vaapi_device".into(), t.device.clone()]);
         }
+        if !encode {
+            args.push("-noaccurate_seek".into());
+        }
         args.extend(["-ss".into(), format!("{start:.3}"), "-i".into(), input.clone()]);
         // dublagem fora de sincronia (sempre a primeira faixa): lida à parte,
         // deslocada. O som que vai com o vídeo no segundo T está em T + atraso
-        let track = audio.unwrap_or(0);
-        let dub = if track == 0 { job.dub_offset() } else { None };
         let mut dub_delay = None;
         if let Some(offset) = dub {
             let at = start + offset;

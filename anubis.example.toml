@@ -121,3 +121,10 @@ region = "BR"
 # madrugada (1h às 6h): a pausa de 30 min quando a internet piora não vale
 # night_from = 1
 # night_to = 6
+
+# Progresso de leitura único do KOReader (Kindle, celular, página de leitura).
+# O KOReader usa como "servidor próprio" a URL pública de /kosync (o Anubis só
+# publica essa rota pelo Tailscale Funnel). key_file = md5 da senha.
+# [kosync]
+# user = "rafeu"
+# key_file = "/home/rafeu/.config/anubis/kosync.key"

@@ -22,6 +22,7 @@ mod dubsync;
 mod external;
 mod foryou;
 mod indexers;
+mod kosync;
 mod orchestrator;
 mod live;
 mod mux;
@@ -145,7 +146,11 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
         orch.cfg.storage.stop_percent,
         if orch.cfg.storage.dry_run { " (dry_run: só registra)" } else { "" }
     );
-    let app = api::router(api::AppState { orch, wake });
+    let kosync = match &orch.cfg.kosync {
+        Some(k) => Some(Arc::new(kosync::Kosync::load(k, orch.cfg.state_dir())?)),
+        None => None,
+    };
+    let app = api::router(api::AppState { orch, wake, kosync });
     let mut servers = tokio::task::JoinSet::new();
     for (_, l) in listeners {
         servers.spawn(axum::serve(l, app.clone()).into_future());

@@ -26,6 +26,8 @@ pub struct Config {
     /// rápido que pela busca do Sonarr, e acha os nomes em português)
     pub prowlarr: Option<ProwlarrCfg>,
     pub bitmagnet: Option<BitmagnetCfg>,
+    /// progresso de leitura único do KOReader (Kindle, celular, página de leitura)
+    pub kosync: Option<KosyncCfg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +35,16 @@ pub struct Config {
 pub struct ProwlarrCfg {
     pub url: String,
     pub api_key: String,
+}
+
+/// Servidor do "Progress sync" do KOReader (ver src/kosync.rs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KosyncCfg {
+    /// o usuário configurado no KOReader
+    pub user: String,
+    /// arquivo com o md5 da senha (o que o KOReader manda em x-auth-key)
+    pub key_file: PathBuf,
 }
 
 /// bitmagnet: o catálogo da DHT (busca de último caso) e a varredura que o
@@ -240,6 +252,11 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 }
 
 impl Config {
+    /// Onde fica o estado que sobrevive a reinícios.
+    pub fn state_dir(&self) -> PathBuf {
+        self.stream.as_ref().map(|s| s.state_dir.clone()).unwrap_or_else(default_state_dir)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("lendo {}", path.display()))?;
         let cfg: Config = toml::from_str(&text).with_context(|| format!("interpretando {}", path.display()))?;

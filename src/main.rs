@@ -17,16 +17,19 @@ mod bitmagnet;
 mod config;
 mod discover;
 mod drive;
+mod estudo;
 mod disk;
 mod episode_avail;
 mod dubsync;
 mod external;
 mod foryou;
+mod gosto;
 mod indexers;
 mod kosync;
 mod openlibrary;
 mod leitura;
 mod leitura_dl;
+mod leitura_recs;
 mod libgen;
 mod orchestrator;
 mod live;
@@ -40,6 +43,7 @@ mod services;
 mod stream;
 mod subs;
 mod uninstall;
+mod vitrine_livros;
 
 use anyhow::{Context, Result, bail};
 use orchestrator::Orchestrator;
@@ -168,7 +172,10 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
         let ol = openlibrary::OpenLibrary::load(orch.cfg.state_dir())?;
         let bookshelf = l.bookshelf.as_ref().map(|b| leitura_dl::Bookshelf::new(&b.url, &b.api_key)).transpose()?;
         let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, l.drive.clone(), &orch.cfg.state_dir())?;
-        let leitura = Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol, downloads.clone()));
+        let vitrine = vitrine_livros::Vitrine::load(l.flaresolverr.clone(), orch.cfg.state_dir())?;
+        let estudo = estudo::Estudo::load(l.areas.clone(), l.openalex_api_key.clone(), orch.cfg.state_dir())?;
+        let leitura = Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol, downloads.clone(), orch.clone(), vitrine, estudo));
+        leitura.start();
         // livro novo no Drive: a estante relista
         let me = leitura.clone();
         tokio::spawn(async move {

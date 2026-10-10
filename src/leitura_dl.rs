@@ -96,6 +96,9 @@ pub struct Job {
     /// o usuário aceitou inglês (não havia em português)
     #[serde(default)]
     pub english_ok: bool,
+    /// artigo de acesso livre (OpenAlex): o PDF, baixado direto
+    #[serde(default)]
+    pub pdf: Option<String>,
 }
 
 pub struct Bookshelf {
@@ -298,7 +301,7 @@ impl Downloads {
     }
 
     /// Pede um livro (o id é o do pedido; repetir o mesmo título não duplica).
-    pub async fn request(self: &Arc<Self>, title: String, alt_title: Option<String>, author: Option<String>, folder: String) -> Job {
+    pub async fn request(self: &Arc<Self>, title: String, alt_title: Option<String>, author: Option<String>, folder: String, pdf: Option<String>) -> Job {
         let id = format!("{}:{}", folder, words(&title).join("-"));
         let mut jobs = self.jobs.lock().await;
         if let Some(j) = jobs.get(&id)
@@ -319,6 +322,7 @@ impl Downloads {
             drive_path: None,
             tried: vec![],
             english_ok: false,
+            pdf,
         };
         jobs.insert(id.clone(), job.clone());
         drop(jobs);
@@ -381,6 +385,18 @@ impl Downloads {
     async fn run(&self, id: &str) -> Result<()> {
         let job = self.job(id).await.context("pedido sumiu")?;
         let kind = kind_of(&job.folder);
+        // artigo de acesso livre: o PDF direto, conferido como os outros
+        if let Some(url) = &job.pdf {
+            if self.via_url(id, url, kind).await? {
+                return Ok(());
+            }
+            self.update(id, |j| {
+                j.stage = Stage::Falhou;
+                j.detail = "O PDF de acesso livre não veio (ou não passou na conferência)".into();
+            })
+            .await;
+            return Ok(());
+        }
         // português primeiro: LibGen em português, depois torrents marcados
         // PT, conferidos pelo texto
         if !job.english_ok {
@@ -480,6 +496,43 @@ impl Downloads {
         queries.extend(titles.iter().map(|t| fold(t)));
         queries.dedup();
         (titles, queries)
+    }
+
+    /// Um PDF de acesso livre (artigo do OpenAlex): baixa e entrega.
+    async fn via_url(&self, id: &str, url: &str, kind: Kind) -> Result<bool> {
+        let job = self.job(id).await.context("pedido sumiu")?;
+        self.update(id, |j| {
+            j.stage = Stage::Baixando;
+            j.detail = "Baixando o PDF de acesso livre".into();
+        })
+        .await;
+        let name = match &job.author {
+            Some(a) => format!("{} ({a}).pdf", job.title),
+            None => format!("{}.pdf", job.title),
+        }
+        .replace('/', "-");
+        let file = self.tmp.join(&name);
+        let http = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36")
+            .timeout(Duration::from_secs(300))
+            .build()?;
+        let got = async {
+            let res = http.get(url).send().await?.error_for_status()?;
+            // página no lugar do PDF (o repositório pede um clique): não serve
+            let html = res.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("text/html"));
+            anyhow::ensure!(!html, "o endereço deu uma página, não o PDF");
+            tokio::fs::write(&file, res.bytes().await?).await?;
+            anyhow::Ok(())
+        };
+        let ok = match got.await {
+            Ok(()) => self.deliver(id, &file, kind, false).await?,
+            Err(e) => {
+                tracing::info!("leitura: PDF {url}: {e:#}");
+                false
+            }
+        };
+        let _ = tokio::fs::remove_file(&file).await;
+        Ok(ok)
     }
 
     /// Library Genesis: as melhores versões (até 5), baixadas direto.

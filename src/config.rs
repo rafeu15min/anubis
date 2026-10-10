@@ -47,6 +47,27 @@ pub struct LeituraCfg {
     pub drive: String,
     /// o *arr dos livros (Bookshelf, API do Readarr)
     pub bookshelf: Option<BookshelfCfg>,
+    /// FlareSolverr (as listas da Amazon Brasil só abrem num navegador)
+    #[serde(default = "default_flaresolverr")]
+    pub flaresolverr: String,
+    /// áreas de estudo (Técnicos e Artigos; src/estudo.rs): o ponto de
+    /// partida, o resto vem do que está no Drive
+    #[serde(default)]
+    pub areas: Vec<AreaCfg>,
+    /// chave gratuita do OpenAlex (openalex.org): mais buscas por dia nos Artigos
+    pub openalex_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreaCfg {
+    pub nome: String,
+    /// como aparece nos títulos e resumos (português e inglês)
+    pub termos: Vec<String>,
+}
+
+fn default_flaresolverr() -> String {
+    "http://127.0.0.1:8191".into()
 }
 
 #[derive(Debug, Deserialize)]

@@ -16,6 +16,13 @@
 //! séries e animes de aventura. Os gêneros de filme e de série do TMDB são
 //! unificados (Ação/Aventura = "Ação e Aventura"), e o gosto vem dos gêneros
 //! das sementes (quando se sabe — importação) e dos das recomendações.
+//!
+//! O gosto vale também entre filmes e livros (src/gosto.rs): as
+//! palavras-chave do TMDB das sementes ("cyberpunk", "dystopia") entram no
+//! perfil, e a Leitura usa este perfil nas recomendações de livros. No
+//! sentido contrário, o que se lê (Leitura publica em `Cache::book_taste`)
+//! pesa nos gêneros, e as palavras-chave mais fortes dos livros trazem
+//! filmes e séries com elas (Neuromancer → cyberpunk).
 
 use crate::discover::{Category, is_anime};
 use crate::orchestrator::Orchestrator;
@@ -36,6 +43,10 @@ const DISLIKE: f64 = 2.0;
 const ROW_LEN: usize = 20;
 /// quanto o gosto por gênero pesa perto das recomendações (que valem até 1)
 const TASTE_WEIGHT: f64 = 0.5;
+/// palavra-chave dos livros só vale se o TMDB tem ao menos tantos filmes com ela
+const MIN_KEYWORD_TITLES: i64 = 25;
+/// quanto os livros pesam nos gêneros (o que se assiste vale 1)
+const BOOK_SHARE: f64 = 0.35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Media {
@@ -164,6 +175,8 @@ pub(crate) struct Profile {
     pub ranked: Vec<(Media, Value, f64)>,
     /// gosto por gênero unificado (0–1)
     pub taste: HashMap<i64, f64>,
+    /// gosto por palavra-chave do TMDB, no vocabulário comum (src/gosto.rs)
+    pub keywords: HashMap<String, f64>,
 }
 
 #[derive(Default)]
@@ -173,6 +186,15 @@ pub struct Cache {
     /// populares dos gêneros preferidos, pelo caminho no TMDB
     by_genre: tokio::sync::Mutex<HashMap<String, (Instant, Vec<Value>)>>,
     profile: tokio::sync::Mutex<Option<(Instant, Arc<Profile>)>>,
+    /// palavras-chave do TMDB por semente
+    keywords: tokio::sync::Mutex<HashMap<(Media, i64), (Instant, Vec<String>)>>,
+    /// palavra-chave (vocabulário comum) → (id no TMDB, quantos filmes têm
+    /// ela) (None: não existe lá)
+    keyword_ids: tokio::sync::Mutex<HashMap<String, Option<(i64, i64)>>>,
+    /// títulos com as palavras-chave dos livros, pelo caminho no TMDB
+    by_keyword: tokio::sync::Mutex<HashMap<String, (Instant, Vec<Value>)>>,
+    /// o gosto de quem lê (publicado pela Leitura)
+    pub book_taste: tokio::sync::RwLock<Option<crate::gosto::Taste>>,
 }
 
 impl Cache {
@@ -192,7 +214,16 @@ impl Orchestrator {
             return Ok(row.clone());
         }
         let Some(p) = self.viewer_profile().await? else { return Ok(vec![]) };
-        let Profile { seeds, exclude, ranked, taste } = &*p;
+        let Profile { seeds, exclude, ranked, taste, .. } = &*p;
+        // o que se lê pesa nos gêneros (sem Animação e afins, que livro não tem)
+        let books = self.for_you_cache.book_taste.read().await.clone();
+        let mut taste = taste.clone();
+        if let Some(b) = &books {
+            for (g, x) in &b.genres {
+                *taste.entry(*g).or_insert(0.0) += BOOK_SHARE * x;
+            }
+        }
+        let taste = &taste;
         let media = if cat == Category::Movies { Media::Movie } else { Media::Tv };
         let fits = |m: Media, v: &Value| {
             m == media
@@ -209,6 +240,18 @@ impl Orchestrator {
             pool.iter_mut().for_each(|p| p.1 /= strongest);
         }
         let mut seen: HashSet<i64> = pool.iter().filter_map(|p| p.0["id"].as_i64()).collect();
+        // as palavras-chave mais fortes dos livros: títulos com elas, à parte
+        // (ganham lugar garantido na fileira, como "porque você lê")
+        let mut from_books: Vec<Value> = vec![];
+        if let Some(b) = &books {
+            for v in self.with_book_keywords(cat, b).await {
+                let Some(id) = v["id"].as_i64() else { continue };
+                // mesmo que já esteja entre os candidatos: aqui tem vaga garantida
+                if fits(media, &v) && !seeds.contains_key(&(media, id)) && !exclude.contains(&(media, id)) && v["poster_path"].is_string() {
+                    from_books.push(v);
+                }
+            }
+        }
         let mut popular = self.showcase_list(cat, "Populares no Brasil").await.unwrap_or_default();
         popular.extend(self.popular_in(cat, taste).await);
         for v in popular {
@@ -226,7 +269,17 @@ impl Orchestrator {
             })
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let picked: Vec<Value> = scored.into_iter().take(ROW_LEN).map(|(v, _)| v).collect();
+        let mut picked: Vec<Value> = scored.into_iter().take(ROW_LEN).map(|(v, _)| v).collect();
+        // os dos livros, os que mais combinam com o gosto, nas posições 3, 7 e
+        // 11 (sem repetir o que já foi escolhido)
+        from_books.sort_by(|a, b| fit(taste, b, cat).total_cmp(&fit(taste, a, cat)));
+        tracing::info!("Para você ({cat:?}): {} títulos pelas palavras-chave dos livros: {:?}", from_books.len(), from_books.iter().take(5).filter_map(|v| v["title"].as_str().or(v["name"].as_str())).collect::<Vec<_>>());
+        let chosen: HashSet<i64> = picked.iter().filter_map(|v| v["id"].as_i64()).collect();
+        let fresh = from_books.into_iter().filter(|v| v["id"].as_i64().is_some_and(|id| !chosen.contains(&id)));
+        for (slot, v) in [2usize, 6, 10].into_iter().zip(fresh) {
+            picked.insert(slot.min(picked.len()), v);
+        }
+        picked.truncate(ROW_LEN);
         let row = self.showcase_cards(cat, &picked).await;
         self.for_you_cache.rows.lock().await.insert(cat, (Instant::now(), row.clone()));
         Ok(row)
@@ -273,7 +326,17 @@ impl Orchestrator {
         }
         let ranked = rank(&weights, &recs, &exclude);
         let taste = taste(&known, &ranked);
-        let p = Arc::new(Profile { seeds, exclude, ranked, taste });
+        // palavras-chave das sementes mais fortes (e, contra, das ocultas)
+        let mut kw = crate::gosto::Taste::default();
+        let mut by_weight: Vec<(&(Media, i64), &f64)> = weights.iter().collect();
+        by_weight.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+        for (seed, w) in by_weight.into_iter().take(MAX_SEEDS * 2) {
+            if let Ok(list) = self.seed_keywords(*seed).await {
+                kw.add(*w, &[], &list);
+            }
+        }
+        let keywords = kw.normalized().keywords;
+        let p = Arc::new(Profile { seeds, exclude, ranked, taste, keywords });
         *self.for_you_cache.profile.lock().await = Some((Instant::now(), p.clone()));
         Ok(Some(p))
     }
@@ -306,6 +369,87 @@ impl Orchestrator {
             }
         }
         self.for_you_cache.by_genre.lock().await.insert(path, (Instant::now(), out.clone()));
+        out
+    }
+
+    /// O gosto de quem assiste no vocabulário comum a filmes e livros
+    /// (src/gosto.rs): gêneros unificados e palavras-chave do TMDB.
+    pub(crate) async fn viewer_taste(&self) -> Option<crate::gosto::Taste> {
+        let p = self.viewer_profile().await.ok()??;
+        Some(crate::gosto::Taste { genres: p.taste.clone(), keywords: p.keywords.clone() })
+    }
+
+    /// Palavras-chave do TMDB de uma semente, no vocabulário comum (24 h em memória).
+    async fn seed_keywords(&self, seed: (Media, i64)) -> Result<Vec<String>> {
+        if let Some((at, v)) = self.for_you_cache.keywords.lock().await.get(&seed)
+            && at.elapsed() < RECS_TTL
+        {
+            return Ok(v.clone());
+        }
+        let tmdb = self.tmdb.as_ref().context("TMDB não configurado")?;
+        let v = tmdb.get(&format!("{}/{}/keywords", seed.0.path(), seed.1)).await?;
+        // filme: "keywords"; série: "results"
+        let list: Vec<String> = v["keywords"].as_array().or(v["results"].as_array()).into_iter().flatten()
+            .filter_map(|k| k["name"].as_str()).filter_map(crate::gosto::keyword).collect();
+        self.for_you_cache.keywords.lock().await.insert(seed, (Instant::now(), list.clone()));
+        Ok(list)
+    }
+
+    /// Filmes ou séries com as 3 palavras-chave mais fortes dos livros
+    /// (populares primeiro; 24 h em memória).
+    async fn with_book_keywords(&self, cat: Category, books: &crate::gosto::Taste) -> Vec<Value> {
+        let Some(tmdb) = self.tmdb.as_ref() else { return vec![] };
+        let mut ids = vec![];
+        // as 3 primeiras que existem no TMDB (que só tem palavras em inglês)
+        for (k, _) in books.top_keywords(12).into_iter().filter(|(k, _)| k.is_ascii()) {
+            if ids.len() >= 3 {
+                break;
+            }
+            let known = self.for_you_cache.keyword_ids.lock().await.get(&k).copied();
+            let id = match known {
+                Some(id) => id,
+                None => {
+                    // a palavra igual no TMDB (a busca devolve parecidas também)
+                    let found = tmdb.get(&format!("search/keyword?query={}", k.replace(' ', "%20"))).await.ok().and_then(|v| {
+                        v["results"].as_array()?.iter().find(|r| r["name"].as_str().and_then(crate::gosto::keyword).as_deref() == Some(k.as_str()))?["id"].as_i64()
+                    });
+                    // quantos filmes têm a palavra: tema de verdade ("cyberpunk")
+                    // tem muitos; detalhe do livro ("nervous system"), poucos
+                    let mut entry = None;
+                    if let Some(id) = found {
+                        let n = tmdb.get(&format!("discover/movie?with_keywords={id}")).await.ok().and_then(|v| v["total_results"].as_i64()).unwrap_or(0);
+                        entry = Some((id, n));
+                    }
+                    self.for_you_cache.keyword_ids.lock().await.insert(k.clone(), entry);
+                    entry
+                }
+            };
+            if let Some((id, n)) = id
+                && n >= MIN_KEYWORD_TITLES
+            {
+                tracing::info!("Para você: dos livros, \"{k}\" ({n} filmes no TMDB)");
+                ids.push(id.to_string());
+            }
+        }
+        tracing::info!("Para você ({cat:?}): palavras-chave dos livros → TMDB {:?}", ids);
+        if ids.is_empty() {
+            return vec![];
+        }
+        let path = match cat {
+            Category::Movies => format!("discover/movie?language=pt-BR&sort_by=popularity.desc&vote_count.gte=100&with_keywords={}", ids.join("|")),
+            Category::Series => format!("discover/tv?language=pt-BR&sort_by=popularity.desc&vote_count.gte=50&without_genres=16&with_keywords={}", ids.join("|")),
+            Category::Animes => format!("discover/tv?language=pt-BR&sort_by=popularity.desc&vote_count.gte=20&with_genres=16&with_origin_country=JP&with_keywords={}", ids.join("|")),
+        };
+        if let Some((at, v)) = self.for_you_cache.by_keyword.lock().await.get(&path)
+            && at.elapsed() < RECS_TTL
+        {
+            return v.clone();
+        }
+        let out = match tmdb.get(&path).await {
+            Ok(v) => v["results"].as_array().cloned().unwrap_or_default(),
+            Err(_) => return vec![],
+        };
+        self.for_you_cache.by_keyword.lock().await.insert(path, (Instant::now(), out.clone()));
         out
     }
 

@@ -10,7 +10,7 @@ function section(key, tabs, placeholder) {
 
 export const sections = reactive({
   video: section('anubis.categoria', [['filmes', 'Filmes'], ['series', 'Séries'], ['animes', 'Animes']], 'Buscar filme ou série…'),
-  leitura: section('leitura.aba', [['ficcao', 'Ficção'], ['tecnicos', 'Técnicos'], ['artigos', 'Artigos'], ['mangas-hqs', 'Mangás e HQs'], ['rpg', 'RPG']], 'Buscar livro, autor, HQ…'),
+  leitura: section('leitura.aba', [['ficcao', 'Ficção'], ['tecnicos', 'Técnicos'], ['artigos', 'Artigos'], ['mangas-hqs', 'Mangás e HQs']], 'Buscar livro, autor, HQ…'),
 });
 
 // trocar de aba volta à vitrine (limpa a busca)

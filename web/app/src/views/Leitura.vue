@@ -19,6 +19,10 @@ const coverColor = (t) => ({ '--c': `hsl(${hue(t)} 28% 24%)` });
 
 const reading = computed(() => (shelf.value?.estante || []).filter((b) => b.progress != null && !b.lido));
 const rest = computed(() => (shelf.value?.estante || []).filter((b) => !(b.progress != null && !b.lido)));
+// as fileiras como as dos filmes (src/leitura_recs.rs)
+const rows = computed(() => [['Para você', 'para_voce'], ['Destaques', 'destaques'], ['Lançamentos', 'lancamentos'], ['Populares no Brasil', 'populares']]
+  .map(([title, k]) => ({ title, items: shelf.value?.[k] || [] }))
+  .filter((r) => r.items.length));
 
 // ---- pedidos: andamento a cada 3 s enquanto algum trabalha; um livro que
 // chega ao Drive faz a estante relistar
@@ -75,7 +79,13 @@ watch(() => S.query, (term) => {
 const card = ref(null); // { book } | { sug, fromSearch }
 const cat = ref(S.tab);
 function openBook(b) { card.value = { book: b }; }
-function openSug(s, fromSearch) { cat.value = S.tab; card.value = { sug: s, fromSearch }; }
+function openSug(s, fromSearch) {
+  // já está no Drive: o cartão do livro (se ele é desta aba)
+  const b = s.estante && (shelf.value?.estante || []).find((x) => x.path === s.estante);
+  if (b) { openBook(b); return; }
+  cat.value = S.tab;
+  card.value = { sug: s, fromSearch };
+}
 const working = ref(false);
 
 async function download() {
@@ -83,7 +93,7 @@ async function download() {
   const categoria = card.value.fromSearch ? cat.value : S.tab;
   working.value = true;
   try {
-    await api('/leitura/baixar', { method: 'POST', body: { title: s.title, author: s.author, categoria } });
+    await api('/leitura/baixar', { method: 'POST', body: { title: s.title, author: s.author, categoria, pdf: s.pdf || null } });
     card.value = null;
     // o pedido aparece na aba da pasta escolhida
     if (categoria !== S.tab || S.query) { S.query = ''; S.tab = categoria; }
@@ -167,18 +177,18 @@ const sugKey = (s) => s.key;
             </button>
           </Rail>
         </template>
-        <template v-if="shelf.preparando">
-          <h2>Para você</h2>
-          <p class="msg">Montando a partir dos autores que você lê…</p>
-        </template>
-        <template v-else-if="shelf.para_voce.length">
-          <h2>Para você</h2>
-          <Rail :items="shelf.para_voce" :item-key="sugKey" v-slot="{ item, copy }">
+        <p v-if="shelf.areas?.length" class="perfil" title="Áreas de estudo: as da configuração e as que vieram do que está no Drive (Técnicos e Artigos)">
+          <span v-for="a in shelf.areas" :key="a.nome" class="chip" :class="{ auto: a.automatica }">{{ a.nome }}</span>
+        </p>
+        <p v-if="shelf.preparando && !rows.length" class="msg">Montando Para você, Destaques, Lançamentos e Populares no Brasil (o primeiro leva alguns minutos)…</p>
+        <template v-for="r in rows" :key="r.title">
+          <h2>{{ r.title }}</h2>
+          <Rail :items="r.items" :item-key="sugKey" v-slot="{ item, copy }">
             <button class="tile" :tabindex="copy ? -1 : null" @click="openSug(item, false)">
               <img v-if="item.cover" :src="item.cover" alt="" loading="lazy">
               <div v-else class="cover" :style="coverColor(item.title)"><b>{{ item.title }}</b><small>{{ item.author }}</small></div>
               <span class="t">{{ item.title }}</span>
-              <span class="m"><span v-if="item.portuguese" class="pt" title="Tem edição em português">PT</span>{{ item.author }}</span>
+              <span class="m"><span v-if="item.estante" class="ok">na estante · </span><span v-else-if="item.portuguese" class="pt" title="Tem edição em português">PT</span>{{ item.author }}</span>
             </button>
           </Rail>
         </template>
@@ -192,7 +202,7 @@ const sugKey = (s) => s.key;
             </button>
           </Rail>
         </template>
-        <p v-if="!shelf.error && !reading.length && !rest.length && !shelf.para_voce.length && !shelf.preparando" class="msg">Nada aqui ainda.</p>
+        <p v-if="!shelf.error && !reading.length && !rest.length && !rows.length && !shelf.preparando" class="msg">Nada aqui ainda.</p>
       </template>
     </template>
 
@@ -213,13 +223,15 @@ const sugKey = (s) => s.key;
         <h3>{{ card.sug.title }}</h3>
         <p class="meta">{{ card.sug.author }}<template v-if="card.sug.year"> · {{ card.sug.year }}</template></p>
         <p v-if="card.sug.reason">{{ card.sug.reason }}.</p>
-        <p class="meta">{{ card.sug.portuguese ? 'Tem edição em português.' : 'Sem edição em português no Open Library (a busca tenta mesmo assim).' }}</p>
+        <p v-if="card.sug.estante" class="meta">Já está na estante: {{ card.sug.estante }}</p>
+        <p v-else-if="card.sug.key.startsWith('oa:')" class="meta">{{ card.sug.pdf ? 'Acesso livre: o PDF vai direto para o Drive.' : 'Sem PDF direto: abra na fonte.' }}</p>
+        <p v-else class="meta">{{ card.sug.portuguese ? 'Tem edição em português.' : 'Sem edição em português conhecida (a busca tenta mesmo assim).' }}</p>
         <div class="acts">
           <select v-if="card.fromSearch" v-model="cat" title="Pasta no Drive" aria-label="Pasta no Drive">
             <option v-for="[slug, label] in S.tabs" :key="slug" :value="slug">{{ label }}</option>
           </select>
-          <button class="icon" :class="{ busy: working }" :disabled="working" title="Baixar para o Drive (português primeiro)" aria-label="Baixar" @click="download"><i class="i i-download"></i></button>
-          <a class="icon" :href="`https://openlibrary.org${card.sug.key}`" target="_blank" rel="noopener" title="Ver no Open Library" aria-label="Ver no Open Library"><i class="i i-book"></i></a>
+          <button v-if="!card.sug.estante && (!card.sug.key.startsWith('oa:') || card.sug.pdf)" class="icon" :class="{ busy: working }" :disabled="working" title="Baixar para o Drive (português primeiro)" aria-label="Baixar" @click="download"><i class="i i-download"></i></button>
+          <a v-if="card.sug.link" class="icon" :href="card.sug.link" target="_blank" rel="noopener" title="Ver na fonte" aria-label="Ver na fonte"><i class="i i-book"></i></a>
         </div>
       </template>
     </Modal>
@@ -237,6 +249,9 @@ const sugKey = (s) => s.key;
 .cover b { font-size: 14px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
 .cover small { font-size: 11px; opacity: .8; }
 .cover .ext { position: absolute; right: 8px; bottom: 8px; font-size: 10px; letter-spacing: .08em; opacity: .7; }
+.perfil { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
+.chip.auto { border-style: dashed; color: var(--muted); border-color: var(--line); }
 .pt { display: inline-block; font-size: 10px; padding: 0 5px; margin-right: 4px; border: 1px solid color-mix(in srgb, var(--ok) 50%, transparent); border-radius: 99px; color: var(--ok); }
 .bar-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .bar-prog i { display: block; height: 100%; background: var(--info); }

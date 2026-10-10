@@ -149,7 +149,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state);
     // fora do middleware acima: o Kindle sincronizando não é alguém no site
     let app = match kosync {
-        Some(k) => app.nest_service("/kosync", k.router()),
+        // o Kindle navega pelas abas da Leitura pelo mesmo endereço público
+        Some(k) => app.nest_service("/kosync", match &leitura {
+            Some(l) => k.clone().router().merge(l.clone().kindle_router(k)),
+            None => k.router(),
+        }),
         None => app,
     };
     match leitura {

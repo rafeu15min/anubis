@@ -43,6 +43,10 @@ local RCLONE = "RCLONE_CONFIG=" .. BIN .. "/rclone.conf SSL_CERT_FILE=/mnt/us/ko
 local READABLE = { epub = true, pdf = true, cbz = true, mobi = true, azw3 = true, azw = true, djvu = true, fb2 = true, txt = true }
 local START_PCT, STOP_PCT, MIN_AGE_DAYS = 85, 75, 7
 local MIN_INTERVAL = 60 -- segundos entre sincronias automáticas
+-- pastas do Drive que não aparecem no Kindle (continuam no Drive; a mesma
+-- lista que o Anubis esconde na página)
+local HIDDEN = { RPG = true }
+local function isHidden(drivePath) local top = drivePath:match("^([^/]+)/") return top ~= nil and HIDDEN[top] == true end
 
 -- o módulo é carregado uma vez e serve ao gerenciador de arquivos e ao leitor
 local state = { syncing = false, last = 0, downloading = {} }
@@ -281,7 +285,7 @@ local function chooseWanted(remote)
     local groups = {}
     for _, r in ipairs(remote) do
         local ext = r.Path:match("%.([^./]+)$")
-        if ext and READABLE[ext:lower()] and (r.Size or 0) > 0 then
+        if ext and READABLE[ext:lower()] and (r.Size or 0) > 0 and not isHidden(r.Path) then
             local k = sameBookKey(r.Path)
             groups[k] = groups[k] or {}
             table.insert(groups[k], r)
@@ -306,6 +310,21 @@ local function chooseWanted(remote)
         end
     end
     return wanted
+end
+
+-- apaga as pastas que ficaram vazias (a de uma pasta oculta some do Kindle);
+-- uma com .sdr dentro (progresso) fica
+local function pruneEmpty(dir)
+    if lfs.attributes(dir, "mode") ~= "directory" then return true end
+    local empty = true
+    for name in lfs.dir(dir) do
+        if name ~= "." and name ~= ".." then
+            local p = dir .. "/" .. name
+            if name:match("%.sdr$") or lfs.attributes(p, "mode") ~= "directory" or not pruneEmpty(p) then empty = false end
+        end
+    end
+    if empty then os.remove(dir) end
+    return empty
 end
 
 local function apply(remote)
@@ -350,6 +369,7 @@ local function apply(remote)
         end
         -- outro arquivo com o mesmo nome, fora do índice: não é do plugin, fica
     end
+    for top in pairs(HIDDEN) do pruneEmpty(LIB .. "/" .. top) end
     idx.last_sync = os.time()
     saveIndex()
     return stats
@@ -519,6 +539,189 @@ local function bootstrapKosync()
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Anubis · Leitura: as abas da página do Anubis no Kindle (Ficção, Técnicos,
+-- Artigos, Mangás e HQs), com as mesmas fileiras (Para você, Destaques,
+-- Lançamentos, Populares no Brasil) e a estante. Tocar num livro da estante
+-- abre (baixa se for fantasma); nos outros, pede o download para o Drive.
+-- Fala com o Anubis pelo endereço do kosync (o único publicado), com o mesmo
+-- usuário e chave (src/leitura.rs: kindle_router).
+
+local TABS = { { "ficcao", "Ficção" }, { "tecnicos", "Técnicos" }, { "artigos", "Artigos" }, { "mangas-hqs", "Mangás e HQs" } }
+local STAGE = { procurando = "procurando", baixando = "baixando", conferindo = "conferindo", enviando_ao_drive = "enviando",
+    no_drive = "no Drive", sem_portugues = "sem português", sem_fonte = "sem fonte", falhou = "falhou" }
+
+-- o null do JSON vem como rapidjson.null, que no Lua é verdadeiro
+local function val(x)
+    if x == rapidjson.null then return nil end
+    return x
+end
+
+-- GET/POST no Anubis; devolve (código, resposta decodificada)
+local function anubis(method, path, body)
+    local s = G_reader_settings:readSetting("kosync")
+    if not (s and s.custom_server and s.username and s.userkey) then return nil, "o kosync não está configurado" end
+    local http = require("socket.http")
+    local ltn12 = require("ltn12")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+    local sink = {}
+    local headers = { ["x-auth-user"] = s.username, ["x-auth-key"] = s.userkey, ["accept"] = "application/json" }
+    local source
+    if body then
+        local data = rapidjson.encode(body)
+        headers["content-type"] = "application/json"
+        headers["content-length"] = tostring(#data)
+        source = ltn12.source.string(data)
+    end
+    socketutil:set_timeout(15, 60)
+    local code = socket.skip(1, http.request{
+        url = s.custom_server .. "/leitura/" .. path, method = method, headers = headers, source = source, sink = ltn12.sink.table(sink),
+    })
+    socketutil:reset_timeout()
+    local ok, data = pcall(rapidjson.decode, table.concat(sink))
+    return code, ok and data or nil
+end
+
+-- mostra "Carregando…" enquanto a rede trabalha (a chamada segura a tela)
+local function busy(text, fn)
+    local msg = InfoMessage:new{ text = text }
+    UIManager:show(msg)
+    UIManager:forceRePaint()
+    local a, b = fn()
+    UIManager:close(msg)
+    return a, b
+end
+
+local menu
+
+local function push(title, items)
+    menu.item_table.title = menu.title
+    table.insert(menu.item_table_stack, menu.item_table)
+    menu:switchItemTable(title, items)
+end
+
+local function openBook(drivePath)
+    local path = LIB .. "/" .. localRel(drivePath)
+    if not lfs.attributes(path) then
+        UIManager:show(InfoMessage:new{ text = "Ainda não está no Kindle: sincronize o Drive primeiro.", timeout = 4 })
+        return
+    end
+    UIManager:close(menu)
+    local ReaderUI = require("apps/reader/readerui")
+    ReaderUI:showReader(path) -- fantasma: o plugin baixa antes de abrir
+end
+
+local function ask(it, slug, folder)
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local author = val(it.author)
+    UIManager:show(ConfirmBox:new{
+        text = T("Pedir “%1”%2?\n\nVai para %3 no Drive (português primeiro) e aparece aqui quando chegar.", it.title,
+            (author and author ~= "") and (" de " .. author) or "", folder),
+        ok_text = "Pedir",
+        ok_callback = function()
+            NetworkMgr:runWhenOnline(function()
+                local code, job = busy("Pedindo…", function()
+                    return anubis("POST", "baixar", { title = it.title, author = author, categoria = slug, pdf = val(it.pdf) })
+                end)
+                if code == 202 and job then
+                    UIManager:show(InfoMessage:new{ text = "Pedido feito: " .. (val(job.detail) or "procurando"), timeout = 4 })
+                else
+                    UIManager:show(InfoMessage:new{ text = "Não consegui pedir (" .. tostring(code) .. ").", timeout = 5 })
+                end
+            end)
+        end,
+    })
+end
+
+local function itemsOf(section, slug, folder)
+    local out = {}
+    for _, it in ipairs(section.itens or {}) do
+        local estante, progress, lido = val(it.estante), val(it.progress), val(it.lido)
+        local right
+        if estante then
+            right = progress and not lido and string.format("%d%%", math.floor(progress * 100 + 0.5))
+                or (lido and "lido") or (section.titulo == "Na estante" and "") or "na estante"
+        elseif val(it.portuguese) then
+            right = "PT"
+        end
+        local a = val(it.author)
+        local author = (type(a) == "string" and a ~= "") and (" — " .. a) or ""
+        table.insert(out, {
+            text = it.title .. author,
+            mandatory = right,
+            callback = function()
+                if estante then openBook(estante) else ask(it, slug, folder) end
+            end,
+        })
+    end
+    if #out == 0 then table.insert(out, { text = "(vazio)", select_enabled = false }) end
+    return out
+end
+
+local function openTab(slug, label)
+    NetworkMgr:runWhenOnline(function()
+        local code, data = busy("Carregando " .. label .. "…", function() return anubis("GET", slug) end)
+        if code ~= 200 or not data then
+            UIManager:show(InfoMessage:new{ text = "Não consegui falar com o Anubis (" .. tostring(code) .. ").", timeout = 5 })
+            return
+        end
+        local items = {}
+        if val(data.preparando) then
+            table.insert(items, { text = "O Anubis ainda está montando as recomendações; tente em alguns minutos.", select_enabled = false })
+        end
+        for _, sec in ipairs(data.secoes or {}) do
+            local n = #(sec.itens or {})
+            table.insert(items, {
+                text = sec.titulo,
+                mandatory = tostring(n),
+                callback = function() push(label .. " · " .. sec.titulo, itemsOf(sec, slug, val(data.pasta) or label)) end,
+            })
+        end
+        push(label, items)
+    end)
+end
+
+local function openJobs()
+    NetworkMgr:runWhenOnline(function()
+        local code, jobs = busy("Carregando pedidos…", function() return anubis("GET", "pedidos") end)
+        if code ~= 200 or type(jobs) ~= "table" then
+            UIManager:show(InfoMessage:new{ text = "Não consegui falar com o Anubis (" .. tostring(code) .. ").", timeout = 5 })
+            return
+        end
+        local items = {}
+        for _, j in ipairs(jobs) do
+            table.insert(items, {
+                text = j.title .. " · " .. (val(j.folder) or ""),
+                mandatory = STAGE[j.stage] or j.stage,
+                callback = function() UIManager:show(InfoMessage:new{ text = j.title .. "\n\n" .. (val(j.detail) or ""), timeout = 6 }) end,
+            })
+        end
+        if #items == 0 then table.insert(items, { text = "Nenhum pedido.", select_enabled = false }) end
+        push("Pedidos", items)
+    end)
+end
+
+local function showAnubis()
+    local Menu = require("ui/widget/menu")
+    local Screen = require("device").screen
+    local items = {}
+    for _, t in ipairs(TABS) do
+        table.insert(items, { text = t[2], callback = function() openTab(t[1], t[2]) end })
+    end
+    table.insert(items, { text = "Pedidos", callback = openJobs })
+    menu = Menu:new{
+        title = "Anubis · Leitura",
+        item_table = items,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+    }
+    UIManager:show(menu)
+end
+
 local DriveSync = WidgetContainer:extend{
     name = "drivesync",
     is_doc_only = false,
@@ -544,6 +747,11 @@ function DriveSync:onResume()
 end
 
 function DriveSync:addToMainMenu(menu_items)
+    menu_items.anubis_leitura = {
+        text = "Anubis · Leitura",
+        sorting_hint = "tools",
+        callback = showAnubis,
+    }
     menu_items.drivesync = {
         text = "Drive (Livros)",
         sorting_hint = "tools",

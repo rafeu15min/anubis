@@ -59,7 +59,9 @@ package.preload["util"] = stub({
     getFriendlySize = function(n) return tostring(n) end,
 })
 package.preload["ffi/util"] = stub({ template = function(s) return s end })
-for _, m in ipairs({ "ui/widget/infomessage", "ui/network/manager", "ui/widget/progressbardialog", "ui/uimanager" }) do
+package.preload["ffi/sha2"] = stub({ md5 = function(x) return x end })
+for _, m in ipairs({ "ui/widget/infomessage", "ui/network/manager", "ui/widget/progressbardialog", "ui/uimanager",
+        "apps/reader/readerui", "bookinfomanager", "ui/widget/filechooser", "socket", "socket.http", "socketutil", "ltn12" }) do
     package.preload[m] = stub({})
 end
 package.preload["ui/widget/container/widgetcontainer"] = stub({ extend = function(_, t) return t end })

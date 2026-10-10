@@ -110,7 +110,7 @@ impl Kosync {
         Ok(m)
     }
 
-    fn authorized(&self, h: &HeaderMap) -> bool {
+    pub(crate) fn authorized(&self, h: &HeaderMap) -> bool {
         let get = |k| h.get(k).and_then(|v| v.to_str().ok());
         get("x-auth-user") == Some(self.user.as_str()) && get("x-auth-key").map(str::to_lowercase).as_deref() == Some(&self.key)
     }
@@ -129,7 +129,7 @@ impl Kosync {
     }
 }
 
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "code": 2001, "message": "Unauthorized" }))).into_response()
 }
 

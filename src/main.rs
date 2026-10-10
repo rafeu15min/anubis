@@ -24,11 +24,13 @@ mod external;
 mod foryou;
 mod indexers;
 mod kosync;
+mod openlibrary;
 mod leitura;
 mod orchestrator;
 mod live;
 mod mux;
 mod planner;
+mod quality;
 mod prefs;
 mod search;
 mod season;
@@ -59,6 +61,14 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
+    // `anubis verificar ARQ…`: o validador de EPUB/PDF, sem configuração
+    if std::env::args().nth(1).as_deref() == Some("verificar") {
+        for f in args.skip(1) {
+            let v = quality::check(std::path::Path::new(&f), quality::Kind::Book).await;
+            println!("{}\t{}\t{}\t{f}", v.problem.as_deref().unwrap_or("ok"), v.words, v.language.unwrap_or("?"));
+        }
+        return Ok(());
+    }
     let mut config = None;
     let mut command = None;
     while let Some(a) = args.next() {
@@ -66,7 +76,7 @@ async fn main() -> Result<()> {
             "--config" | "-c" => config = Some(PathBuf::from(args.next().context("--config precisa de um caminho")?)),
             "serve" | "plan" if command.is_none() => command = Some(a),
             "-h" | "--help" => {
-                println!("uso: anubis [--config ARQ] [serve|plan]");
+                println!("uso: anubis [--config ARQ] [serve|plan] · anubis verificar ARQ…");
                 return Ok(());
             }
             other => bail!("argumento desconhecido: {other} (veja --help)"),
@@ -153,8 +163,9 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
         None => None,
     };
     let leitura = orch.cfg.leitura.as_ref().map(|l| {
-        Arc::new(leitura::Leitura { drive: drive::Drive::new(l.drive.clone()), kosync: kosync.clone() })
-    });
+        let ol = openlibrary::OpenLibrary::load(orch.cfg.state_dir())?;
+        anyhow::Ok(Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol)))
+    }).transpose()?;
     let app = api::router(api::AppState { orch, wake, kosync, leitura });
     let mut servers = tokio::task::JoinSet::new();
     for (_, l) in listeners {

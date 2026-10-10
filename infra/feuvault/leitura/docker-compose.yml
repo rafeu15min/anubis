@@ -2,9 +2,10 @@
 # Mesmo /data do Sonarr/Radarr/qBittorrent: o import vira hardlink e o
 # torrent continua semeando. O Anubis copia o arquivo importado para o Drive.
 services:
-  # Bookshelf: fork vivo do Readarr (metadados do Hardcover)
+  # Bookshelf: fork vivo do Readarr, metadados do Goodreads (a busca do
+  # servidor do Hardcover estava fora do ar; o Goodreads tem mais edições em PT)
   bookshelf:
-    image: ghcr.io/pennydreadful/bookshelf:hardcover
+    image: ghcr.io/pennydreadful/bookshelf:softcover
     container_name: bookshelf
     # API só no link direto PC <-> FeuVault (fora da rede da casa)
     ports:

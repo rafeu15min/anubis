@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Serialize;
@@ -232,7 +232,7 @@ impl Leitura {
 
     pub fn router(self: Arc<Self>) -> Router {
         Router::new()
-            .route("/", get(|| async { ([("cache-control", "no-cache")], Html(include_str!("../web/leitura.html"))) }))
+            .route("/", get(crate::api::app_page))
             .route("/busca", get(search))
             .route("/{categoria}", get(shelf))
             .route("/lido/{doc}", put(mark))

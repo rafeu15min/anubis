@@ -1,6 +1,6 @@
 //! API HTTP do Anubis (no link direto 10.10.10.x).
 //!
-//! GET  /                        — página de busca
+//! GET  /                        — o app (vídeos; /leitura, /preferencias e /watch/… também)
 //! GET  /search?q=TERMO          — filmes (Radarr) e séries (Sonarr)
 //! POST /request                 — pede um item: {"kind":"movie"|"series","id":N}
 //! GET  /jellyfin/open?next=/details?id=X — abre o Jellyfin já logado (sessão deste navegador)
@@ -14,8 +14,7 @@
 //! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
 //! GET  /icones.woff2           — ícones das páginas
-//! GET  /comum.js               — o que vídeos e leitura compartilham: marca +
-//!                                seletor Vídeos ↔ Leitura, carrossel em anel
+//! GET  /assets/{arquivo}         — o front-end (web/app, Vue), embutido
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
@@ -90,11 +89,11 @@ pub fn router(state: AppState) -> Router {
     let kosync = state.kosync.clone();
     let leitura = state.leitura.clone();
     let app = Router::new()
-        .route("/", get(|| async { page(include_str!("../web/index.html")) }))
+        .route("/", get(app_page))
         .route("/search", get(search))
-        .route("/preferencias", get(|| async { page(include_str!("../web/prefs.html")) }))
+        .route("/preferencias", get(app_page))
         .route("/icones.woff2", get(icons))
-        .route("/comum.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8"), ("cache-control", "no-cache")], include_str!("../web/comum.js")) }))
+        .route("/assets/{file}", get(asset))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
@@ -117,7 +116,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status/{kind}/{id}", get(status))
         .route("/status/{kind}/{id}/versions", get(versions))
         .route("/watch", post(watch))
-        .route("/watch/{kind}/{id}", get(|| async { page(include_str!("../web/player.html")) }))
+        .route("/watch/{kind}/{id}", get(app_page))
         .route("/watch/{kind}/{id}/video", get(video))
         .route("/watch/{kind}/{id}/info", get(watch_info))
         .route("/watch/{kind}/{id}/lighter", get(lighter))
@@ -559,6 +558,35 @@ async fn hide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) ->
 async fn unhide(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i64)>) -> Response {
     s.orch.unhide(kind, id).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// O front-end (web/app, em Vue; montado por web/app/build.sh em web/dist),
+/// embutido no binário. Um app de página única: `/`, `/leitura`,
+/// `/preferencias` e `/watch/…` devolvem a mesma página, e ele mostra a tela
+/// certa sem recarregar ao navegar.
+static DIST: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+
+pub async fn app_page() -> Response {
+    match DIST.get_file("index.html").and_then(|f| f.contents_utf8()) {
+        Some(html) => page(html),
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "front-end não montado (web/app/build.sh)").into_response(),
+    }
+}
+
+/// Arquivos do build: o nome muda com o conteúdo, então podem ficar em cache para sempre.
+async fn asset(Path(file): Path<String>) -> Response {
+    let Some(f) = DIST.get_file(format!("assets/{file}")) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let kind = match file.rsplit('.').next() {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    };
+    ([("content-type", kind), ("cache-control", "public, max-age=31536000, immutable")], f.contents()).into_response()
 }
 
 /// Página embutida no binário: o navegador confere a cada carga (uma versão

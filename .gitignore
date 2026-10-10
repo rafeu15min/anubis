@@ -5,3 +5,6 @@ anubis.toml
 
 # segredos das stacks (ex.: senha do Postgres do bitmagnet)
 .env
+
+# front-end: dependências ficam no volume do Docker (web/app/build.sh)
+web/app/node_modules

@@ -1,0 +1,132 @@
+/* Base de todas as telas. Cada tela tem o resto no próprio componente. */
+
+/* sem barras de rolagem: a página e os carrosséis rolam do mesmo jeito */
+* { scrollbar-width: none; box-sizing: border-box; }
+*::-webkit-scrollbar { display: none; }
+
+/* a cor de destaque é animável: na troca Vídeos ↔ Leitura tudo o que usa
+   --accent passa do dourado ao azul junto com o seletor */
+@property --accent { syntax: '<color>'; inherits: true; initial-value: #c9a24a; }
+:root {
+  --bg: #111016; --panel: #1b1a22; --raised: #23222c; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8;
+  --video: #c9a24a; --leitura: #7cc4ee; --cinza: #6e6a7c;
+  --accent: var(--video); --ok: #5fbf7f; --info: #6fa8ff; --err: #ff8a8a; --warn: #ffb36b;
+  --troca: .45s;
+  transition: --accent var(--troca) ease;
+}
+:root.leitura { --accent: var(--leitura); }
+@media (prefers-reduced-motion: reduce) { :root { --troca: 0s; } }
+
+/* ícones: Nerd Font reduzida aos usados (web/icones.py) */
+@font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=5') format('woff2'); font-display: block; }
+.i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
+.i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
+.i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
+.i-like::before { content: "\f164"; } .i-dislike::before { content: "\f165"; } .i-trash::before { content: "\f1f8"; }
+.i-download::before { content: "\f019"; } .i-book::before { content: "\f02d"; } .i-film::before { content: "\f008"; } .i-bell::before { content: "\f0f3"; } .i-microphone::before { content: "\f130"; }
+.i-cloud::before { content: "\f0c2"; } .i-back::before { content: "\f060"; } .i-arrow-up::before { content: "\f062"; } .i-arrow-down::before { content: "\f063"; }
+.i-plus::before { content: "\f067"; } .i-goal::before { content: "\f140"; } .i-upload::before { content: "\f093"; } .i-heart::before { content: "\f004"; }
+.i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
+.i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
+
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+/* o display dos botões (inline-flex) passaria por cima do atributo hidden */
+[hidden] { display: none !important; }
+
+/* ---- cabeçalho de Vídeos e Leitura */
+header.top { position: sticky; top: 0; z-index: 2; padding: 16px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+.bar { display: flex; gap: 12px; align-items: center; max-width: 1100px; margin: 0 auto; }
+input[type=search] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gear { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); font-size: 22px; text-decoration: none; }
+.gear:hover { color: var(--accent); background: var(--panel); }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tabs button { min-height: 40px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; transition: background-color var(--troca), border-color var(--troca), color .2s; }
+.tabs button:hover { color: var(--text); }
+.tabs button.on { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+/* celular: as abas numa linha só, rolando de lado quando não cabem */
+@media (max-width: 900px) { header.top .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; flex-wrap: nowrap; overflow-x: auto; } .tabs button { flex: 1 0 auto; white-space: nowrap; } }
+
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 24px 0 12px; }
+.msg { color: var(--muted); padding: 24px 0; }
+.err { color: var(--err); }
+.meta { color: var(--muted); font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+
+/* ---- botões */
+button, a.btn { padding: 8px 14px; min-height: 40px; border-radius: 8px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+button:hover, a.btn:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: #111; font-weight: 600; }
+button.primary:hover { background: color-mix(in srgb, var(--accent) 85%, white); }
+button.quiet { border-color: var(--line); color: var(--muted); }
+.icon { display: inline-flex; align-items: center; justify-content: center; width: 44px; min-height: 44px; height: 44px; padding: 0; border-radius: 8px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 17px; text-decoration: none; cursor: pointer; }
+.icon:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.icon.on { background: var(--accent); color: #111; }
+.icon.primary { background: var(--accent); color: #111; }
+.icon.danger { border-color: color-mix(in srgb, var(--err) 60%, transparent); color: var(--err); }
+.icon.danger:hover { background: color-mix(in srgb, var(--err) 15%, transparent); }
+.icon.quiet { border-color: var(--line); color: var(--muted); }
+/* baixando: a porcentagem no lugar do ícone */
+.icon.prog { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+/* ocupado: gira no lugar do ícone */
+.icon.busy { position: relative; }
+.icon.busy .i { visibility: hidden; }
+.icon.busy::after { content: ""; position: absolute; width: 16px; height: 16px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: girar .8s linear infinite; }
+@keyframes girar { to { transform: rotate(360deg); } }
+.acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* ---- selos */
+.tag { display: inline-block; white-space: nowrap; font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
+.tag .i { margin-right: 3px; }
+.tag.seen { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.tag.watching { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+.tag.sub { color: var(--warn); border-color: var(--warn); }
+.tag.none { color: var(--muted); border-style: dashed; }
+/* discreto, entre os selos: sem português → procurar a dublagem agora */
+button.tag.dub { min-height: 0; padding: 1px 7px; font-size: 11px; line-height: inherit; color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: transparent; vertical-align: baseline; display: inline-block; }
+button.tag.dub:hover { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+button.tag.dub:disabled { opacity: .8; }
+
+.state { font-size: 13px; color: var(--info); }
+.progress { height: 6px; width: 100%; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--info); transition: width .6s; }
+
+/* ---- janelas */
+dialog { max-width: min(720px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 18px; }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog h3 { margin: 0 0 6px; }
+dialog h4 { margin: 16px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+/* fechar: no canto da janela, à vista mesmo rolando uma lista longa */
+dialog > .x { position: sticky; top: 0; float: right; z-index: 1; width: 40px; height: 40px; min-height: 40px; margin: -8px -8px 0 8px; padding: 0; justify-content: center; border-color: var(--line); border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 16px; }
+dialog > .x:hover { border-color: var(--accent); color: var(--accent); background: var(--panel); }
+dialog > .body { clear: both; }
+
+/* ---- carrossel (components/Rail.vue) */
+.railbox { position: relative; }
+.railbox .nav { display: none; position: absolute; top: calc(clamp(112px, 30vw, 150px) * .75 - 22px); z-index: 1; width: 44px; height: 44px; min-height: 0; padding: 0; justify-content: center; align-items: center; border-radius: 50%; border: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--text); font-size: 18px; line-height: 1; }
+.railbox .nav:hover { border-color: var(--accent); color: var(--accent); background: var(--bg); }
+.railbox .nav.prev { left: 4px; } .railbox .nav.next { right: 4px; }
+@media (hover: hover) and (pointer: fine) { .railbox:hover .nav { display: inline-flex; } }
+.railbox:not(.andou) .nav.prev, .railbox.cabe .nav { display: none !important; }
+.rail { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(112px, 30vw, 150px); gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 8px; }
+.rail.girando { scroll-snap-type: none; }
+.rail > .copia { display: contents; }
+.tile { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; font: inherit; cursor: pointer; scroll-snap-align: start; }
+.tile:hover { background: none; }
+.tile img, .tile .noposter { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 8px; background: var(--line); }
+.tile:hover img, .tile:hover .cover { outline: 2px solid var(--accent); }
+.tile .t { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tile .m { font-size: 12px; color: var(--muted); }
+.tile .m .ok { color: var(--ok); }
+.tile .m .sub { color: var(--warn); }
+
+/* ---- troca de tela */
+.tela-enter-active, .tela-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.tela-enter-from { opacity: 0; transform: translateY(6px); }
+.tela-leave-to { opacity: 0; transform: translateY(-4px); }
+.cabec-enter-active, .cabec-leave-active { transition: opacity .18s ease; }
+.cabec-enter-from, .cabec-leave-to { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .tela-enter-active, .tela-leave-active, .cabec-enter-active, .cabec-leave-active { transition: none; } }

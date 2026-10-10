@@ -9,6 +9,7 @@ axum = "0.8.9"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock", "std"] }
 futures-core = "0.3.34"
+include_dir = "0.7"
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
 md-5 = "0.10"
 regex = "1"

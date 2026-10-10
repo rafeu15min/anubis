@@ -173,7 +173,7 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
         let bookshelf = l.bookshelf.as_ref().map(|b| leitura_dl::Bookshelf::new(&b.url, &b.api_key)).transpose()?;
         let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, l.drive.clone(), &orch.cfg.state_dir())?;
         let vitrine = vitrine_livros::Vitrine::load(l.flaresolverr.clone(), orch.cfg.state_dir())?;
-        let estudo = estudo::Estudo::load(l.areas.clone(), l.openalex_api_key.clone(), orch.cfg.state_dir())?;
+        let estudo = estudo::Estudo::load(l.areas.clone(), l.openalex_api_key.clone(), l.openalex_campos.clone(), orch.cfg.state_dir())?;
         let leitura = Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol, downloads.clone(), orch.clone(), vitrine, estudo));
         leitura.start();
         // livro novo no Drive: a estante relista

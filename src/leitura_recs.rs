@@ -14,7 +14,7 @@ use crate::gosto::{Taste, anilist_terms, subject_terms};
 use crate::leitura::{Leitura, Suggestion, author_name, norm, owned_path};
 use crate::openlibrary::Work;
 use crate::vitrine_livros::{Item, amazon};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,7 +29,7 @@ const AUTHOR_WEIGHT: f64 = 0.5;
 /// quantos títulos de cada lista de fora são conferidos no Open Library
 const ENRICH: usize = 15;
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Rows {
     /// Técnicos e Artigos: o perfil de estudo que montou as fileiras
     pub areas: Vec<crate::estudo::Area>,
@@ -139,6 +139,7 @@ impl Leitura {
                         // Artigos dura 24 h (a cota diária do OpenAlex): conta como montado 12 h depois
                         let at = if folder == "Artigos" { Instant::now() + ROWS_TTL } else { Instant::now() };
                         me.rows.lock().await.insert(folder.to_string(), (at, Arc::new(rows)));
+                        me.save_rows().await;
                     }
                     Err(e) => {
                         tracing::warn!("Leitura ({folder}): {e:#}");
@@ -154,13 +155,49 @@ impl Leitura {
         cached.map(|(_, r)| r) // o antigo vale enquanto o novo é montado
     }
 
-    /// Monta as fileiras de Ficção e Mangás e HQs de tempos em tempos: o
-    /// gosto do que se lê chega aos filmes mesmo sem abrir a Leitura.
+    /// As fileiras prontas vão para o disco (`state_dir/leitura-fileiras.json`):
+    /// reiniciar o Anubis não as perde.
+    async fn save_rows(&self) {
+        let now = Instant::now();
+        let epoch = chrono::Utc::now().timestamp();
+        let snapshot: HashMap<String, (i64, Rows)> = self
+            .rows
+            .lock()
+            .await
+            .iter()
+            .map(|(k, (at, r))| (k.clone(), (epoch - now.saturating_duration_since(*at).as_secs() as i64 + at.saturating_duration_since(now).as_secs() as i64, (**r).clone())))
+            .collect();
+        if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+            let path = self.orch.cfg.state_dir().join("leitura-fileiras.json");
+            let tmp = path.with_extension("json.tmp");
+            if tokio::fs::write(&tmp, bytes).await.is_ok() {
+                let _ = tokio::fs::rename(&tmp, &path).await;
+            }
+        }
+    }
+
+    async fn load_rows(&self) {
+        let path = self.orch.cfg.state_dir().join("leitura-fileiras.json");
+        let Some(saved): Option<HashMap<String, (i64, Rows)>> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) else { return };
+        let now = Instant::now();
+        let epoch = chrono::Utc::now().timestamp();
+        let mut rows = self.rows.lock().await;
+        for (k, (at, r)) in saved {
+            let age = Duration::from_secs((epoch - at).max(0) as u64);
+            // o instante de quando foi montada (no futuro: Artigos, que vale 24 h)
+            let when = if at > epoch { now + Duration::from_secs((at - epoch) as u64) } else { now.checked_sub(age).unwrap_or(now - ROWS_TTL) };
+            rows.insert(k, (when, Arc::new(r)));
+        }
+    }
+
+    /// Monta as fileiras de tempos em tempos: o gosto do que se lê chega aos
+    /// filmes mesmo sem abrir a Leitura, e nenhuma aba abre vazia.
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
         tokio::spawn(async move {
+            me.load_rows().await;
             loop {
-                for folder in ["Ficção", "Mangás e HQs"] {
+                for folder in ["Ficção", "Mangás e HQs", "Técnicos", "Artigos"] {
                     me.rows(folder).await;
                     // espera essa montar antes da próxima (uma página do FlareSolverr por vez)
                     while me.building.lock().await.contains(folder) {

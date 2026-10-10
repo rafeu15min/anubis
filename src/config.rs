@@ -56,6 +56,11 @@ pub struct LeituraCfg {
     pub areas: Vec<AreaCfg>,
     /// chave gratuita do OpenAlex (openalex.org): mais buscas por dia nos Artigos
     pub openalex_api_key: Option<String>,
+    /// campos do conhecimento dos Artigos (ids do OpenAlex: 17 Computação,
+    /// 26 Matemática, 33 Ciências Sociais — onde está Educação —, 22
+    /// Engenharia); vazio: todos
+    #[serde(default)]
+    pub openalex_campos: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

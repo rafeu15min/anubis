@@ -69,7 +69,7 @@ pub struct Leitura {
     pub(crate) building: Mutex<HashSet<String>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Suggestion {
     /// a obra na fonte: "/works/OL…W" (Open Library), "amz:ASIN", "gr:ID", "al:ID"
     pub key: String,

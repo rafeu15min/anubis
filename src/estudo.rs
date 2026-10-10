@@ -17,6 +17,7 @@ use crate::config::AreaCfg;
 use crate::gosto::{Taste, fold, keyword};
 use crate::leitura::Suggestion;
 use anyhow::Result;
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -32,7 +33,7 @@ const PER_AREA: usize = 5;
 /// títulos novos procurados por montagem (o tema fica guardado para sempre)
 const NEW_TITLES: usize = 15;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Area {
     pub nome: String,
     /// o filtro no OpenAlex
@@ -57,6 +58,9 @@ pub struct Estudo {
     areas: Vec<AreaCfg>,
     /// chave gratuita do OpenAlex (mais cota por dia); sem ela, a cota anônima
     api_key: Option<String>,
+    /// campos do conhecimento do OpenAlex (ids: 17 = Ciência da Computação,
+    /// 26 = Matemática…); vazio: todos
+    fields: Vec<u32>,
     path: PathBuf,
     /// caminho no Drive → tema no OpenAlex (None: não achou)
     topics: Mutex<HashMap<String, Option<Topic>>>,
@@ -69,11 +73,11 @@ fn phrases(terms: &[String]) -> String {
 }
 
 impl Estudo {
-    pub fn load(areas: Vec<AreaCfg>, api_key: Option<String>, state_dir: PathBuf) -> Result<Self> {
+    pub fn load(areas: Vec<AreaCfg>, api_key: Option<String>, fields: Vec<u32>, state_dir: PathBuf) -> Result<Self> {
         let path = state_dir.join("estudo.json");
         let topics = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).user_agent("Anubis/0.1 (leitura pessoal)").build()?;
-        Ok(Self { http, areas, api_key, path, topics: Mutex::new(topics), turn: Mutex::new(()) })
+        Ok(Self { http, areas, api_key, fields, path, topics: Mutex::new(topics), turn: Mutex::new(()) })
     }
 
     async fn get(&self, query: &str) -> Result<Value> {
@@ -178,8 +182,10 @@ impl Estudo {
 
     /// Artigos de acesso livre de uma área (`extra`: mais filtros; `sort`).
     async fn works(&self, area: &Area, extra: &str, sort: &str, n: usize) -> Result<Vec<Suggestion>> {
+        // só português e inglês; e, se configurado, só os campos do conhecimento
+        let fields = if self.fields.is_empty() { String::new() } else { format!(",primary_topic.field.id:{}", self.fields.iter().map(|f| f.to_string()).collect::<Vec<_>>().join("|")) };
         let q = format!(
-            "filter={},open_access.is_oa:true,type:article{extra}&sort={sort}&per-page={n}&select=id,title,publication_year,language,authorships,best_oa_location,doi",
+            "filter={},open_access.is_oa:true,type:article,language:pt|en{fields}{extra}&sort={sort}&per-page={n}&select=id,title,publication_year,language,authorships,best_oa_location,doi",
             urlencode(&area.filter)
         );
         let v = self.get(&q).await.map_err(|e| anyhow::anyhow!("OpenAlex ({}): {e:#}", area.nome))?;
@@ -206,7 +212,14 @@ impl Estudo {
     pub async fn article_rows(&self, areas: &[Area]) -> Result<crate::leitura_recs::Rows> {
         let today = chrono::Local::now().date_naive();
         let ago = |days: i64| (today - chrono::Duration::days(days)).to_string();
-        let top: Vec<&Area> = areas.iter().take(PER_AREA).collect();
+        // as 3 mais fortes sempre; as outras se revezam (2 por dia), para toda
+        // área aparecer
+        let day = chrono::Local::now().ordinal() as usize;
+        let rest: Vec<&Area> = areas.iter().skip(3).collect();
+        let mut top: Vec<&Area> = areas.iter().take(3).collect();
+        for i in 0..(PER_AREA - 3).min(rest.len()) {
+            top.push(rest[(day * (PER_AREA - 3) + i) % rest.len()]);
+        }
         let mut pv = vec![];
         let mut dest = vec![];
         let mut lanc = vec![];

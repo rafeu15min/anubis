@@ -9,9 +9,14 @@
 //!                                (Open Library), sem as que já estão no Drive
 //! PUT /leitura/lido/{doc}      — {"lido": true|false}: marca no site, que
 //!                                vale mais que o progresso do Kindle
+//! POST /leitura/baixar         — {"title","author"?,"categoria"}: cadeia de
+//!                                download (src/leitura_dl.rs) → Drive
+//! GET  /leitura/pedidos        — andamento dos pedidos
+//! POST /leitura/pedidos/{id}/ingles — sem versão em português: aceita inglês
 
 use crate::drive::{Book, Drive};
 use crate::kosync::Kosync;
+use crate::leitura_dl::Downloads;
 use crate::openlibrary::{OpenLibrary, Work};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -19,7 +24,7 @@ use tokio::sync::Mutex;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::json;
@@ -43,6 +48,7 @@ pub struct Leitura {
     pub drive: Drive,
     pub kosync: Option<Arc<Kosync>>,
     pub ol: OpenLibrary,
+    pub downloads: Arc<Downloads>,
     recs: Mutex<HashMap<String, (Instant, Arc<Vec<Suggestion>>)>>,
     building: Mutex<HashSet<String>>,
 }
@@ -115,8 +121,8 @@ fn author_name(raw: &str) -> Option<String> {
 }
 
 impl Leitura {
-    pub fn new(drive: Drive, kosync: Option<Arc<Kosync>>, ol: OpenLibrary) -> Self {
-        Self { drive, kosync, ol, recs: Mutex::new(HashMap::new()), building: Mutex::new(HashSet::new()) }
+    pub fn new(drive: Drive, kosync: Option<Arc<Kosync>>, ol: OpenLibrary, downloads: Arc<Downloads>) -> Self {
+        Self { drive, kosync, ol, downloads, recs: Mutex::new(HashMap::new()), building: Mutex::new(HashSet::new()) }
     }
 
     /// O "Para você" da categoria se já está pronto; senão começa a montar.
@@ -214,6 +220,14 @@ impl Leitura {
             .route("/", get(|| async { ([("cache-control", "no-cache")], Html(include_str!("../web/leitura.html"))) }))
             .route("/{categoria}", get(shelf))
             .route("/lido/{doc}", put(mark))
+            .route("/baixar", post(download))
+            .route("/pedidos", get(|State(l): State<Arc<Leitura>>| async move { Json(l.downloads.list().await) }))
+            .route("/pedidos/{id}/ingles", post(|State(l): State<Arc<Leitura>>, Path(id): Path<String>| async move {
+                match l.downloads.accept_english(&id).await {
+                    Some(j) => (StatusCode::ACCEPTED, Json(json!(j))).into_response(),
+                    None => (StatusCode::NOT_FOUND, Json(json!({ "error": "pedido não existe" }))).into_response(),
+                }
+            }))
             .with_state(self)
     }
 }
@@ -239,6 +253,23 @@ mod tests {
         assert!(owned("Arsène Lupin, gentleman-cambrioleur", &have));
         assert!(!owned("Idoru", &have));
     }
+}
+
+#[derive(serde::Deserialize)]
+struct DownloadBody {
+    title: String,
+    author: Option<String>,
+    categoria: String,
+}
+
+async fn download(State(l): State<Arc<Leitura>>, Json(b): Json<DownloadBody>) -> Response {
+    let Some(&(_, folder)) = CATEGORIES.iter().find(|(slug, _)| *slug == b.categoria) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "categoria desconhecida" }))).into_response();
+    };
+    // o título original ajuda nos indexadores (quase todos em inglês)
+    let alt = l.ol.find(&b.title, b.author.as_deref()).await.map(|w| w.title).filter(|t| norm(t) != norm(&b.title));
+    let job = l.downloads.request(b.title, alt, b.author, folder.to_string()).await;
+    (StatusCode::ACCEPTED, Json(job)).into_response()
 }
 
 #[derive(serde::Deserialize)]

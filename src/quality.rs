@@ -33,12 +33,6 @@ pub struct Verdict {
     pub language: Option<&'static str>,
 }
 
-impl Verdict {
-    pub fn ok(&self) -> bool {
-        self.problem.is_none()
-    }
-}
-
 const MIN_WORDS_BOOK: usize = 8_000;
 const MIN_REAL_RATIO: f64 = 0.6;
 const PT: &[&str] = &["que", "de", "não", "uma", "com", "para", "por", "mais", "como", "mas", "ele", "ela", "seu", "sua", "isso", "está", "foi", "são", "também"];
@@ -222,7 +216,7 @@ mod tests {
     async fn livro_bom_passa_e_detecta_portugues() {
         let body = "Durante todo o verão ele tocou alaúde em Southwark, mas não era para isso que estava ali. ".repeat(600);
         let v = check(&make_epub(&dir(), "bom.epub", &body, &[]), Kind::Book).await;
-        assert!(v.ok(), "{v:?}");
+        assert!(v.problem.is_none(), "{v:?}");
         assert_eq!(v.language, Some("pt"));
     }
 
@@ -247,7 +241,7 @@ mod tests {
         let body = "Case manteve os olhos fechados enquanto o trem disparava pelo túnel escuro. ".repeat(800);
         let fonts = r#"<encryption><EncryptedData><CipherData><CipherReference URI="OEBPS/fonts/a.otf"/></CipherData></EncryptedData></encryption>"#;
         let v = check(&make_epub(&dir(), "fonte.epub", &body, &[("META-INF/encryption.xml", fonts)]), Kind::Book).await;
-        assert!(v.ok(), "{v:?}");
+        assert!(v.problem.is_none(), "{v:?}");
         let drm = r#"<encryption><EncryptedData><CipherData><CipherReference URI="OEBPS/c1.xhtml"/></CipherData></EncryptedData></encryption>"#;
         let v = check(&make_epub(&dir(), "drm.epub", &body, &[("META-INF/encryption.xml", drm)]), Kind::Book).await;
         assert_eq!(v.problem.as_deref(), Some("DRM"));

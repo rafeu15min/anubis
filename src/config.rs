@@ -45,6 +45,15 @@ pub struct ProwlarrCfg {
 pub struct LeituraCfg {
     /// a pasta dos livros no rclone do host ("gdrive:Livros")
     pub drive: String,
+    /// o *arr dos livros (Bookshelf, API do Readarr)
+    pub bookshelf: Option<BookshelfCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookshelfCfg {
+    pub url: String,
+    pub api_key: String,
 }
 
 /// Servidor do "Progress sync" do KOReader (ver src/kosync.rs).

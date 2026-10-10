@@ -15,7 +15,12 @@
   @font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=4') format('woff2'); font-display: block; }
   .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
   .i-film::before { content: "\f008"; } .i-x::before { content: "\f00d"; } .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
-  .i-book::before { content: "\f02d"; } .i-cloud::before { content: "\f0c2"; }
+  .i-book::before { content: "\f02d"; } .i-cloud::before { content: "\f0c2"; } .i-download::before { content: "\f019"; }
+  .jobs { display: grid; gap: 8px; }
+  .job { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .job small { color: var(--muted); grid-column: 1 / -1; }
+  .job .st { font-size: 13px; color: var(--info); }
+  .job .st.ok { color: var(--ok); } .job .st.bad { color: #ff8a8a; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
   header { position: sticky; top: 0; z-index: 2; padding: 16px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
   .bar { display: flex; gap: 12px; align-items: center; max-width: 1100px; margin: 0 auto; }
@@ -106,7 +111,31 @@ function rail(title, items, render = tile) {
     <div class="rail">${items.map(render).join('')}</div><button class="nav" data-scroll="1" aria-label="Avançar"><i class="i i-right"></i></button></div>`;
 }
 
-let shelf = [], sugs = [], retry;
+let shelf = [], sugs = [], jobs = [], retry, jobTimer;
+const DONE = ['no_drive', 'sem_fonte', 'falhou', 'sem_portugues'];
+const LABEL = { procurando: 'procurando', baixando: 'baixando', conferindo: 'conferindo', enviando_ao_drive: 'enviando ao Drive', no_drive: 'no Drive', sem_portugues: 'sem português', sem_fonte: 'sem fonte', falhou: 'falhou' };
+function jobsHtml() {
+  const tab = TABS.find(([s]) => s === current)[1];
+  const mine = jobs.filter(j => j.folder === tab).slice(0, 8);
+  if (!mine.length) return '';
+  return `<h2>Pedidos</h2><div class="jobs">${mine.map(j => {
+    const cls = j.stage === 'no_drive' ? 'ok' : (j.stage === 'sem_fonte' || j.stage === 'falhou') ? 'bad' : '';
+    const pct = j.stage === 'baixando' ? ` ${Math.round(j.progress * 100)}%` : '';
+    const en = j.stage === 'sem_portugues'
+      ? `<button class="icon" data-ingles="${esc(j.id)}" title="Não há em português: baixar a versão em inglês" aria-label="Baixar em inglês"><i class="i i-download"></i></button>` : '';
+    return `<div class="job"><b>${esc(j.title)}</b><span class="st ${cls}">${LABEL[j.stage] || j.stage}${pct} ${en}</span><small>${esc(j.detail)}</small></div>`;
+  }).join('')}</div>`;
+}
+async function pollJobs() {
+  clearTimeout(jobTimer);
+  try { jobs = await (await fetch('/leitura/pedidos')).json(); } catch { return; }
+  const box = document.getElementById('jobs');
+  if (box) box.innerHTML = jobsHtml();
+  const busy = jobs.some(j => !DONE.includes(j.stage));
+  if (busy) jobTimer = setTimeout(pollJobs, 3000);
+  else if (box && box.dataset.busy === '1') load(); // um livro entrou: a estante muda
+  if (box) box.dataset.busy = busy ? '1' : '0';
+}
 async function load() {
   clearTimeout(retry);
   $('#tabs').innerHTML = TABS.map(([s, l]) => `<button data-tab="${s}" class="${s === current ? 'on' : ''}">${l}</button>`).join('');
@@ -119,7 +148,8 @@ async function load() {
     const reading = shelf.filter(b => b.progress != null && !b.lido);
     const rest = shelf.filter(b => !reading.includes(b));
     const wait = j.preparando ? '<h2>Para você</h2><p class="msg">Montando a partir dos autores que você lê…</p>' : '';
-    $('#main').innerHTML = (rail('Lendo agora', reading) + (wait || rail('Para você', sugs, sugTile)) + rail('Na estante', rest)) || '<p class="msg">Nada aqui ainda.</p>';
+    $('#main').innerHTML = '<div id="jobs"></div>' + ((rail('Lendo agora', reading) + (wait || rail('Para você', sugs, sugTile)) + rail('Na estante', rest)) || '<p class="msg">Nada aqui ainda.</p>');
+    pollJobs();
     if (j.preparando) retry = setTimeout(load, 15000);
   } catch (e) {
     $('#main').innerHTML = `<p class="msg err">Não consegui ler o Drive: ${esc(e.message)}</p>`;
@@ -130,7 +160,10 @@ function openSug(s) {
   $('#card').innerHTML = `<button class="x" aria-label="Fechar"><i class="i i-x"></i></button>
     <h3>${esc(s.title)}</h3><p class="meta">${esc(s.author)}${s.year ? ' · ' + s.year : ''}</p>
     <p>${esc(s.reason)}.</p><p class="meta">${s.portuguese ? 'Tem edição em português.' : 'Só achei edição em inglês.'}</p>
-    <div class="acts"><a class="icon" href="https://openlibrary.org${esc(s.key)}" target="_blank" rel="noopener" title="Ver no Open Library" aria-label="Ver no Open Library"><i class="i i-book"></i></a></div>`;
+    <div class="acts">
+      <button class="icon" data-baixar="${esc(s.key)}" title="Baixar para o Drive (Bookshelf, depois torrent)" aria-label="Baixar"><i class="i i-download"></i></button>
+      <a class="icon" href="https://openlibrary.org${esc(s.key)}" target="_blank" rel="noopener" title="Ver no Open Library" aria-label="Ver no Open Library"><i class="i i-book"></i></a>
+    </div>`;
   $('#card').showModal();
 }
 
@@ -156,10 +189,24 @@ document.addEventListener('click', e => {
   const t = e.target.closest('.tile');
   if (t && t.dataset.key) { const s = sugs.find(x => x.key === t.dataset.key); if (s) openSug(s); return; }
   if (t) { const b = shelf.find(x => x.path === t.dataset.path); if (b) open(b); return; }
+  const en = e.target.closest('[data-ingles]');
+  if (en) { en.disabled = true; fetch(`/leitura/pedidos/${encodeURIComponent(en.dataset.ingles)}/ingles`, { method: 'POST' }).then(pollJobs); return; }
+  const dl = e.target.closest('[data-baixar]');
+  if (dl) { download(dl); return; }
   const mk = e.target.closest('[data-lido]');
   if (mk) { markRead(mk); return; }
   if (e.target.closest('.x') || e.target === $('#card')) $('#card').close();
 });
+async function download(btn) {
+  const s = sugs.find(x => x.key === btn.dataset.baixar);
+  if (!s) return;
+  btn.disabled = true;
+  const r = await fetch('/leitura/baixar', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: s.title, author: s.author, categoria: current }) });
+  if (!r.ok) { btn.disabled = false; btn.title = 'Não consegui pedir'; return; }
+  $('#card').close();
+  pollJobs();
+}
+
 async function markRead(btn) {
   const b = shelf.find(x => x.path === $('#card').dataset.path);
   if (!b) return;

@@ -549,6 +549,13 @@ impl QBittorrent {
         Ok(())
     }
 
+    /// Prioridade dos arquivos (0 = não baixar): de um pacote, só o livro.
+    pub async fn set_file_priority(&self, hash: &str, ids: &[usize], priority: u8) -> Result<()> {
+        let ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        let form = [("hash", hash.to_owned()), ("id", ids.join("|")), ("priority", priority.to_string())];
+        send::<Value>(self.req(Method::POST, "torrents/filePrio").form(&form), "qBittorrent prioridade").await.map(|_| ())
+    }
+
     /// O .torrent de um torrent (qBittorrent 4.5+).
     pub async fn export(&self, hash: &str) -> Result<bytes::Bytes> {
         let res = counted(self.req(Method::GET, &format!("torrents/export?hash={}", hash.to_lowercase()))).send().await.context("qBittorrent: sem resposta")?;

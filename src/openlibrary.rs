@@ -110,6 +110,12 @@ impl OpenLibrary {
         work
     }
 
+    /// A obra de um título qualquer (sem guardar): o título original.
+    pub async fn find(&self, title: &str, author: Option<&str>) -> Option<Work> {
+        let q = format!("{title} {}", author.unwrap_or(""));
+        self.search(&[("q", q.trim()), ("limit", "1")]).await.ok()?.into_iter().next()
+    }
+
     /// As obras mais bem avaliadas de um autor (em memória enquanto o Anubis roda).
     pub async fn works_by(&self, author: &str) -> Vec<Work> {
         if let Some(w) = self.authors.lock().await.get(author) {

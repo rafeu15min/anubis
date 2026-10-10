@@ -1,7 +1,7 @@
 <script setup>
 // Leitura: estante do Drive (com o progresso do Kindle/kosync), "Para você",
 // pedidos de download e a busca (estante + Open Library). API: src/leitura.rs.
-import { ref, computed, watch, onActivated, onDeactivated } from 'vue';
+import { ref, computed, watch, nextTick, onActivated, onDeactivated } from 'vue';
 import Rail from '../components/Rail.vue';
 import Modal from '../components/Modal.vue';
 import { sections } from '../lib/sections.js';
@@ -10,7 +10,9 @@ import { api, pct } from '../lib/util.js';
 
 defineOptions({ name: 'Leitura' });
 const S = sections.leitura;
-const tabLabel = computed(() => S.tabs.find(([s]) => s === S.tab)[1]);
+// as pastas do Drive de cada aba (Livros junta Ficção e Técnicos)
+const FOLDERS = { livros: ['Ficção', 'Técnicos'], artigos: ['Artigos'], 'mangas-hqs': ['Mangás e HQs'] };
+const ALL_FOLDERS = ['Ficção', 'Técnicos', 'Artigos', 'Mangás e HQs'];
 const shelf = computed(() => L.shelves[S.tab]);
 
 // cor da capa desenhada: estável por título (o Drive não dá capa pública)
@@ -27,7 +29,7 @@ const rows = computed(() => [['Para você', 'para_voce'], ['Destaques', 'destaqu
 // ---- pedidos: andamento a cada 3 s enquanto algum trabalha; um livro que
 // chega ao Drive faz a estante relistar
 const LABEL = { procurando: 'procurando', baixando: 'baixando', conferindo: 'conferindo', enviando_ao_drive: 'enviando ao Drive', no_drive: 'no Drive', sem_portugues: 'sem português', sem_fonte: 'sem fonte', falhou: 'falhou' };
-const jobs = computed(() => L.jobs.filter((j) => j.folder === tabLabel.value).slice(0, 8));
+const jobs = computed(() => L.jobs.filter((j) => (FOLDERS[S.tab] || []).includes(j.folder)).slice(0, 8));
 let jobTimer, wasBusy = false, active = false;
 async function pollJobs() {
   clearTimeout(jobTimer);
@@ -50,8 +52,31 @@ let retry;
 async function refresh() {
   clearTimeout(retry);
   await loadShelf(S.tab);
-  if (shelf.value?.preparando && active) retry = setTimeout(refresh, 15000);
+  if ((shelf.value?.preparando || shelf.value?.montando) && active) retry = setTimeout(refresh, 10000);
 }
+
+// ---- temas: a pessoa põe e tira; as fileiras se montam de novo
+const adding = ref(false), newTheme = ref(''), themeInput = ref(null), themeBusy = ref(false);
+async function openAdd() { adding.value = true; await nextTick(); themeInput.value?.focus(); }
+async function addTheme() {
+  const nome = newTheme.value.trim();
+  if (!nome) { adding.value = false; return; }
+  themeBusy.value = true;
+  try {
+    await api(`/leitura/temas/${S.tab}`, { method: 'POST', body: { nome } });
+    newTheme.value = '';
+    adding.value = false;
+    await refresh();
+  } catch (e) { alert(`Não deu: ${e.message}`); } finally { themeBusy.value = false; }
+}
+async function removeTheme(nome) {
+  themeBusy.value = true;
+  try {
+    await api(`/leitura/temas/${S.tab}/${encodeURIComponent(nome)}`, { method: 'DELETE' });
+    await refresh();
+  } catch (e) { alert(`Não deu: ${e.message}`); } finally { themeBusy.value = false; }
+}
+const ORIGEM = { config: 'área de estudo', drive: 'do que está no Drive', gosto: 'do seu gosto (o que assiste e lê)', voce: 'posto por você' };
 watch(() => S.tab, () => { refresh(); });
 onActivated(() => { active = true; refresh(); pollJobs(); });
 onDeactivated(() => { active = false; clearTimeout(jobTimer); clearTimeout(retry); });
@@ -83,17 +108,20 @@ function openSug(s, fromSearch) {
   // já está no Drive: o cartão do livro (se ele é desta aba)
   const b = s.estante && (shelf.value?.estante || []).find((x) => x.path === s.estante);
   if (b) { openBook(b); return; }
-  cat.value = S.tab;
+  // a pasta sugerida (Livros: pelo assunto); a pessoa troca se quiser
+  cat.value = s.pasta || FOLDERS[S.tab][0];
   card.value = { sug: s, fromSearch };
 }
 const working = ref(false);
 
 async function download() {
   const s = card.value.sug;
-  const categoria = card.value.fromSearch ? cat.value : S.tab;
+  const pasta = cat.value;
+  // a aba da pasta escolhida (Ficção e Técnicos são Livros)
+  const categoria = Object.keys(FOLDERS).find((t) => FOLDERS[t].includes(pasta)) || S.tab;
   working.value = true;
   try {
-    await api('/leitura/baixar', { method: 'POST', body: { title: s.title, author: s.author, categoria, pdf: s.pdf || null } });
+    await api('/leitura/baixar', { method: 'POST', body: { title: s.title, author: s.author, categoria, pasta, pdf: s.pdf || null } });
     card.value = null;
     // o pedido aparece na aba da pasta escolhida
     if (categoria !== S.tab || S.query) { S.query = ''; S.tab = categoria; }
@@ -177,9 +205,16 @@ const sugKey = (s) => s.key;
             </button>
           </Rail>
         </template>
-        <p v-if="shelf.areas?.length" class="perfil" title="Áreas de estudo: as da configuração e as que vieram do que está no Drive (Técnicos e Artigos)">
-          <span v-for="a in shelf.areas" :key="a.nome" class="chip" :class="{ auto: a.automatica }">{{ a.nome }}</span>
-        </p>
+        <div class="perfil">
+          <span v-for="a in shelf.temas || []" :key="a.nome" class="chip" :class="a.origem" :title="`${a.nome} — ${ORIGEM[a.origem] || ''}`">
+            {{ a.nome }}<button class="chip-x" type="button" :disabled="themeBusy" :title="`Tirar o tema ${a.nome}`" :aria-label="`Tirar o tema ${a.nome}`" @click="removeTheme(a.nome)"><i class="i i-x"></i></button>
+          </span>
+          <form v-if="adding" class="chip-add" @submit.prevent="addTheme">
+            <input ref="themeInput" v-model="newTheme" type="text" maxlength="60" placeholder="Novo tema" aria-label="Novo tema" @keydown.esc="adding = false" @blur="!newTheme && (adding = false)">
+          </form>
+          <button v-else class="chip-plus" type="button" :disabled="themeBusy" title="Adicionar tema de busca" aria-label="Adicionar tema de busca" @click="openAdd"><i class="i i-plus"></i></button>
+          <span v-if="shelf.montando" class="meta">montando as fileiras de novo…</span>
+        </div>
         <p v-if="shelf.preparando && !rows.length" class="msg">Montando Para você, Destaques, Lançamentos e Populares no Brasil (o primeiro leva alguns minutos)…</p>
         <template v-for="r in rows" :key="r.title">
           <h2>{{ r.title }}</h2>
@@ -227,8 +262,8 @@ const sugKey = (s) => s.key;
         <p v-else-if="card.sug.key.startsWith('oa:')" class="meta">{{ card.sug.pdf ? 'Acesso livre: o PDF vai direto para o Drive.' : 'Sem PDF direto: abra na fonte.' }}</p>
         <p v-else class="meta">{{ card.sug.portuguese ? 'Tem edição em português.' : 'Sem edição em português conhecida (a busca tenta mesmo assim).' }}</p>
         <div class="acts">
-          <select v-if="card.fromSearch" v-model="cat" title="Pasta no Drive" aria-label="Pasta no Drive">
-            <option v-for="[slug, label] in S.tabs" :key="slug" :value="slug">{{ label }}</option>
+          <select v-if="card.fromSearch || S.tab === 'livros'" v-model="cat" title="Pasta no Drive" aria-label="Pasta no Drive">
+            <option v-for="f in (card.fromSearch ? ALL_FOLDERS : FOLDERS[S.tab])" :key="f" :value="f">{{ f }}</option>
           </select>
           <button v-if="!card.sug.estante && (!card.sug.key.startsWith('oa:') || card.sug.pdf)" class="icon" :class="{ busy: working }" :disabled="working" title="Baixar para o Drive (português primeiro)" aria-label="Baixar" @click="download"><i class="i i-download"></i></button>
           <a v-if="card.sug.link" class="icon" :href="card.sug.link" target="_blank" rel="noopener" title="Ver na fonte" aria-label="Ver na fonte"><i class="i i-book"></i></a>
@@ -250,8 +285,14 @@ const sugKey = (s) => s.key;
 .cover small { font-size: 11px; opacity: .8; }
 .cover .ext { position: absolute; right: 8px; bottom: 8px; font-size: 10px; letter-spacing: .08em; opacity: .7; }
 .perfil { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
-.chip { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
-.chip.auto { border-style: dashed; color: var(--muted); border-color: var(--line); }
+.chip { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; padding: 2px 2px 2px 8px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
+.chip.voce { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.chip.drive, .chip.gosto { border-style: dashed; color: var(--muted); border-color: var(--line); }
+.chip-x { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: 50%; background: none; color: inherit; font-size: 10px; opacity: .55; }
+.chip-x:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.chip-plus { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; min-height: 0; padding: 0; border-radius: 50%; border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); font-size: 12px; }
+.chip-add input { width: 170px; min-height: 26px; padding: 2px 10px; border-radius: 99px; border: 1px solid var(--accent); background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
+.chip-add input:focus { outline: none; }
 .pt { display: inline-block; font-size: 10px; padding: 0 5px; margin-right: 4px; border: 1px solid color-mix(in srgb, var(--ok) 50%, transparent); border-radius: 99px; color: var(--ok); }
 .bar-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .bar-prog i { display: block; height: 100%; background: var(--info); }

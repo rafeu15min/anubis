@@ -540,14 +540,14 @@ local function bootstrapKosync()
 end
 
 -- ---------------------------------------------------------------------------
--- Anubis · Leitura: as abas da página do Anubis no Kindle (Ficção, Técnicos,
--- Artigos, Mangás e HQs), com as mesmas fileiras (Para você, Destaques,
+-- Anubis · Leitura: as abas da página do Anubis no Kindle (Livros, Artigos,
+-- Mangás e HQs), com as mesmas fileiras (Para você, Destaques,
 -- Lançamentos, Populares no Brasil) e a estante. Tocar num livro da estante
 -- abre (baixa se for fantasma); nos outros, pede o download para o Drive.
 -- Fala com o Anubis pelo endereço do kosync (o único publicado), com o mesmo
 -- usuário e chave (src/leitura.rs: kindle_router).
 
-local TABS = { { "ficcao", "Ficção" }, { "tecnicos", "Técnicos" }, { "artigos", "Artigos" }, { "mangas-hqs", "Mangás e HQs" } }
+local TABS = { { "livros", "Livros" }, { "artigos", "Artigos" }, { "mangas-hqs", "Mangás e HQs" } }
 local STAGE = { procurando = "procurando", baixando = "baixando", conferindo = "conferindo", enviando_ao_drive = "enviando",
     no_drive = "no Drive", sem_portugues = "sem português", sem_fonte = "sem fonte", falhou = "falhou" }
 
@@ -617,12 +617,12 @@ local function ask(it, slug, folder)
     local author = val(it.author)
     UIManager:show(ConfirmBox:new{
         text = T("Pedir “%1”%2?\n\nVai para %3 no Drive (português primeiro) e aparece aqui quando chegar.", it.title,
-            (author and author ~= "") and (" de " .. author) or "", folder),
+            (author and author ~= "") and (" de " .. author) or "", val(it.pasta) or folder),
         ok_text = "Pedir",
         ok_callback = function()
             NetworkMgr:runWhenOnline(function()
                 local code, job = busy("Pedindo…", function()
-                    return anubis("POST", "baixar", { title = it.title, author = author, categoria = slug, pdf = val(it.pdf) })
+                    return anubis("POST", "baixar", { title = it.title, author = author, categoria = slug, pdf = val(it.pdf), pasta = val(it.pasta) })
                 end)
                 if code == 202 and job then
                     UIManager:show(InfoMessage:new{ text = "Pedido feito: " .. (val(job.detail) or "procurando"), timeout = 4 })

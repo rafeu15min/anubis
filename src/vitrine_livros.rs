@@ -264,14 +264,23 @@ impl Vitrine {
 
     /// Mangás populares de gêneros e tags do AniList.
     pub async fn anilist(&self, genres: &[&str], tags: &[&str]) -> Vec<Item> {
-        let url = format!("anilist:{}|{}", genres.join(","), tags.join(","));
+        self.anilist_query(genres, tags, None).await
+    }
+
+    /// Mangás de uma busca livre no AniList (o tema que a pessoa escreveu).
+    pub async fn anilist_search(&self, term: &str) -> Vec<Item> {
+        self.anilist_query(&[], &[], Some(term)).await
+    }
+
+    async fn anilist_query(&self, genres: &[&str], tags: &[&str], search: Option<&str>) -> Vec<Item> {
+        let url = format!("anilist:{}|{}|{}", genres.join(","), tags.join(","), search.unwrap_or(""));
         if let Some(items) = self.cached(&url).await {
             return items;
         }
-        let query = r#"query ($g: [String], $t: [String]) { Page(perPage: 30) { media(type: MANGA, isAdult: false, sort: POPULARITY_DESC, genre_in: $g, tag_in: $t) {
+        let query = r#"query ($g: [String], $t: [String], $s: String) { Page(perPage: 30) { media(type: MANGA, isAdult: false, sort: POPULARITY_DESC, genre_in: $g, tag_in: $t, search: $s) {
             id title { romaji english } coverImage { large } genres tags { name rank } startDate { year }
             staff(perPage: 2, sort: RELEVANCE) { nodes { name { full } } } } } }"#;
-        let vars = json!({ "g": if genres.is_empty() { Value::Null } else { json!(genres) }, "t": if tags.is_empty() { Value::Null } else { json!(tags) } });
+        let vars = json!({ "g": if genres.is_empty() { Value::Null } else { json!(genres) }, "t": if tags.is_empty() { Value::Null } else { json!(tags) }, "s": search });
         let res = async {
             let v: Value = self.http.post("https://graphql.anilist.co").json(&json!({ "query": query, "variables": vars })).send().await?.error_for_status()?.json().await?;
             anyhow::Ok(v)

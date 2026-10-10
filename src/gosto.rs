@@ -121,6 +121,10 @@ pub fn keyword(raw: &str) -> Option<String> {
         .map(singular)
         .filter(|w| !NOISE_WORDS.contains(&w.as_str()))
         .collect();
+    // nome de série ("Sprawl trilogy", "Discworld series"): não é tema
+    if words.iter().any(|w| matches!(w.as_str(), "trilogy" | "serie" | "series" | "saga" | "cycle" | "sequence")) {
+        return None;
+    }
     let ok = !words.is_empty() && words.len() <= 3 && !words.iter().any(|w| w.chars().any(|c| c.is_ascii_digit())) && words.iter().map(|w| w.len()).sum::<usize>() >= 4;
     ok.then(|| words.join(" "))
 }

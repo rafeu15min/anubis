@@ -33,6 +33,22 @@ const PER_AREA: usize = 5;
 /// títulos novos procurados por montagem (o tema fica guardado para sempre)
 const NEW_TITLES: usize = 15;
 
+/// De onde veio um tema.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origem {
+    /// as áreas de estudo da configuração
+    #[default]
+    Config,
+    /// o tema do que está no Drive (OpenAlex)
+    Drive,
+    /// o gosto do que se assiste e lê
+    Gosto,
+    /// posto pela pessoa (src/temas.rs)
+    Voce,
+}
+
+/// Um tema de busca (área de estudo, tema do Drive, do gosto ou da pessoa).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Area {
     pub nome: String,
@@ -41,10 +57,29 @@ pub struct Area {
     filter: String,
     /// os termos no vocabulário comum (para casar com os assuntos dos livros)
     #[serde(skip)]
-    keywords: Vec<String>,
+    pub(crate) keywords: Vec<String>,
+    /// os termos como foram escritos (para buscar livros e mangás)
+    #[serde(skip)]
+    pub(crate) termos: Vec<String>,
     pub peso: f64,
-    /// veio do Drive (não da configuração)
-    pub automatica: bool,
+    pub origem: Origem,
+    /// tema que é um gênero (unificado do TMDB): mangás buscam pelo gênero
+    #[serde(skip)]
+    pub(crate) genre: Option<i64>,
+}
+
+impl Area {
+    pub fn new(nome: String, termos: Vec<String>, peso: f64, origem: Origem) -> Self {
+        Area {
+            filter: format!("title_and_abstract.search:{}", phrases(&termos)),
+            keywords: termos.iter().filter_map(|t| keyword(t)).collect(),
+            nome,
+            termos,
+            peso,
+            origem,
+            genre: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,23 +165,13 @@ impl Estudo {
     /// As áreas, da mais forte para a mais fraca. `books`: (caminho, título,
     /// peso) dos livros de Técnicos e Artigos do Drive.
     pub async fn profile(&self, books: &[(String, String, f64)]) -> Vec<Area> {
-        let mut areas: Vec<Area> = self
-            .areas
-            .iter()
-            .map(|a| Area {
-                nome: a.nome.clone(),
-                filter: format!("title_and_abstract.search:{}", phrases(&a.termos)),
-                keywords: a.termos.iter().filter_map(|t| keyword(t)).collect(),
-                peso: 1.0,
-                automatica: false,
-            })
-            .collect();
+        let mut areas: Vec<Area> = self.areas.iter().map(|a| Area::new(a.nome.clone(), a.termos.clone(), 1.0, Origem::Config)).collect();
         let mut by_topic: HashMap<String, (Topic, f64)> = HashMap::new();
         let mut budget = NEW_TITLES;
         for (path, title, w) in books {
             let t = fold(title);
             // área configurada que casa com o título do que se tem pesa mais
-            for a in areas.iter_mut().filter(|a| !a.automatica) {
+            for a in areas.iter_mut().filter(|a| a.origem == Origem::Config) {
                 let cfg = self.areas.iter().find(|c| c.nome == a.nome);
                 if cfg.is_some_and(|c| c.termos.iter().any(|x| t.contains(&fold(x)))) {
                     a.peso += w;
@@ -160,10 +185,12 @@ impl Estudo {
             if w >= 2.0 {
                 areas.push(Area {
                     keywords: keyword(&topic.nome).into_iter().collect(),
+                    termos: vec![topic.nome.clone()],
                     nome: topic.nome,
                     filter: format!("primary_topic.id:{id}"),
                     peso: w,
-                    automatica: true,
+                    origem: Origem::Drive,
+                    genre: None,
                 });
             }
         }
@@ -204,6 +231,7 @@ impl Estudo {
                 link: landing.map(str::to_string),
                 estante: None,
                 pdf: w["best_oa_location"]["pdf_url"].as_str().map(str::to_string),
+                pasta: Some("Artigos".into()),
             })
         }).collect())
     }
@@ -232,7 +260,7 @@ impl Estudo {
             lanc.push(self.works(a, &format!(",from_publication_date:{},to_publication_date:{today}", ago(90)), "publication_date:desc", 4).await?);
             pop.push(self.works(a, &format!(",authorships.institutions.country_code:BR,from_publication_date:{}", ago(3 * 365)), "cited_by_count:desc", 4).await?);
         }
-        Ok(crate::leitura_recs::Rows { areas: vec![], para_voce: mix(pv), destaques: mix(dest), lancamentos: mix(lanc), populares: mix(pop) })
+        Ok(crate::leitura_recs::Rows { temas: vec![], para_voce: mix(pv), destaques: mix(dest), lancamentos: mix(lanc), populares: mix(pop) })
     }
 }
 

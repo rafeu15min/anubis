@@ -42,6 +42,7 @@ mod season;
 mod services;
 mod stream;
 mod subs;
+mod temas;
 mod uninstall;
 mod vitrine_livros;
 

@@ -12,7 +12,9 @@ Regras:
 - livro em andamento fica preso ao arquivo que está sendo lido (nem a regra
   acima nem o controle de espaço mexem nele);
 - espaço: acima de 85% de uso, os livros lidos há mais tempo voltam a
-  fantasma até 75%, fora os abertos há menos de 7 dias.
+  fantasma até 75%, fora os abertos há menos de 7 dias;
+- "lido" marcado no site do Anubis vale mais que o Kindle: na sincronia, o
+  livro vira terminado (ou deixa de ser) no KOReader.
 
 O rclone (só leitura no Drive) fica em /mnt/us/extensions/drivesync.
 --]]
@@ -27,6 +29,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
+local md5 = require("ffi/sha2").md5
 local rapidjson = require("rapidjson")
 local util = require("util")
 local T = ffiutil.template
@@ -352,6 +355,53 @@ local function apply(remote)
     return stats
 end
 
+-- Marcas de "lido" do site (no /kosync do Anubis, com a mesma conta).
+local function fetchMarks()
+    local s = G_reader_settings:readSetting("kosync")
+    if not (s and s.custom_server and s.username and s.userkey) then return {} end
+    local http = require("socket.http")
+    local ltn12 = require("ltn12")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+    local sink = {}
+    socketutil:set_timeout(10, 30)
+    local code = socket.skip(1, http.request{
+        url = s.custom_server .. "/marks",
+        method = "GET",
+        headers = { ["x-auth-user"] = s.username, ["x-auth-key"] = s.userkey, ["accept"] = "application/json" },
+        sink = ltn12.sink.table(sink),
+    })
+    socketutil:reset_timeout()
+    if code ~= 200 then
+        logger.warn("drivesync: marcas do site", code)
+        return {}
+    end
+    local ok, marks = pcall(rapidjson.decode, table.concat(sink))
+    return ok and type(marks) == "table" and marks or {}
+end
+
+-- O livro no kosync é o md5 do nome do arquivo; cada marca é aplicada uma vez.
+local function applyMarks(marks)
+    local ReaderUI = package.loaded["apps/reader/readerui"]
+    local open = ReaderUI and ReaderUI.instance and ReaderUI.instance.document and ReaderUI.instance.document.file
+    local n = 0
+    for rel, e in pairs(loadIndex().files) do
+        local m = marks[md5(rel:match("([^/]+)$"))]
+        local path = LIB .. "/" .. rel
+        if m and (e.mark_at or 0) < m.at and path ~= open then -- o aberto fica para depois
+            local ds = DocSettings:open(path)
+            local summary = ds:readSetting("summary") or {}
+            summary.status = m.lido and "complete" or nil
+            ds:saveSetting("summary", summary)
+            ds:flush()
+            e.mark_at = m.at
+            n = n + 1
+        end
+    end
+    if n > 0 then saveIndex() end
+    return n
+end
+
 local function sync(manual)
     if state.syncing then return end
     if not manual and os.time() - state.last < MIN_INTERVAL then return end
@@ -373,12 +423,14 @@ local function sync(manual)
             return
         end
         local stats = apply(remote)
+        local marked = applyMarks(fetchMarks())
         local freed = freeSpace()
         refreshFileManager()
         local parts = {}
         if stats.new > 0 then table.insert(parts, stats.new .. " novos") end
         if stats.removed > 0 then table.insert(parts, stats.removed .. " removidos") end
         if stats.moved > 0 then table.insert(parts, stats.moved .. " reorganizados") end
+        if marked > 0 then table.insert(parts, marked .. " marcados no site") end
         if freed > 0 then table.insert(parts, freed .. " devolvidos à nuvem (espaço)") end
         if #parts > 0 or manual then
             UIManager:show(InfoMessage:new{

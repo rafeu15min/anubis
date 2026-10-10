@@ -34,6 +34,10 @@ ICONES = {
     'fa-download': 0xF019,
     'fa-bell': 0xF0F3,
     'fa-microphone': 0xF130,
+    # página de leitura e o caminho de volta para os vídeos
+    'fa-book': 0xF02D,
+    'fa-film': 0xF008,
+    'fa-cloud': 0xF0C2,
     # fatia do círculo = quanto já foi assistido (1/8 a 8/8)
     **{f'md-circle_slice_{n}': 0xF0A9E + n - 1 for n in range(1, 9)},
 }

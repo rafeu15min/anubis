@@ -28,6 +28,8 @@ pub struct Config {
     pub bitmagnet: Option<BitmagnetCfg>,
     /// progresso de leitura único do KOReader (Kindle, celular, página de leitura)
     pub kosync: Option<KosyncCfg>,
+    /// página de leitura (/leitura)
+    pub leitura: Option<LeituraCfg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +37,14 @@ pub struct Config {
 pub struct ProwlarrCfg {
     pub url: String,
     pub api_key: String,
+}
+
+/// Página de leitura (ver src/leitura.rs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeituraCfg {
+    /// a pasta dos livros no rclone do host ("gdrive:Livros")
+    pub drive: String,
 }
 
 /// Servidor do "Progress sync" do KOReader (ver src/kosync.rs).

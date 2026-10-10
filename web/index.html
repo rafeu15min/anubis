@@ -14,12 +14,12 @@
   }
   * { box-sizing: border-box; }
   /* ícones: Nerd Font reduzida aos usados (web/icones.py) */
-  @font-face { font-family: 'Anubis Icones'; src: url('icones.woff2?v=3') format('woff2'); font-display: block; }
+  @font-face { font-family: 'Anubis Icones'; src: url('icones.woff2?v=4') format('woff2'); font-display: block; }
   .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
   .i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
   .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
   .i-up::before { content: "\f164"; } .i-down::before { content: "\f165"; } .i-trash::before { content: "\f1f8"; }
-  .i-download::before { content: "\f019"; } .i-bell::before { content: "\f0f3"; } .i-microphone::before { content: "\f130"; }
+  .i-download::before { content: "\f019"; } .i-book::before { content: "\f02d"; } .i-bell::before { content: "\f0f3"; } .i-microphone::before { content: "\f130"; }
   .i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
   .i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
@@ -143,6 +143,7 @@
       <button data-cat="filmes">Filmes</button><button data-cat="series">Séries</button><button data-cat="animes">Animes</button>
     </nav>
     <input id="q" type="search" placeholder="Buscar filme ou série…" autocomplete="off">
+    <a class="gear" href="leitura" title="Leitura: livros, HQs, RPG" aria-label="Leitura"><i class="i i-book"></i></a>
     <a class="gear" href="preferencias" title="Preferências" aria-label="Preferências"><i class="i i-gear"></i></a>
   </div>
 </header>

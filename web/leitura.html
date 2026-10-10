@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anubis · Leitura</title>
+<style>
+  * { scrollbar-width: none; }
+  *::-webkit-scrollbar { display: none; }
+  :root {
+    --bg: #111016; --panel: #1b1a22; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8;
+    --accent: #c9a24a; --ok: #5fbf7f; --info: #6fa8ff;
+  }
+  * { box-sizing: border-box; }
+  @font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=4') format('woff2'); font-display: block; }
+  .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
+  .i-film::before { content: "\f008"; } .i-x::before { content: "\f00d"; } .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
+  .i-book::before { content: "\f02d"; } .i-cloud::before { content: "\f0c2"; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; padding: 16px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+  .bar { display: flex; gap: 12px; align-items: center; max-width: 1100px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
+  .swap { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); font-size: 20px; text-decoration: none; margin-left: auto; }
+  .swap:hover { color: var(--accent); background: var(--panel); }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tabs button { min-height: 40px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+  @media (max-width: 700px) { .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; } .tabs button { flex: 1; } }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 24px 0 12px; }
+  .msg { color: var(--muted); padding: 24px 0; }
+  .err { color: #ff8a8a; }
+  [hidden] { display: none !important; }
+  .railbox { position: relative; }
+  .railbox .nav { display: none; position: absolute; top: calc(clamp(112px, 30vw, 150px) * .75 - 22px); z-index: 1; width: 44px; height: 44px; justify-content: center; align-items: center; border-radius: 50%; border: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--text); font-size: 18px; cursor: pointer; }
+  .railbox .nav[data-scroll="-1"] { left: 4px; } .railbox .nav[data-scroll="1"] { right: 4px; }
+  @media (hover: hover) and (pointer: fine) { .railbox:hover .nav { display: inline-flex; } }
+  .rail { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(112px, 30vw, 150px); gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 8px; }
+  .tile { display: flex; flex-direction: column; gap: 4px; padding: 0; border: 0; background: none; color: inherit; text-align: left; font: inherit; cursor: pointer; scroll-snap-align: start; }
+  /* capa desenhada: o Drive não dá capa pública */
+  .cover { position: relative; width: 100%; aspect-ratio: 2/3; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; background: var(--c, #2a2733); }
+  .cover b { font-size: 14px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+  .cover small { font-size: 11px; opacity: .8; }
+  .cover .ext { position: absolute; right: 8px; bottom: 8px; font-size: 10px; letter-spacing: .08em; opacity: .7; }
+  .tile:hover .cover { outline: 2px solid var(--accent); }
+  .bar-prog { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar-prog i { display: block; height: 100%; background: var(--info); }
+  .tile .t { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tile .m { font-size: 12px; color: var(--muted); }
+  dialog { max-width: min(560px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 18px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 4px; } dialog p { margin: 6px 0; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .acts { display: flex; gap: 6px; margin-top: 12px; }
+  .icon { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 8px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 17px; text-decoration: none; cursor: pointer; }
+  .icon:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  .icon.on { background: var(--accent); color: #111; }
+  .i-check::before { content: "\f00c"; }
+  .tile .m .ok { color: var(--ok); }
+  .x { float: right; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>LEITURA</h1>
+    <nav class="tabs" id="tabs"></nav>
+    <a class="swap" href="/" title="Filmes, séries e animes" aria-label="Vídeos"><i class="i i-film"></i></a>
+  </div>
+</header>
+<main id="main"><p class="msg">Carregando…</p></main>
+<dialog id="card"></dialog>
+<script>
+const TABS = [['ficcao', 'Ficção'], ['tecnicos', 'Técnicos'], ['artigos', 'Artigos'], ['mangas-hqs', 'Mangás e HQs'], ['rpg', 'RPG']];
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let current;
+try { current = localStorage.getItem('leitura.aba'); } catch {}
+if (!TABS.some(([s]) => s === current)) current = TABS[0][0];
+
+// cor da capa: estável por título
+function hue(s) { let h = 0; for (const c of s) h = (h * 31 + c.codePointAt(0)) % 360; return h; }
+function pct(p) { return Math.round(p * 100); }
+
+function tile(b) {
+  const p = b.progress;
+  const prog = p != null && !b.lido ? `<div class="bar-prog"><i style="width:${pct(p)}%"></i></div>` : '';
+  const m = b.lido ? '<span class="ok"><i class="i i-check"></i> lido</span>' : p == null ? esc(b.author || '') : `${pct(p)}%`;
+  return `<button class="tile" data-path="${esc(b.path)}">
+    <div class="cover" style="--c: hsl(${hue(b.title)} 28% 24%)"><b>${esc(b.title)}</b><small>${esc(b.author || '')}</small><span class="ext">${esc(b.ext.toUpperCase())}</span></div>
+    ${prog}<span class="t">${esc(b.title)}</span><span class="m">${m}</span></button>`;
+}
+
+function rail(title, books) {
+  if (!books.length) return '';
+  return `<h2>${title}</h2><div class="railbox"><button class="nav" data-scroll="-1" aria-label="Voltar"><i class="i i-left"></i></button>
+    <div class="rail">${books.map(tile).join('')}</div><button class="nav" data-scroll="1" aria-label="Avançar"><i class="i i-right"></i></button></div>`;
+}
+
+let shelf = [];
+async function load() {
+  $('#tabs').innerHTML = TABS.map(([s, l]) => `<button data-tab="${s}" class="${s === current ? 'on' : ''}">${l}</button>`).join('');
+  $('#main').innerHTML = '<p class="msg">Carregando…</p>';
+  try {
+    const r = await fetch(`/leitura/${current}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    shelf = j.estante;
+    const reading = shelf.filter(b => b.progress != null && !b.lido);
+    const rest = shelf.filter(b => !reading.includes(b));
+    $('#main').innerHTML = (rail('Lendo agora', reading) + rail('Na estante', rest)) || '<p class="msg">Nada aqui ainda.</p>';
+  } catch (e) {
+    $('#main').innerHTML = `<p class="msg err">Não consegui ler o Drive: ${esc(e.message)}</p>`;
+  }
+}
+
+function open(b) {
+  const p = b.progress;
+  const where = b.lido ? 'Lido.' : p == null ? 'Ainda não aberto no Kindle.' : `Em ${pct(p)}% (sincronizado pelo KOReader).`;
+  $('#card').innerHTML = `<button class="x" aria-label="Fechar"><i class="i i-x"></i></button>
+    <h3>${esc(b.title)}</h3><p class="meta">${esc(b.author || 'autor desconhecido')} · ${esc(b.ext.toUpperCase())} · ${(b.size / 1048576).toFixed(1)} MB</p>
+    <p>${where}</p><p class="meta">${esc(b.path)}</p>
+    <div class="acts">
+      <a class="icon" href="https://drive.google.com/file/d/${encodeURIComponent(b.drive_id)}/view" target="_blank" rel="noopener" title="Abrir no Drive" aria-label="Abrir no Drive"><i class="i i-cloud"></i></a>
+      <button class="icon${b.lido ? ' on' : ''}" data-lido="${b.lido ? 0 : 1}" title="${b.lido ? 'Lido (toque para desmarcar; vale no Kindle também)' : 'Marcar como lido (vale no Kindle também)'}" aria-label="${b.lido ? 'Desmarcar lido' : 'Marcar como lido'}" aria-pressed="${b.lido}"><i class="i i-check"></i></button>
+    </div>`;
+  $('#card').dataset.path = b.path;
+  $('#card').showModal();
+}
+
+document.addEventListener('click', e => {
+  const tab = e.target.closest('[data-tab]');
+  if (tab) { current = tab.dataset.tab; try { localStorage.setItem('leitura.aba', current); } catch {} load(); return; }
+  const nav = e.target.closest('.nav');
+  if (nav) { const r = nav.parentElement.querySelector('.rail'); r.scrollBy({ left: nav.dataset.scroll * r.clientWidth * .8, behavior: 'smooth' }); return; }
+  const t = e.target.closest('.tile');
+  if (t) { const b = shelf.find(x => x.path === t.dataset.path); if (b) open(b); return; }
+  const mk = e.target.closest('[data-lido]');
+  if (mk) { markRead(mk); return; }
+  if (e.target.closest('.x') || e.target === $('#card')) $('#card').close();
+});
+async function markRead(btn) {
+  const b = shelf.find(x => x.path === $('#card').dataset.path);
+  if (!b) return;
+  btn.disabled = true;
+  const lido = btn.dataset.lido === '1';
+  const r = await fetch(`/leitura/lido/${b.doc}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lido }) });
+  if (!r.ok) { btn.disabled = false; btn.title = 'Não consegui marcar'; return; }
+  $('#card').close();
+  load();
+}
+
+load();
+</script>
+</body>
+</html>

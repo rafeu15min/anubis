@@ -49,6 +49,7 @@
 //! POST /hooks/torrent-finished  — gatilho do qBittorrent ao concluir um download
 //! POST /hooks/arr?token=T       — webhook do Radarr/Sonarr: a central refaz as listas
 //! /kosync/…                     — progresso de leitura do KOReader (src/kosync.rs)
+//! /leitura/…                    — página de leitura, separada da de vídeo (src/leitura.rs)
 //!
 //! `/storage/run` e o gancho exigem `Authorization: Bearer <token>` quando há
 //! token na config. A busca e os pedidos ficam abertos na rede local: pedir um
@@ -79,10 +80,13 @@ pub struct AppState {
     pub wake: Arc<Notify>,
     /// progresso de leitura do KOReader (com `[kosync]` na config)
     pub kosync: Option<Arc<crate::kosync::Kosync>>,
+    /// página de leitura (com `[leitura]` na config)
+    pub leitura: Option<Arc<crate::leitura::Leitura>>,
 }
 
 pub fn router(state: AppState) -> Router {
     let kosync = state.kosync.clone();
+    let leitura = state.leitura.clone();
     let app = Router::new()
         .route("/", get(|| async { page(include_str!("../web/index.html")) }))
         .route("/search", get(search))
@@ -142,8 +146,12 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(state.clone(), activity))
         .with_state(state);
     // fora do middleware acima: o Kindle sincronizando não é alguém no site
-    match kosync {
+    let app = match kosync {
         Some(k) => app.nest_service("/kosync", k.router()),
+        None => app,
+    };
+    match leitura {
+        Some(l) => app.nest_service("/leitura", l.router()),
         None => app,
     }
 }

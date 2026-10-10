@@ -16,6 +16,7 @@ mod avail;
 mod bitmagnet;
 mod config;
 mod discover;
+mod drive;
 mod disk;
 mod episode_avail;
 mod dubsync;
@@ -23,6 +24,7 @@ mod external;
 mod foryou;
 mod indexers;
 mod kosync;
+mod leitura;
 mod orchestrator;
 mod live;
 mod mux;
@@ -150,7 +152,10 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
         Some(k) => Some(Arc::new(kosync::Kosync::load(k, orch.cfg.state_dir())?)),
         None => None,
     };
-    let app = api::router(api::AppState { orch, wake, kosync });
+    let leitura = orch.cfg.leitura.as_ref().map(|l| {
+        Arc::new(leitura::Leitura { drive: drive::Drive::new(l.drive.clone()), kosync: kosync.clone() })
+    });
+    let app = api::router(api::AppState { orch, wake, kosync, leitura });
     let mut servers = tokio::task::JoinSet::new();
     for (_, l) in listeners {
         servers.spawn(axum::serve(l, app.clone()).into_future());

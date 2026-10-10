@@ -13,6 +13,8 @@
 //! GET  /users/auth              — confere x-auth-user / x-auth-key
 //! PUT  /syncs/progress          — {document, progress, percentage, device, device_id}
 //! GET  /syncs/progress/{document}
+//! GET  /marks                   — livros marcados como lidos (ou não) no site;
+//!                                 a marca vale mais que o progresso do Kindle
 
 use crate::config::KosyncCfg;
 use anyhow::{Context, Result};
@@ -42,11 +44,29 @@ pub struct Progress {
     pub timestamp: i64,
 }
 
+/// Marcado no site: lido (ou "não lido", para desfazer no Kindle).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    pub lido: bool,
+    /// segundos desde 1970: o Kindle aplica a marca uma vez
+    pub at: i64,
+}
+
 pub struct Kosync {
     user: String,
     key: String,
     path: PathBuf,
     map: Mutex<HashMap<String, Progress>>,
+    marks_path: PathBuf,
+    marks: Mutex<HashMap<String, Mark>>,
+}
+
+async fn save<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
+    // grava inteiro e troca de uma vez: um desligamento no meio não corrompe
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec(value)?).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
 }
 
 impl Kosync {
@@ -57,7 +77,9 @@ impl Kosync {
             .to_lowercase();
         let path = state_dir.join("progresso.json");
         let map = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Ok(Self { user: cfg.user.clone(), key, path, map: Mutex::new(map) })
+        let marks_path = state_dir.join("lidos.json");
+        let marks = std::fs::read(&marks_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        Ok(Self { user: cfg.user.clone(), key, path, map: Mutex::new(map), marks_path, marks: Mutex::new(marks) })
     }
 
     /// Onde o livro parou (documento = md5 do nome do arquivo).
@@ -70,11 +92,22 @@ impl Kosync {
         let ts = p.timestamp;
         let mut map = self.map.lock().await;
         map.insert(p.document.clone(), p);
-        // grava inteiro e troca de uma vez: um desligamento no meio não corrompe
-        let tmp = self.path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, serde_json::to_vec(&*map)?).await?;
-        tokio::fs::rename(&tmp, &self.path).await?;
+        save(&self.path, &*map).await?;
         Ok(ts)
+    }
+
+    /// A marca do site para o livro, se houver.
+    pub async fn mark(&self, document: &str) -> Option<Mark> {
+        self.marks.lock().await.get(document).copied()
+    }
+
+    /// Marca no site como lido ou não lido (vale mais que o Kindle).
+    pub async fn set_mark(&self, document: &str, lido: bool) -> Result<Mark> {
+        let m = Mark { lido, at: chrono::Utc::now().timestamp() };
+        let mut marks = self.marks.lock().await;
+        marks.insert(document.to_string(), m);
+        save(&self.marks_path, &*marks).await?;
+        Ok(m)
     }
 
     fn authorized(&self, h: &HeaderMap) -> bool {
@@ -91,6 +124,7 @@ impl Kosync {
             .route("/users/auth", get(auth))
             .route("/syncs/progress", put(update))
             .route("/syncs/progress/{document}", get(fetch))
+            .route("/marks", get(marks))
             .with_state(self)
     }
 }
@@ -126,6 +160,13 @@ async fn fetch(State(k): State<Arc<Kosync>>, h: HeaderMap, Path(document): Path<
         Some(p) => Json(p).into_response(),
         None => Json(json!({})).into_response(),
     }
+}
+
+async fn marks(State(k): State<Arc<Kosync>>, h: HeaderMap) -> Response {
+    if !k.authorized(&h) {
+        return unauthorized();
+    }
+    Json(k.marks.lock().await.clone()).into_response()
 }
 
 #[cfg(test)]
@@ -173,5 +214,16 @@ mod tests {
         let again = kosync(&dir);
         assert_eq!(again.get("abc").await, Some(Progress { timestamp: ts, ..p }));
         assert_eq!(again.get("outro").await, None);
+    }
+
+    #[tokio::test]
+    async fn marca_do_site_sobrevive_a_reinicio() {
+        let dir = std::env::temp_dir().join(format!("kosync-mark-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let k = kosync(&dir);
+        let m = k.set_mark("abc", true).await.unwrap();
+        assert!(m.lido && m.at > 0);
+        assert_eq!(kosync(&dir).mark("abc").await, Some(m));
+        assert_eq!(kosync(&dir).mark("outro").await, None);
     }
 }

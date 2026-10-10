@@ -11,6 +11,11 @@
 //!   (status, nota, favoritos) e liga cada anime ao TMDB pela lista pública
 //!   github.com/Fribb/anime-lists (AniList → TVDB/TMDB).
 //!
+//! Os episódios vistos lá (Netflix: "Série: Temporada 1: Nome"; Crunchyroll:
+//! temporada, número e nome) são casados com os do TMDB pelo nome (em
+//! português ou inglês) ou pelo número, e a janela da série mostra
+//! "assistido (Netflix)" (search.rs: `episodes`).
+//!
 //! Tudo fica em `state_dir/externo.json`; a lista de ids, em
 //! `state_dir/anime-list-full.json` (renovada a cada 7 dias).
 
@@ -75,6 +80,56 @@ struct State {
     /// "gostei": sementes do "Para você" com peso de favorito
     #[serde(default)]
     liked: Vec<Hidden>,
+    /// episódios vistos fora: fonte ("netflix"/"crunchyroll") → série no
+    /// TMDB → episódios
+    #[serde(default)]
+    watched: HashMap<String, HashMap<i64, Vec<WatchedEp>>>,
+}
+
+/// Um episódio visto fora, como veio da fonte.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RawEp {
+    season: Option<i64>,
+    number: Option<i64>,
+    title: Option<String>,
+    /// outro nome possível (Netflix: tudo depois da temporada, "Capítulo
+    /// oito: Papai", quando `title` é só "Papai")
+    alt: Option<String>,
+    /// visto até o fim (a Netflix não diz: conta como visto)
+    full: bool,
+    /// parado no meio: quanto (Crunchyroll)
+    percent: Option<u8>,
+}
+
+/// Um episódio visto fora, já com o número do TMDB e os nomes (para casar
+/// com o Sonarr, que pode numerar diferente).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedEp {
+    pub season: i64,
+    pub number: i64,
+    /// os nomes no TMDB (português e inglês), comparáveis (`ep_norm`)
+    #[serde(default)]
+    pub names: Vec<String>,
+    pub full: bool,
+    #[serde(default)]
+    pub percent: Option<u8>,
+}
+
+/// Nome de episódio comparável: só letras e números, minúsculas, sem acento.
+pub fn ep_norm(s: &str) -> String {
+    crate::gosto::fold(s).chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// Mesmo nome, ou um contém o outro sendo quase do mesmo tamanho ("Episódio
+/// 2" não casa com "Episódio 29").
+fn same_name(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if a == b {
+        return short.len() >= 3;
+    }
+    // o que sobra do mais longo: só número é outro episódio ("2" e "29")
+    let rest = long.replacen(short, "", 1);
+    short.len() >= 8 && short.len() * 10 >= long.len() * 7 && long.contains(short) && !rest.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Um "gostei" na página: marcado no Anubis, favorito no Jellyfin, ou os dois.
@@ -155,6 +210,21 @@ pub enum Source {
     Crunchyroll,
 }
 
+impl Source {
+    pub fn key(self) -> &'static str {
+        match self {
+            Source::Netflix => "netflix",
+            Source::Crunchyroll => "crunchyroll",
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Netflix => "Netflix",
+            Source::Crunchyroll => "Crunchyroll",
+        }
+    }
+}
+
 /// Como procurar um título no TMDB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Want {
@@ -174,6 +244,8 @@ struct Wanted {
     want: Want,
     count: u32,
     last: Option<NaiveDate>,
+    /// os episódios vistos (séries)
+    eps: Vec<RawEp>,
 }
 
 /// Andamento da importação em segundo plano (a página acompanha).
@@ -279,8 +351,59 @@ fn title_key(t: &str) -> (String, bool) {
     (t.to_owned(), false)
 }
 
+/// Número arábico ou romano ("3", "III").
+fn number_word(w: &str) -> Option<i64> {
+    w.parse().ok().or_else(|| {
+        let r = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"];
+        r.iter().position(|x| *x == w.to_lowercase()).map(|i| i as i64 + 1)
+    })
+}
+
+/// "Temporada 2", "Season 2", "Livro 3", "Book III", "Parte 1": a temporada.
+fn season_part(p: &str) -> Option<i64> {
+    let lower = p.trim().to_lowercase();
+    let mut w = lower.split_whitespace();
+    let (mark, n) = (w.next()?, w.next()?);
+    ["temporada", "season", "livro", "book", "parte", "part", "volume"].contains(&mark).then_some(())?;
+    number_word(n.trim_end_matches(':'))
+}
+
+/// "Episódio 14", "Capítulo 02", "Episode 119": o número.
+fn number_part(p: &str) -> Option<i64> {
+    let lower = crate::gosto::fold(p);
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    words.windows(2).find_map(|w| ["episodio", "episode", "capitulo", "chapter", "ep", "ep."].contains(&w[0]).then(|| w[1].trim_matches(|c: char| !c.is_ascii_digit()).parse().ok()).flatten())
+}
+
+/// O episódio de uma linha da Netflix: "Série: Temporada 2: Nome", "Série:
+/// The Fighting!: Temporada 1: Episódio 29", "Série: Livro 3: Arco: Nome",
+/// "Série: Alabasta: Episódio 119", "Série: Temporada 2: Capítulo 02: Nome".
+fn netflix_episode(title: &str, key: &str) -> Option<RawEp> {
+    let rest = title.strip_prefix(key)?.strip_prefix(": ")?;
+    let parts: Vec<&str> = rest.split(": ").map(str::trim).filter(|p| !p.is_empty()).collect();
+    // "Stranger Things 4": a temporada escrita com o nome da série
+    let named_season = |p: &str| p.strip_prefix(key).and_then(|n| n.trim().parse::<i64>().ok());
+    let season_at = parts.iter().position(|p| season_part(p).is_some() || named_season(p).is_some());
+    let season = season_at.and_then(|i| season_part(parts[i]).or_else(|| named_season(parts[i])));
+    let number = parts.iter().find_map(|p| number_part(p));
+    // o nome: a última parte que não é temporada nem só o número
+    let name = parts.iter().rev().find(|p| season_part(p).is_none() && named_season(p).is_none() && !(number_part(p).is_some() && p.split_whitespace().count() <= 2)).copied();
+    // nome genérico ("Episódio 29"): só o número vale
+    (name.is_some() || number.is_some()).then_some(())?;
+    // tudo depois da temporada, quando são várias partes
+    let after: Vec<&str> = parts[season_at.map_or(0, |i| i + 1)..].to_vec();
+    let alt = (after.len() >= 2).then(|| after.join(": "));
+    Some(RawEp { season, number, title: name.map(str::to_owned), alt, full: true, percent: None })
+}
+
 /// Títulos únicos: (chave, é série, vezes, data mais recente).
+#[cfg(test)]
 fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>)> {
+    group_eps(rows).into_iter().map(|(k, s, n, d, _)| (k, s, n, d)).collect()
+}
+
+/// Como `group`, com os episódios vistos de cada série.
+fn group_eps(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>, Vec<RawEp>)> {
     let dmy = day_first(rows);
     // "Fullmetal Alchemist: Os motivos dela": a Netflix nem sempre marca o
     // episódio; o mesmo prefixo em dois títulos diferentes é série
@@ -290,7 +413,7 @@ fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>
             prefixes.entry(p).or_default().insert(t);
         }
     }
-    let mut m: HashMap<String, (bool, u32, Option<NaiveDate>)> = HashMap::new();
+    let mut m: HashMap<String, (bool, u32, Option<NaiveDate>, Vec<RawEp>)> = HashMap::new();
     for (t, d) in rows {
         let (key, series) = match t.split_once(": ") {
             Some((p, _)) if prefixes[p].len() >= 2 => (p.to_owned(), true),
@@ -300,12 +423,18 @@ fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>
         if key.trim().chars().filter(|c| c.is_alphanumeric()).count() < 2 {
             continue;
         }
-        let e = m.entry(key.trim().to_owned()).or_insert((series, 0, None));
+        let ep = if series { netflix_episode(t, &key) } else { None };
+        let e = m.entry(key.trim().to_owned()).or_insert((series, 0, None, vec![]));
         e.0 |= series;
         e.1 += 1;
         e.2 = e.2.max(parse_date(d, dmy));
+        if let Some(ep) = ep
+            && !e.3.contains(&ep)
+        {
+            e.3.push(ep);
+        }
     }
-    let mut out: Vec<_> = m.into_iter().map(|(k, (s, n, d))| (k, s, n, d)).collect();
+    let mut out: Vec<_> = m.into_iter().map(|(k, (s, n, d, eps))| (k, s, n, d, eps)).collect();
     out.sort_by(|a, b| b.3.cmp(&a.3));
     out
 }
@@ -420,15 +549,16 @@ impl Orchestrator {
         if rows.is_empty() {
             bail!("arquivo vazio ou fora do formato (esperado: \"Title\",\"Date\")");
         }
-        let wanted = group(&rows)
+        let wanted = group_eps(&rows)
             .into_iter()
-            .map(|(key, series, count, last)| Wanted { title: key.clone(), key, want: if series { Want::Series } else { Want::MovieOrSeries }, count, last })
+            .map(|(key, series, count, last, eps)| Wanted { title: key.clone(), key, want: if series { Want::Series } else { Want::MovieOrSeries }, count, last, eps })
             .collect();
         self.start_import(Source::Netflix, wanted, rows.len()).await
     }
 
     /// Importa o arquivo do botão da Crunchyroll (substitui o anterior):
-    /// `{"items": [{"title", "movie", "episodes", "last"}]}`.
+    /// `{"items": [{"title", "movie", "episodes", "last", "eps"}]}`; "eps"
+    /// (o botão novo): `[{"s": temporada, "e": número, "t": nome, "done", "pct"}]`.
     pub async fn import_crunchyroll(self: &Arc<Self>, body: &str) -> Result<usize> {
         let v: Value = serde_json::from_str(body).context("arquivo fora do formato (é o crunchyroll-historico.json do botão?)")?;
         let items = v["items"].as_array().context("arquivo sem itens")?;
@@ -442,7 +572,15 @@ impl Orchestrator {
                 episodes += count as usize;
                 let last = it["last"].as_str().and_then(|d| d.get(..10)).and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
                 let key = format!("{}{title}", if movie { "filme:" } else { "" });
-                Some(Wanted { key, title: title.to_owned(), want: if movie { Want::AnimeMovie } else { Want::Anime }, count, last })
+                let eps = it["eps"].as_array().into_iter().flatten().map(|e| RawEp {
+                    season: e["s"].as_i64(),
+                    number: e["e"].as_i64().or_else(|| e["e"].as_str().and_then(|n| n.parse().ok())),
+                    title: e["t"].as_str().map(str::to_owned),
+                    alt: None,
+                    full: e["done"] == true,
+                    percent: e["pct"].as_u64().map(|p| p.min(99) as u8),
+                }).collect();
+                Some(Wanted { key, title: title.to_owned(), want: if movie { Want::AnimeMovie } else { Want::Anime }, count, last, eps })
             })
             .collect();
         self.start_import(Source::Crunchyroll, wanted, episodes).await
@@ -478,9 +616,15 @@ impl Orchestrator {
             });
         }
         let (mut seeds, mut unmatched, mut titles) = (vec![], vec![], 0usize);
+        let mut series_eps: Vec<(i64, Vec<RawEp>)> = vec![];
         while let Some(res) = set.join_next().await {
             let Ok((w, found)) = res else { continue };
             titles += 1;
+            if let Some((Media::Tv, id)) = found
+                && !w.eps.is_empty()
+            {
+                series_eps.push((id, w.eps.clone()));
+            }
             match found {
                 Some((media, id)) => {
                     let base = if media == Media::Movie { 2.0 } else { (1.0 + 0.25 * w.count as f64).min(3.0) };
@@ -491,6 +635,15 @@ impl Orchestrator {
                 None => {}
             }
         }
+        // os episódios vistos de cada série, com o número no TMDB
+        let mut watched: HashMap<i64, Vec<WatchedEp>> = HashMap::new();
+        let total_eps: usize = series_eps.iter().map(|(_, e)| e.len()).sum();
+        for (id, eps) in series_eps {
+            let found = self.match_episodes(id, &eps).await;
+            watched.entry(id).or_default().extend(found);
+        }
+        let matched_eps: usize = watched.values().map(Vec::len).sum();
+        info!("{source:?}: {matched_eps} de {total_eps} episódios casados com o TMDB");
         let report = ImportReport { lines, titles, matched: seeds.len(), unmatched };
         {
             let mut st = self.external.state.lock().await;
@@ -499,6 +652,7 @@ impl Orchestrator {
                 Source::Netflix => (st.netflix, st.netflix_at) = (seeds, today),
                 Source::Crunchyroll => (st.crunchyroll, st.crunchyroll_at) = (seeds, today),
             }
+            st.watched.insert(source.key().to_owned(), watched);
         }
         self.external.save().await;
         self.for_you_cache.clear().await;
@@ -572,6 +726,85 @@ impl Orchestrator {
             Source::Crunchyroll => st.crunchyroll_map.insert(w.key.clone(), found),
         };
         found
+    }
+
+    /// Os episódios de uma série no TMDB (temporada, número, nomes em
+    /// português e inglês), das temporadas pedidas (None: todas).
+    async fn tmdb_episodes(&self, id: i64, seasons: Option<&HashSet<i64>>) -> Vec<(i64, i64, Vec<String>)> {
+        let Some(tmdb) = self.tmdb.as_ref() else { return vec![] };
+        let all: Vec<i64> = match tmdb.get(&format!("tv/{id}")).await {
+            Ok(v) => v["seasons"].as_array().into_iter().flatten().filter_map(|s| s["season_number"].as_i64()).collect(),
+            Err(_) => return vec![],
+        };
+        let mut out = vec![];
+        for s in all.into_iter().filter(|s| seasons.is_none_or(|w| w.contains(s))) {
+            let mut names: HashMap<i64, Vec<String>> = HashMap::new();
+            for lang in ["pt-BR", "en-US"] {
+                if let Ok(v) = tmdb.get(&format!("tv/{id}/season/{s}?language={lang}")).await {
+                    for e in v["episodes"].as_array().into_iter().flatten() {
+                        let (Some(n), Some(name)) = (e["episode_number"].as_i64(), e["name"].as_str()) else { continue };
+                        names.entry(n).or_default().push(ep_norm(name));
+                    }
+                }
+            }
+            let mut eps: Vec<(i64, Vec<String>)> = names.into_iter().collect();
+            eps.sort_by_key(|e| e.0);
+            out.extend(eps.into_iter().map(|(n, names)| (s, n, names)));
+        }
+        out
+    }
+
+    /// Casa os episódios vistos com os do TMDB: pelo nome (na temporada
+    /// dita, se houver; senão em qualquer uma); sem nome que case, pelo número
+    /// (e, número maior que a temporada, pelo número absoluto — anime).
+    async fn match_episodes(&self, id: i64, eps: &[RawEp]) -> Vec<WatchedEp> {
+        let need: Option<HashSet<i64>> = if eps.iter().all(|e| e.season.is_some() && e.title.is_some()) {
+            Some(eps.iter().filter_map(|e| e.season).collect())
+        } else {
+            None
+        };
+        let mut tm = self.tmdb_episodes(id, need.as_ref()).await;
+        // nomes que não acharam na temporada dita podem estar em outra
+        let missing = need.is_some() && eps.iter().any(|e| {
+            let t = e.title.as_deref().map(ep_norm).unwrap_or_default();
+            let a = e.alt.as_deref().map(ep_norm).unwrap_or_default();
+            !tm.iter().any(|(_, _, names)| names.iter().any(|n| same_name(n, &t) || same_name(n, &a)))
+        });
+        if missing {
+            tm = self.tmdb_episodes(id, None).await;
+        }
+        let regular: Vec<&(i64, i64, Vec<String>)> = tm.iter().filter(|e| e.0 > 0).collect();
+        let mut out: Vec<WatchedEp> = vec![];
+        for e in eps {
+            let t = e.title.as_deref().map(ep_norm).unwrap_or_default();
+            let a = e.alt.as_deref().map(ep_norm).unwrap_or_default();
+            let by_name = |season: Option<i64>| tm.iter().find(|(s, _, names)| season.is_none_or(|w| w == *s) && names.iter().any(|n| same_name(n, &t) || same_name(n, &a)));
+            let hit = by_name(e.season)
+                .or_else(|| by_name(None))
+                .or_else(|| {
+                    let n = e.number?;
+                    // na temporada dita; sem ela (ou além do fim dela), o número absoluto
+                    e.season.and_then(|s| tm.iter().find(|(ts, tn, _)| *ts == s && *tn == n)).or_else(|| regular.get((n - 1).max(0) as usize).copied())
+                });
+            let Some((s, n, names)) = hit else { continue };
+            match out.iter_mut().find(|w| w.season == *s && w.number == *n) {
+                Some(w) => {
+                    w.full |= e.full;
+                    w.percent = w.percent.max(e.percent);
+                }
+                None => out.push(WatchedEp { season: *s, number: *n, names: names.clone(), full: e.full, percent: e.percent }),
+            }
+        }
+        out
+    }
+
+    /// Os episódios de uma série (id no TMDB) vistos na Netflix ou na Crunchyroll.
+    pub async fn watched_outside(&self, tmdb: i64) -> Vec<(Source, WatchedEp)> {
+        let st = self.external.state.lock().await;
+        [Source::Netflix, Source::Crunchyroll]
+            .into_iter()
+            .flat_map(|src| st.watched.get(src.key()).and_then(|m| m.get(&tmdb)).cloned().unwrap_or_default().into_iter().map(move |w| (src, w)))
+            .collect()
     }
 
     pub async fn clear_crunchyroll(&self) {
@@ -839,6 +1072,36 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn episodio_da_netflix() {
+        let ep = |t: &str| netflix_episode(t, "Rick and Morty");
+        let one_title = |t: &str| netflix_episode(t, "Vinland Saga").and_then(|e| e.title);
+        assert_eq!(ep("Rick and Morty: Temporada 8: Hot Rick"), Some(RawEp { season: Some(8), title: Some("Hot Rick".into()), full: true, ..Default::default() }));
+        let st = netflix_episode("Stranger Things: Stranger Things 4: Capítulo oito: Papai", "Stranger Things").unwrap();
+        assert_eq!((st.season, st.title.as_deref(), st.alt.as_deref()), (Some(4), Some("Papai"), Some("Capítulo oito: Papai")));
+        assert_eq!(ep("Rick and Morty: Parte 1: O começo").and_then(|e| e.title), Some("O começo".into()));
+        let one = |t: &str, k: &str| netflix_episode(t, k).unwrap();
+        let e = one("Hajime no Ippo: The Fighting!: Temporada 1: Episódio 29", "Hajime no Ippo");
+        assert_eq!((e.season, e.number), (Some(1), Some(29)));
+        let e = one("One Piece: Alabasta: Episódio 119", "One Piece");
+        assert_eq!((e.season, e.number), (None, Some(119)));
+        let e = one("Avatar: Livro 3: Sozin's Comet: Parte 4", "Avatar");
+        assert_eq!(e.season, Some(3));
+        let e = one("Wakfu: The Quest: Livro I : O começo", "Wakfu");
+        assert_eq!(e.season, Some(1));
+        let e = one("3%: Temporada 2: Capítulo 02: Torradeira", "3%");
+        assert_eq!((e.season, e.number, e.title.as_deref()), (Some(2), Some(2), Some("Torradeira")));
+        let rows: Vec<(String, String)> = [("Rick and Morty: Temporada 1: Piloto", "9/11/26"), ("Rick and Morty: Temporada 8: Hot Rick", "9/11/26"), ("Rick and Morty: Temporada 8: Hot Rick", "9/12/26")]
+            .iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let g = group_eps(&rows);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].4.len(), 2, "o mesmo episódio duas vezes conta uma");
+        assert!(same_name(&ep_norm("Hot Rick"), &ep_norm("hot rick")));
+        assert!(!same_name(&ep_norm("Rick"), &ep_norm("Hot Rick")));
+        assert!(!same_name(&ep_norm("Episódio 2"), &ep_norm("Episódio 29")));
+        assert_eq!(one_title("Vinland Saga: Temporada 1: Episódio 14"), None);
+    }
 
     #[test]
     fn netflix_csv_becomes_titles() {

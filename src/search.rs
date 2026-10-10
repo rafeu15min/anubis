@@ -88,6 +88,9 @@ pub struct Progress {
     pub played: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
+    /// visto fora do Jellyfin: "Netflix", "Crunchyroll"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
 }
 
 impl Progress {
@@ -103,7 +106,7 @@ impl Progress {
         } else {
             None
         };
-        (played || percent.is_some()).then_some(Self { played, percent })
+        (played || percent.is_some()).then_some(Self { played, percent, source: None })
     }
 }
 
@@ -626,6 +629,18 @@ impl Orchestrator {
                 queue.insert(id, p);
             }
         }
+        // vistos na Netflix e na Crunchyroll (o Jellyfin vale mais)
+        let outside = match series["tmdbId"].as_i64() {
+            Some(t) if t > 0 => self.watched_outside(t).await,
+            _ => vec![],
+        };
+        let outside_of = |season: i64, number: i64, title: Option<&str>| -> Option<Progress> {
+            // pelo nome primeiro: o Sonarr (TVDB) pode numerar diferente do TMDB
+            let t = title.map(crate::external::ep_norm).unwrap_or_default();
+            let by_name = (t.len() >= 3).then(|| outside.iter().find(|(_, w)| w.names.iter().any(|n| *n == t))).flatten();
+            let (src, w) = by_name.or_else(|| outside.iter().find(|(_, w)| w.season == season && w.number == number))?;
+            Some(Progress { played: w.full, percent: if w.full { None } else { w.percent.or(Some(50)) }, source: Some(src.name()) })
+        };
         let mut seasons: std::collections::BTreeMap<i64, Vec<EpisodeRow>> = Default::default();
         for e in raw {
             let season = e["seasonNumber"].as_i64().unwrap_or(0);
@@ -638,7 +653,7 @@ impl Orchestrator {
                 has_file: e["hasFile"].as_bool().unwrap_or(false),
                 portuguese: e["episodeFileId"].as_i64().and_then(|f| portuguese.get(&f).copied()),
                 downloading: e["id"].as_i64().and_then(|id| queue.get(&id).copied()),
-                watch: watched.get(&(season, number)).and_then(|j| j.progress.clone()),
+                watch: watched.get(&(season, number)).and_then(|j| j.progress.clone()).or_else(|| outside_of(season, number, e["title"].as_str())),
             });
         }
         let mut seasons: Vec<Season> = seasons
@@ -739,12 +754,12 @@ mod tests {
     fn progress_from_jellyfin_user_data() {
         let p = |v: Value| Progress::from_user_data(&v, Some(30_000_000_000));
         assert_eq!(p(json!({ "Played": false, "PlaybackPositionTicks": 0 })), None);
-        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 0 })), Some(Progress { played: true, percent: None }));
-        assert_eq!(p(json!({ "Played": false, "PlaybackPositionTicks": 12_000_000_000_i64, "PlayedPercentage": 41.6 })), Some(Progress { played: false, percent: Some(42) }));
+        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 0 })), Some(Progress { played: true, percent: None, source: None }));
+        assert_eq!(p(json!({ "Played": false, "PlaybackPositionTicks": 12_000_000_000_i64, "PlayedPercentage": 41.6 })), Some(Progress { played: false, percent: Some(42), source: None }));
         // sem PlayedPercentage: pela duração
-        assert_eq!(p(json!({ "PlaybackPositionTicks": 15_000_000_000_i64 })), Some(Progress { played: false, percent: Some(50) }));
+        assert_eq!(p(json!({ "PlaybackPositionTicks": 15_000_000_000_i64 })), Some(Progress { played: false, percent: Some(50), source: None }));
         // revendo algo já assistido
-        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 3_000_000_000_i64 })), Some(Progress { played: true, percent: Some(10) }));
+        assert_eq!(p(json!({ "Played": true, "PlaybackPositionTicks": 3_000_000_000_i64 })), Some(Progress { played: true, percent: Some(10), source: None }));
     }
 
     #[test]

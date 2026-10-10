@@ -44,8 +44,8 @@ const slice = (p) => `i-s${Math.min(8, Math.max(1, Math.round(p / 12.5)))}`;
               <span v-if="e.has_file" class="tag">na biblioteca</span>
               <DubTag v-if="e.has_file && e.portuguese === false" :k="`episode:${e.id}`" />
               <template v-if="e.watch">
-                <span v-if="e.watch.percent" class="tag watching"><i class="i" :class="slice(e.watch.percent)"></i>assistindo {{ e.watch.percent }}%</span>
-                <span v-else class="tag seen"><i class="i i-check"></i>assistido</span>
+                <span v-if="e.watch.percent" class="tag watching" :title="e.watch.source ? `Visto na ${e.watch.source}` : null"><i class="i" :class="slice(e.watch.percent)"></i>assistindo {{ e.watch.percent }}%<template v-if="e.watch.source"> · {{ e.watch.source }}</template></span>
+                <span v-else class="tag seen" :title="e.watch.source ? `Visto na ${e.watch.source}` : null"><i class="i i-check"></i>assistido<template v-if="e.watch.source"> · {{ e.watch.source }}</template></span>
               </template>
               <span v-if="avail(e) && AVAIL[avail(e)]" class="tag" :class="AVAIL[avail(e)][0]">{{ AVAIL[avail(e)][1] }}</span>
             </span>

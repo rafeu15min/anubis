@@ -55,9 +55,16 @@ async function crunchyrollHistory() {
         const key = movie ? p.id : (ep.series_id || p.id);
         const title = movie ? p.title : (ep.series_title || p.title);
         if (!key || !title) continue;
-        const it = items[key] || (items[key] = { title, movie, episodes: 0, last: '' });
+        const it = items[key] || (items[key] = { title, movie, episodes: 0, last: '', eps: [] });
         it.episodes++; total++;
         if ((h.date_played || '') > it.last) it.last = h.date_played || '';
+        // o episódio: temporada, número, nome, se foi até o fim e quanto (para
+        // a janela da série no Anubis marcar "assistido")
+        if (!movie) {
+          const dur = (ep.duration_ms || 0) / 1000;
+          const num = ep.episode_number != null ? ep.episode_number : (ep.sequence_number != null ? ep.sequence_number : ep.episode);
+          it.eps.push({ s: ep.season_number, e: num, t: p.title, done: !!h.fully_watched, pct: dur > 0 && h.playhead ? Math.min(99, Math.round(h.playhead * 100 / dur)) : null });
+        }
       }
       const next = (body.meta || {}).next_page;
       if (!next || !(body.data || []).length) break;

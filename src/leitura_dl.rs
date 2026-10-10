@@ -1,11 +1,11 @@
-//! Cadeia de download da leitura: Bookshelf (o *arr dos livros) → torrent
-//! direto (busca do Anubis no Prowlarr, qBittorrent) → Drive.
+//! Cadeia de download da leitura → Drive. Fontes, nesta ordem: Library
+//! Genesis (download direto, idioma informado, sem conta), Bookshelf (o *arr
+//! dos livros) e torrent direto (busca do Anubis no Prowlarr, qBittorrent).
 //!
-//! Português primeiro: o pedido só procura versões em português (torrents
-//! marcados PT-BR, conferidas pelo idioma do texto). Sem nenhuma, para em
-//! "sem versão em português" e só baixa em inglês com o clique
-//! (`POST /leitura/pedidos/{id}/ingles`): aí vale a ordem Bookshelf →
-//! torrent.
+//! Português primeiro: o pedido só procura versões em português (LibGen em
+//! português, torrents marcados PT-BR), conferidas pelo idioma do texto. Sem
+//! nenhuma, para em "sem versão em português" e só baixa em inglês com o
+//! clique (`POST /leitura/pedidos/{id}/ingles`): LibGen → Bookshelf → torrent.
 //!
 //! Cada arquivo passa pelo validador (`quality`) antes de ir para o Drive;
 //! versão ruim é descartada e a próxima é tentada. O torrent continua
@@ -15,6 +15,7 @@
 //! O Z-Library (3ª fonte, só com clique: créditos limitados) entra quando
 //! houver conta; até lá, sem torrent bom = "sem fonte".
 
+use crate::libgen::LibGen;
 use crate::orchestrator::Orchestrator;
 use crate::quality::{self, Kind};
 use crate::services::TorrentSource;
@@ -35,6 +36,21 @@ const BOOKSHELF_GRACE: Duration = Duration::from_secs(4 * 60);
 /// torrent parado (sem progresso) por tanto tempo: tenta a próxima versão
 const STALL: Duration = Duration::from_secs(20 * 60);
 const MAX_TORRENTS: usize = 3;
+/// LibGen ocupado com a versão em português: tenta de novo a cada…
+const LIBGEN_RETRY: Duration = Duration::from_secs(30 * 60);
+/// …por até 6 h (12 vezes)
+const LIBGEN_RETRIES: u32 = 12;
+/// um download direto que caiu no meio continua de onde parou (até tantas vezes)
+const RESUMES: u32 = 5;
+
+/// Resultado de uma fonte.
+enum Outcome {
+    Delivered,
+    /// não havia versão que servisse
+    Nothing,
+    /// havia, mas o servidor estava ocupado: vale tentar mais tarde
+    Busy,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -239,6 +255,9 @@ fn pick_file(files: &[crate::services::TorrentFileInfo], title: &str, comic: boo
 
 pub struct Downloads {
     orch: Arc<Orchestrator>,
+    libgen: LibGen,
+    /// downloads diretos (LibGen) antes de irem para o Drive
+    tmp: PathBuf,
     bookshelf: Option<Bookshelf>,
     drive: String,
     path: PathBuf,
@@ -256,10 +275,12 @@ fn kind_of(folder: &str) -> Kind {
 }
 
 impl Downloads {
-    pub fn load(orch: Arc<Orchestrator>, bookshelf: Option<Bookshelf>, drive: String, state_dir: &Path) -> Arc<Self> {
+    pub fn load(orch: Arc<Orchestrator>, bookshelf: Option<Bookshelf>, drive: String, state_dir: &Path) -> Result<Arc<Self>> {
         let path = state_dir.join("leitura-pedidos.json");
         let jobs: HashMap<String, Job> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        let me = Arc::new(Self { orch, bookshelf, drive, path, jobs: Mutex::new(jobs), on_delivered: Arc::new(tokio::sync::Notify::new()) });
+        let tmp = state_dir.join("leitura-tmp");
+        std::fs::create_dir_all(&tmp)?;
+        let me = Arc::new(Self { orch, libgen: LibGen::new()?, tmp, bookshelf, drive, path, jobs: Mutex::new(jobs), on_delivered: Arc::new(tokio::sync::Notify::new()) });
         let resume = me.clone();
         tokio::spawn(async move {
             let pending: Vec<String> = resume.jobs.lock().await.values().filter(|j| !j.stage.done()).map(|j| j.id.clone()).collect();
@@ -267,7 +288,7 @@ impl Downloads {
                 resume.clone().spawn(id);
             }
         });
-        me
+        Ok(me)
     }
 
     pub async fn list(&self) -> Vec<Job> {
@@ -360,8 +381,24 @@ impl Downloads {
     async fn run(&self, id: &str) -> Result<()> {
         let job = self.job(id).await.context("pedido sumiu")?;
         let kind = kind_of(&job.folder);
-        // português primeiro: só torrents marcados PT, conferidos pelo texto
+        // português primeiro: LibGen em português, depois torrents marcados
+        // PT, conferidos pelo texto
         if !job.english_ok {
+            for attempt in 0..=LIBGEN_RETRIES {
+                match self.via_libgen(id, kind, true).await? {
+                    Outcome::Delivered => return Ok(()),
+                    Outcome::Busy if attempt < LIBGEN_RETRIES => {
+                        let next = chrono::Local::now() + chrono::Duration::from_std(LIBGEN_RETRY).unwrap_or_default();
+                        self.update(id, |j| {
+                            j.stage = Stage::Procurando;
+                            j.detail = format!("Há versão em português, mas o LibGen está sobrecarregado; tento de novo às {}", next.format("%H:%M"));
+                        })
+                        .await;
+                        tokio::time::sleep(LIBGEN_RETRY).await;
+                    }
+                    _ => break,
+                }
+            }
             if self.via_torrent(id, kind, true).await? {
                 return Ok(());
             }
@@ -372,7 +409,11 @@ impl Downloads {
             .await;
             return Ok(());
         }
-        // 1. Bookshelf (livros; HQ e artigo não)
+        // 1. LibGen
+        if matches!(self.via_libgen(id, kind, false).await?, Outcome::Delivered) {
+            return Ok(());
+        }
+        // 2. Bookshelf (livros; HQ e artigo não)
         if kind == Kind::Book
             && let Some(bs) = &self.bookshelf
         {
@@ -386,7 +427,7 @@ impl Downloads {
                 Err(e) => tracing::info!("leitura: Bookshelf ({}): {e:#}", job.title),
             }
         }
-        // 2. torrent direto
+        // 3. torrent direto
         if self.via_torrent(id, kind, false).await? {
             return Ok(());
         }
@@ -431,6 +472,142 @@ impl Downloads {
         }
     }
 
+    /// Títulos para buscar: o do pedido e o original, sem acento, com e sem autor.
+    fn queries(job: &Job) -> (Vec<String>, Vec<String>) {
+        let author = job.author.as_deref().map(fold).unwrap_or_default();
+        let titles: Vec<String> = std::iter::once(job.title.clone()).chain(job.alt_title.clone()).collect();
+        let mut queries: Vec<String> = titles.iter().map(|t| format!("{} {author}", fold(t)).trim().to_string()).collect();
+        queries.extend(titles.iter().map(|t| fold(t)));
+        queries.dedup();
+        (titles, queries)
+    }
+
+    /// Library Genesis: as melhores versões (até 5), baixadas direto.
+    async fn via_libgen(&self, id: &str, kind: Kind, only_pt: bool) -> Result<Outcome> {
+        let job = self.job(id).await.context("pedido sumiu")?;
+        self.update(id, |j| {
+            j.stage = Stage::Procurando;
+            j.detail = format!("Procurando no Library Genesis{}", if only_pt { " (em português)" } else { "" });
+        })
+        .await;
+        let (titles, queries) = Self::queries(&job);
+        let mut found: Vec<crate::libgen::Entry> = vec![];
+        for q in &queries {
+            match self.libgen.search(q).await {
+                Ok(list) => {
+                    for e in list {
+                        if !found.iter().any(|f| f.md5 == e.md5) {
+                            found.push(e);
+                        }
+                    }
+                }
+                Err(e) => tracing::info!("leitura: LibGen ({q}): {e:#}"),
+            }
+        }
+        let comic = kind == Kind::Comic;
+        let fmt = |ext: &str| -> Option<i64> {
+            let order: &[&str] = if comic { &["cbz", "cbr", "pdf", "epub"] } else { &["epub", "azw3", "mobi", "fb2", "pdf", "djvu"] };
+            order.iter().position(|e| *e == ext).map(|i| 30 - i as i64 * 5)
+        };
+        let mut ranked: Vec<(i64, crate::libgen::Entry)> = found
+            .into_iter()
+            // versão tentada que deu problema de verdade não volta; a que só
+            // pegou o servidor ocupado volta na próxima rodada
+            .filter(|e| !job.tried.contains(&format!("libgen:{}", e.md5)))
+            .filter_map(|e| {
+                let pt = e.language.to_lowercase().contains("portug");
+                if only_pt && !pt {
+                    return None;
+                }
+                let name = fold(&e.text);
+                let matches = titles.iter().map(|t| words(t)).filter(|w| !w.is_empty()).any(|want| {
+                    let hits = want.iter().filter(|w| name.contains(w.as_str())).count();
+                    hits as f64 >= (want.len() as f64 * 0.6).ceil()
+                });
+                let too_big = kind == Kind::Book && e.size > 300_000_000;
+                (matches && !too_big).then_some(())?;
+                Some((if pt { 100 } else { 0 } + fmt(&e.ext)?, e))
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut busy = false;
+        for (_, e) in ranked.into_iter().take(5) {
+            self.update(id, |j| {
+                j.stage = Stage::Baixando;
+                j.detail = format!("Baixando do Library Genesis ({}, {})", e.ext.to_uppercase(), e.language);
+                j.progress = 0.0;
+            })
+            .await;
+            // o nome no Drive: "Título (Autor).ext", como o resto da estante
+            let name = match &job.author {
+                Some(a) => format!("{} ({a}).{}", job.title, e.ext),
+                None => format!("{}.{}", job.title, e.ext),
+            }
+            .replace('/', "-");
+            let file = self.tmp.join(&name);
+            let _ = tokio::fs::remove_file(&file).await;
+            // o progresso vai para o pedido sem esperar (a closure é síncrona)
+            let shown = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let watcher = {
+                let (shown, me, id) = (shown.clone(), self, id.to_string());
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let p = shown.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+                        me.update(&id, |j| j.progress = p).await;
+                    }
+                }
+            };
+            let fetch = async {
+                let mut last = Err(crate::libgen::Error::Busy("não começou".into()));
+                for _ in 0..RESUMES {
+                    last = self
+                        .libgen
+                        .download(&e.md5, &file, |done, total| {
+                            if total > 0 {
+                                shown.store(done * 1000 / total, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        })
+                        .await;
+                    match &last {
+                        // caiu no meio com parte baixada: continua de onde parou
+                        Err(crate::libgen::Error::Busy(_)) if tokio::fs::metadata(&file).await.is_ok_and(|m| m.len() > 0) => continue,
+                        _ => break,
+                    }
+                }
+                last
+            };
+            let res = tokio::select! {
+                r = fetch => r,
+                _ = watcher => unreachable!(),
+            };
+            let delivered = match res {
+                Ok(()) => {
+                    let ok = self.deliver(id, &file, kind, only_pt).await?;
+                    if !ok {
+                        self.update(id, |j| j.tried.push(format!("libgen:{}", e.md5))).await;
+                    }
+                    ok
+                }
+                Err(err @ crate::libgen::Error::Busy(_)) => {
+                    tracing::info!("leitura: LibGen {}: {err}", e.md5);
+                    busy = true;
+                    false
+                }
+                Err(err) => {
+                    tracing::info!("leitura: LibGen {}: {err}", e.md5);
+                    self.update(id, |j| j.tried.push(format!("libgen:{}", e.md5))).await;
+                    false
+                }
+            };
+            let _ = tokio::fs::remove_file(&file).await;
+            if delivered {
+                return Ok(Outcome::Delivered);
+            }
+        }
+        Ok(if busy { Outcome::Busy } else { Outcome::Nothing })
+    }
+
     /// Busca no Prowlarr e tenta as melhores versões (até MAX_TORRENTS).
     async fn via_torrent(&self, id: &str, kind: Kind, only_pt: bool) -> Result<bool> {
         let job = self.job(id).await.context("pedido sumiu")?;
@@ -444,11 +621,8 @@ impl Downloads {
         let cats: &[u32] = if comic { &[7030, 7000] } else { &[7000] };
         // sem acento (a busca dos sites não acha "Drácula"), título e original,
         // com e sem autor; junta tudo
-        let author = job.author.as_deref().map(fold).unwrap_or_default();
-        let titles: Vec<&str> = std::iter::once(job.title.as_str()).chain(job.alt_title.as_deref()).collect();
-        let mut queries: Vec<String> = titles.iter().map(|t| format!("{} {author}", fold(t)).trim().to_string()).collect();
-        queries.extend(titles.iter().map(|t| fold(t)));
-        queries.dedup();
+        let (titles, queries) = Self::queries(&job);
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
         let mut found: Vec<Value> = vec![];
         for q in &queries {
             for r in prowlarr.search(q, cats, 20).await.unwrap_or_default() {

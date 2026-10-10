@@ -43,6 +43,7 @@ dependencies = [
  "futures-core",
  "librqbit",
  "md-5",
+ "regex",
  "reqwest",
  "rustix",
  "serde",

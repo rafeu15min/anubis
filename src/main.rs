@@ -27,6 +27,7 @@ mod kosync;
 mod openlibrary;
 mod leitura;
 mod leitura_dl;
+mod libgen;
 mod orchestrator;
 mod live;
 mod mux;
@@ -166,7 +167,7 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let leitura = orch.cfg.leitura.as_ref().map(|l| {
         let ol = openlibrary::OpenLibrary::load(orch.cfg.state_dir())?;
         let bookshelf = l.bookshelf.as_ref().map(|b| leitura_dl::Bookshelf::new(&b.url, &b.api_key)).transpose()?;
-        let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, l.drive.clone(), &orch.cfg.state_dir());
+        let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, l.drive.clone(), &orch.cfg.state_dir())?;
         let leitura = Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol, downloads.clone()));
         // livro novo no Drive: a estante relista
         let me = leitura.clone();

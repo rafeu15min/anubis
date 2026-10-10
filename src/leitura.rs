@@ -10,7 +10,8 @@
 //! PUT /leitura/lido/{doc}      — {"lido": true|false}: marca no site, que
 //!                                vale mais que o progresso do Kindle
 //! POST /leitura/baixar         — {"title","author"?,"categoria"}: cadeia de
-//!                                download (src/leitura_dl.rs) → Drive
+//!                                download (LibGen → Bookshelf → torrent;
+//!                                português primeiro; src/leitura_dl.rs) → Drive
 //! GET  /leitura/pedidos        — andamento dos pedidos
 //! POST /leitura/pedidos/{id}/ingles — sem versão em português: aceita inglês
 

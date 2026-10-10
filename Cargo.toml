@@ -11,6 +11,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["serde", "c
 futures-core = "0.3.34"
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
 md-5 = "0.10"
+regex = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "cookies", "form", "multipart"] }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }

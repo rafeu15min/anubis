@@ -12,6 +12,9 @@
 //! POST /leitura/baixar         — {"title","author"?,"categoria"}: cadeia de
 //!                                download (LibGen → Bookshelf → torrent;
 //!                                português primeiro; src/leitura_dl.rs) → Drive
+//! GET  /leitura/busca?q=        — {"estante": [...], "obras": [...]}: o que
+//!                                casa na estante (todas as categorias) e as
+//!                                obras do Open Library que ainda não estão lá
 //! GET  /leitura/pedidos        — andamento dos pedidos
 //! POST /leitura/pedidos/{id}/ingles — sem versão em português: aceita inglês
 
@@ -22,7 +25,7 @@ use crate::openlibrary::{OpenLibrary, Work};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -216,9 +219,21 @@ impl Leitura {
             .collect())
     }
 
+    /// Um livro do Drive com o progresso do kosync.
+    async fn shelved(&self, b: &Book) -> Shelved {
+        let (p, m) = match &self.kosync {
+            Some(k) => (k.get(&b.doc).await, k.mark(&b.doc).await),
+            None => (None, None),
+        };
+        let progress = p.as_ref().map(|p| p.percentage);
+        let lido = m.map(|m| m.lido).unwrap_or(progress.is_some_and(|p| p >= 0.995));
+        Shelved { book: b.clone(), progress, read_at: p.map(|p| p.timestamp), lido }
+    }
+
     pub fn router(self: Arc<Self>) -> Router {
         Router::new()
             .route("/", get(|| async { ([("cache-control", "no-cache")], Html(include_str!("../web/leitura.html"))) }))
+            .route("/busca", get(search))
             .route("/{categoria}", get(shelf))
             .route("/lido/{doc}", put(mark))
             .route("/baixar", post(download))
@@ -298,13 +313,7 @@ async fn shelf(State(l): State<Arc<Leitura>>, Path(categoria): Path<String>) -> 
     };
     let mut shelf = Vec::new();
     for b in books.iter().filter(|b| b.category == folder) {
-        let (p, m) = match &l.kosync {
-            Some(k) => (k.get(&b.doc).await, k.mark(&b.doc).await),
-            None => (None, None),
-        };
-        let progress = p.as_ref().map(|p| p.percentage);
-        let lido = m.map(|m| m.lido).unwrap_or(progress.is_some_and(|p| p >= 0.995));
-        shelf.push(Shelved { book: b.clone(), progress, read_at: p.map(|p| p.timestamp), lido });
+        shelf.push(l.shelved(b).await);
     }
     // lendo (com progresso e não terminado), do mais recente; depois o mais novo no Drive
     let reading = |s: &Shelved| s.progress.is_some() && !s.lido;
@@ -316,4 +325,51 @@ async fn shelf(State(l): State<Arc<Leitura>>, Path(categoria): Path<String>) -> 
     });
     let recs = l.for_you(folder).await;
     Json(json!({ "estante": shelf, "preparando": recs.is_none(), "para_voce": recs.as_deref().cloned().unwrap_or_default() })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search(State(l): State<Arc<Leitura>>, Query(q): Query<SearchQuery>) -> Response {
+    let term = q.q.trim();
+    let words: Vec<String> = term.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
+    if term.chars().count() < 2 || words.is_empty() {
+        return Json(json!({ "estante": [], "obras": [] })).into_response();
+    }
+    let books = match l.drive.books().await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    };
+    // estante: todas as palavras no título ou no autor, sem acento
+    let mut shelf = Vec::new();
+    for b in books.iter() {
+        let hay = format!("{}{}", norm(&b.title), norm(b.author.as_deref().unwrap_or("")));
+        if words.iter().all(|w| hay.contains(w.as_str())) {
+            shelf.push(l.shelved(b).await);
+        }
+    }
+    let owned_titles: HashSet<String> = books.iter().map(|b| norm(&b.title)).collect();
+    let works = match l.ol.search_works(term).await {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("Open Library ({term}): {e:#}");
+            vec![]
+        }
+    };
+    let works: Vec<Suggestion> = works
+        .into_iter()
+        .filter(|w| !owned(&w.title, &owned_titles) && !w.alternative_title.iter().any(|t| owned(t, &owned_titles)))
+        .map(|w| Suggestion {
+            portuguese: w.has_portuguese(),
+            cover: w.cover(),
+            author: w.author_name.first().cloned().unwrap_or_default(),
+            year: w.first_publish_year,
+            key: w.key,
+            title: w.title,
+            reason: String::new(),
+        })
+        .collect();
+    Json(json!({ "estante": shelf, "obras": works })).into_response()
 }

@@ -14,6 +14,8 @@
 //! GET  /status/{kind}/{id}/versions — pedido parado: o que os indexadores têm e por que foi recusado
 //! POST /watch                   — "assistir agora": {"kind","id","guid"?}
 //! GET  /icones.woff2           — ícones das páginas
+//! GET  /comum.js               — o que vídeos e leitura compartilham: marca +
+//!                                seletor Vídeos ↔ Leitura, carrossel em anel
 //! GET  /watch/{kind}/{id}       — player
 //! GET  /watch/{kind}/{id}/video — o vídeo (aceita Range; toca enquanto baixa)
 //! GET  /watch/{kind}/{id}/info  — andamento do download, trechos já baixados e formato
@@ -92,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/preferencias", get(|| async { page(include_str!("../web/prefs.html")) }))
         .route("/icones.woff2", get(icons))
+        .route("/comum.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8"), ("cache-control", "no-cache")], include_str!("../web/comum.js")) }))
         .route("/prefs", get(get_prefs).put(put_prefs))
         .route("/history", get(|State(s): State<AppState>| async move { Json(s.orch.history_summary().await) }))
         .route("/history/netflix", post(import_netflix).delete(clear_netflix).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))

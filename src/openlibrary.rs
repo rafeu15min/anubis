@@ -116,6 +116,11 @@ impl OpenLibrary {
         self.search(&[("q", q.trim()), ("limit", "1")]).await.ok()?.into_iter().next()
     }
 
+    /// Busca livre (título, autor, assunto): as obras mais relevantes.
+    pub async fn search_works(&self, q: &str) -> Result<Vec<Work>> {
+        self.search(&[("q", q), ("limit", "24")]).await
+    }
+
     /// As obras mais bem avaliadas de um autor (em memória enquanto o Anubis roda).
     pub async fn works_by(&self, author: &str) -> Vec<Work> {
         if let Some(w) = self.authors.lock().await.get(author) {

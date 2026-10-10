@@ -9,8 +9,10 @@
   *::-webkit-scrollbar { display: none; }
   :root {
     --bg: #111016; --panel: #1b1a22; --line: #2c2a36; --text: #ece9f2; --muted: #9a96a8;
-    --accent: #c9a24a; --ok: #5fbf7f; --info: #6fa8ff;
+    --accent: #7cc4ee; --ok: #5fbf7f; --info: #6fa8ff;
   }
+  @view-transition { navigation: auto; }
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .4s; }
   * { box-sizing: border-box; }
   @font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=4') format('woff2'); font-display: block; }
   .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
@@ -24,13 +26,13 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
   header { position: sticky; top: 0; z-index: 2; padding: 16px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
   .bar { display: flex; gap: 12px; align-items: center; max-width: 1100px; margin: 0 auto; }
-  h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
-  .swap { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); font-size: 20px; text-decoration: none; margin-left: auto; }
-  .swap:hover { color: var(--accent); background: var(--panel); }
+  input[type=search] { flex: 1; min-width: 160px; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 16px; }
+  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  select { min-height: 44px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
   .tabs button { min-height: 40px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
-  @media (max-width: 700px) { .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; } .tabs button { flex: 1; } }
+  @media (max-width: 900px) { .bar { flex-wrap: wrap; } .tabs { order: 3; width: 100%; } .tabs button { flex: 1; } }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 24px 0 12px; }
   .msg { color: var(--muted); padding: 24px 0; }
@@ -70,12 +72,14 @@
 <body>
 <header>
   <div class="bar">
-    <h1>LEITURA</h1>
+    <anubis-marca modo="leitura"></anubis-marca>
     <nav class="tabs" id="tabs"></nav>
-    <a class="swap" href="/" title="Filmes, séries e animes" aria-label="Vídeos"><i class="i i-film"></i></a>
+    <input id="q" type="search" placeholder="Buscar livro, autor, HQ…" autocomplete="off">
   </div>
 </header>
+<script src="/comum.js"></script>
 <main id="main"><p class="msg">Carregando…</p></main>
+<main id="results" hidden></main>
 <dialog id="card"></dialog>
 <script>
 const TABS = [['ficcao', 'Ficção'], ['tecnicos', 'Técnicos'], ['artigos', 'Artigos'], ['mangas-hqs', 'Mangás e HQs'], ['rpg', 'RPG']];
@@ -111,7 +115,7 @@ function rail(title, items, render = tile) {
     <div class="rail">${items.map(render).join('')}</div><button class="nav" data-scroll="1" aria-label="Avançar"><i class="i i-right"></i></button></div>`;
 }
 
-let shelf = [], sugs = [], jobs = [], retry, jobTimer;
+let shelf = [], sugs = [], found = [], jobs = [], retry, jobTimer;
 const DONE = ['no_drive', 'sem_fonte', 'falhou', 'sem_portugues'];
 const LABEL = { procurando: 'procurando', baixando: 'baixando', conferindo: 'conferindo', enviando_ao_drive: 'enviando ao Drive', no_drive: 'no Drive', sem_portugues: 'sem português', sem_fonte: 'sem fonte', falhou: 'falhou' };
 function jobsHtml() {
@@ -156,11 +160,13 @@ async function load() {
   }
 }
 
-function openSug(s) {
+function openSug(s, fromSearch) {
+  // da busca: escolhe a pasta (começa na aba aberta)
+  const cat = fromSearch ? `<select id="cat" title="Pasta no Drive" aria-label="Pasta no Drive">${TABS.map(([sl, l]) => `<option value="${sl}"${sl === current ? ' selected' : ''}>${l}</option>`).join('')}</select>` : '';
   $('#card').innerHTML = `<button class="x" aria-label="Fechar"><i class="i i-x"></i></button>
     <h3>${esc(s.title)}</h3><p class="meta">${esc(s.author)}${s.year ? ' · ' + s.year : ''}</p>
-    <p>${esc(s.reason)}.</p><p class="meta">${s.portuguese ? 'Tem edição em português.' : 'Só achei edição em inglês.'}</p>
-    <div class="acts">
+    ${s.reason ? `<p>${esc(s.reason)}.</p>` : ''}<p class="meta">${s.portuguese ? 'Tem edição em português.' : 'Sem edição em português no Open Library (a busca tenta mesmo assim).'}</p>
+    <div class="acts">${cat}
       <button class="icon" data-baixar="${esc(s.key)}" title="Baixar para o Drive (Bookshelf, depois torrent)" aria-label="Baixar"><i class="i i-download"></i></button>
       <a class="icon" href="https://openlibrary.org${esc(s.key)}" target="_blank" rel="noopener" title="Ver no Open Library" aria-label="Ver no Open Library"><i class="i i-book"></i></a>
     </div>`;
@@ -183,11 +189,14 @@ function open(b) {
 
 document.addEventListener('click', e => {
   const tab = e.target.closest('[data-tab]');
-  if (tab) { current = tab.dataset.tab; try { localStorage.setItem('leitura.aba', current); } catch {} load(); return; }
-  const nav = e.target.closest('.nav');
-  if (nav) { const r = nav.parentElement.querySelector('.rail'); r.scrollBy({ left: nav.dataset.scroll * r.clientWidth * .8, behavior: 'smooth' }); return; }
+  if (tab) { current = tab.dataset.tab; try { localStorage.setItem('leitura.aba', current); } catch {} $('#q').value = ''; showSearch(false); load(); return; }
+  if (e.target.closest('.railbox > .nav')) return; // carrossel: web/comum.js
   const t = e.target.closest('.tile');
-  if (t && t.dataset.key) { const s = sugs.find(x => x.key === t.dataset.key); if (s) openSug(s); return; }
+  if (t && t.dataset.key) {
+    const s = sugs.find(x => x.key === t.dataset.key), f = found.find(x => x.key === t.dataset.key);
+    if (s || f) openSug(s || f, !s);
+    return;
+  }
   if (t) { const b = shelf.find(x => x.path === t.dataset.path); if (b) open(b); return; }
   const en = e.target.closest('[data-ingles]');
   if (en) { en.disabled = true; fetch(`/leitura/pedidos/${encodeURIComponent(en.dataset.ingles)}/ingles`, { method: 'POST' }).then(pollJobs); return; }
@@ -198,13 +207,18 @@ document.addEventListener('click', e => {
   if (e.target.closest('.x') || e.target === $('#card')) $('#card').close();
 });
 async function download(btn) {
-  const s = sugs.find(x => x.key === btn.dataset.baixar);
+  const s = sugs.find(x => x.key === btn.dataset.baixar) || found.find(x => x.key === btn.dataset.baixar);
   if (!s) return;
   btn.disabled = true;
-  const r = await fetch('/leitura/baixar', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: s.title, author: s.author, categoria: current }) });
+  const categoria = $('#cat')?.value || current;
+  const r = await fetch('/leitura/baixar', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: s.title, author: s.author, categoria }) });
   if (!r.ok) { btn.disabled = false; btn.title = 'Não consegui pedir'; return; }
   $('#card').close();
-  pollJobs();
+  // o pedido aparece na aba da pasta escolhida
+  if (categoria !== current || !$('#results').hidden) {
+    current = categoria; try { localStorage.setItem('leitura.aba', current); } catch {}
+    $('#q').value = ''; showSearch(false); load();
+  } else pollJobs();
 }
 
 async function markRead(btn) {
@@ -217,6 +231,33 @@ async function markRead(btn) {
   $('#card').close();
   load();
 }
+
+// busca: estante (todas as pastas) + Open Library
+let qTimer, qSeq = 0;
+function showSearch(on) { $('#results').hidden = !on; $('#main').hidden = on; }
+async function search(term) {
+  const seq = ++qSeq;
+  $('#results').innerHTML = '<p class="msg">Buscando…</p>';
+  try {
+    const r = await fetch(`/leitura/busca?q=${encodeURIComponent(term)}`);
+    const j = await r.json();
+    if (seq !== qSeq) return; // chegou a resposta de uma busca velha
+    if (!r.ok) throw new Error(j.error || r.status);
+    found = j.obras;
+    // os da estante abrem o mesmo cartão da estante
+    for (const b of j.estante) if (!shelf.some(x => x.path === b.path)) shelf.push(b);
+    $('#results').innerHTML = (rail('Na estante', j.estante) + rail('Para baixar', found, sugTile)) || `<p class="msg">Nada para “${esc(term)}”.</p>`;
+  } catch (e) {
+    if (seq === qSeq) $('#results').innerHTML = `<p class="msg err">A busca falhou: ${esc(e.message)}</p>`;
+  }
+}
+$('#q').addEventListener('input', e => {
+  clearTimeout(qTimer);
+  const term = e.target.value.trim();
+  showSearch(term.length >= 2);
+  if (term.length >= 2) qTimer = setTimeout(() => search(term), 400);
+  else qSeq++;
+});
 
 load();
 </script>

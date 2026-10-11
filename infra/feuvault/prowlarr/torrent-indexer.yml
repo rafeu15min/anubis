@@ -39,9 +39,10 @@ search:
         type: json
   inputs:
     filter_results: "true"
-    # [anubis] busca vazia (lista de recentes e o teste do Radarr): o site
-    # devolve quase só séries e o Radarr recusa o indexador; "dublado" traz filmes
-    q: "{{ if .Keywords }}{{ .Keywords }}{{ else }}dublado{{ end }}"
+    # [anubis] busca vazia (lista de recentes e os testes do Radarr e do
+    # Sonarr): a página inicial traz quase só séries (o Radarr recusa) e
+    # "dublado" quase só filmes (o Sonarr recusa); "dual audio" traz os dois
+    q: "{{ if .Keywords }}{{ .Keywords }}{{ else }}dual audio{{ end }}"
   keywordsfilters:
     - name: tolower
     - name: re_replace

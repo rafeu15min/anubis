@@ -124,14 +124,16 @@ impl Orchestrator {
         down
     }
 
-    /// Testa de novo, ao mesmo tempo, os indexadores fora do ar — no Prowlarr
-    /// e em cada Radarr/Sonarr que o tem de castigo. Devolve os que continuam fora.
+    /// Testa de novo, um de cada vez, os indexadores fora do ar — no Prowlarr
+    /// e em cada Radarr/Sonarr que o tem de castigo. Devolve os que continuam
+    /// fora. Um de cada vez: os brasileiros passam todos pelo mesmo
+    /// FlareSolverr, que atende um pedido por vez; 9 testes juntos estouravam
+    /// o tempo e os deixavam de castigo.
     pub async fn retest_indexers(self: &Arc<Self>) -> Vec<String> {
         let down = self.refresh_indexers().await;
         if down.is_empty() {
             return down;
         }
-        let mut set = tokio::task::JoinSet::new();
         for which in ["prowlarr", "radarr", "sonarr"] {
             let list = match which {
                 "prowlarr" => match &self.prowlarr {
@@ -155,22 +157,18 @@ impl Orchestrator {
                 }
             };
             for i in list.as_array().into_iter().flatten().filter(|i| i["name"].as_str().is_some_and(|n| down.iter().any(|d| d == base_name(n)))) {
-                let (me, i) = (self.clone(), i.clone());
-                set.spawn(async move {
-                    let r = match which {
-                        "prowlarr" => me.prowlarr.as_ref().unwrap().test_indexer(&i).await,
-                        "radarr" => me.radarr.as_ref().unwrap().test_indexer(&i).await,
-                        _ => me.sonarr.as_ref().unwrap().test_indexer(&i).await,
-                    };
-                    let name = i["name"].as_str().unwrap_or_default();
-                    match r {
-                        Ok(()) => info!("{which}: indexador {name} respondeu, saiu do castigo"),
-                        Err(e) => warn!("{which}: indexador {name} continua fora: {e:#}"),
-                    }
-                });
+                let r = match which {
+                    "prowlarr" => self.prowlarr.as_ref().unwrap().test_indexer(i).await,
+                    "radarr" => self.radarr.as_ref().unwrap().test_indexer(i).await,
+                    _ => self.sonarr.as_ref().unwrap().test_indexer(i).await,
+                };
+                let name = i["name"].as_str().unwrap_or_default();
+                match r {
+                    Ok(()) => info!("{which}: indexador {name} respondeu, saiu do castigo"),
+                    Err(e) => warn!("{which}: indexador {name} continua fora: {e:#}"),
+                }
             }
         }
-        while set.join_next().await.is_some() {}
         self.refresh_indexers().await
     }
 }

@@ -3,17 +3,29 @@
 # dubladas. github.com/felipemarinho97/torrent-indexer (GPL-3.0)
 services:
   torrent-indexer:
-    image: felipemarinho97/torrent-indexer:latest
+    # Imagem local com a correção do vazamento (branch fix/goroutine-leak,
+    # commit 523944f). Voltar para felipemarinho97/torrent-indexer:latest
+    # quando a correção estiver no upstream.
+    image: torrent-indexer:fix-goroutine-leak
     container_name: torrent-indexer
     restart: unless-stopped
+    # Vazou ~5,8 GB em 2026-09-30 e travou o servidor por horas (OOM + zram).
+    # Com o limite, só este container é morto e reiniciado.
+    mem_limit: 1g
     # espera o FlareSolverr: se sobe antes dele (boot do servidor), fica sem
     # sessões e Comando/Starck passam a responder só "challenge"
-    entrypoint: ["/bin/sh", "-c", "until wget -q -O /dev/null http://flaresolverr:8191/; do sleep 2; done; exec /app/torrent-indexer"]
+    entrypoint: ["/bin/sh", "-c", "until wget -q -O /dev/null http://flaresolverr:8191/; do sleep 2; done; exec /root/app"]
+    # /root/app é o caminho do binário no Dockerfile do repositório; a imagem
+    # oficial usa /app/torrent-indexer (reverter junto com a imagem).
     environment:
       - LOG_LEVEL=1
       - REDIS_HOST=torrent-indexer-redis
       # o mesmo FlareSolverr que o Prowlarr já usa
       - FLARESOLVERR_ADDRESS=http://flaresolverr:8191
+      # endereços novos (2026-10-11): comando.la pede o desafio do Cloudflare
+      # e comando1.com responde direto; torrentdosfilmes.se só redireciona
+      - INDEXER_COMANDO_URL=https://comando1.com/
+      - INDEXER_TORRENT_DOS_FILMES_URL=https://torrentdosfilmes-v2.xyz/
     depends_on:
       - torrent-indexer-redis
     networks:

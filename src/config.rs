@@ -61,6 +61,20 @@ pub struct LeituraCfg {
     /// Engenharia); vazio: todos
     #[serde(default)]
     pub openalex_campos: Vec<u32>,
+    /// canais do Telegram como fonte em português (src/telegram.rs)
+    pub telegram: Option<TelegramCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramCfg {
+    /// do app criado em my.telegram.org
+    pub api_id: i32,
+    /// arquivo com o api_hash do app
+    pub hash_file: PathBuf,
+    /// onde procurar: "@usuario" do canal ou o título exato
+    #[serde(default)]
+    pub canais: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

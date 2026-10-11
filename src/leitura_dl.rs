@@ -3,7 +3,8 @@
 //! dos livros) e torrent direto (busca do Anubis no Prowlarr, qBittorrent).
 //!
 //! Português primeiro: o pedido só procura versões em português (LibGen em
-//! português, torrents marcados PT-BR), conferidas pelo idioma do texto. Sem
+//! português, os canais aprovados do Telegram, torrents marcados PT-BR),
+//! conferidas pelo idioma do texto. Sem
 //! nenhuma, para em "sem versão em português" e só baixa em inglês com o
 //! clique (`POST /leitura/pedidos/{id}/ingles`): LibGen → Bookshelf → torrent.
 //!
@@ -19,6 +20,7 @@ use crate::libgen::LibGen;
 use crate::orchestrator::Orchestrator;
 use crate::quality::{self, Kind};
 use crate::services::TorrentSource;
+use crate::telegram::Telegram;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -199,6 +201,20 @@ fn words(s: &str) -> Vec<String> {
     fold(s).split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3).map(String::from).collect()
 }
 
+/// O nome (já sem acento) tem a maior parte das palavras de um dos títulos.
+fn names_title(name: &str, titles: &[String]) -> bool {
+    titles.iter().map(|t| words(t)).filter(|w| !w.is_empty()).any(|want| {
+        let hits = want.iter().filter(|w| name.contains(w.as_str())).count();
+        hits as f64 >= (want.len() as f64 * 0.6).ceil()
+    })
+}
+
+/// Ordem dos formatos (maior = melhor; None: não serve).
+fn format_rank(ext: &str, comic: bool) -> Option<i64> {
+    let order: &[&str] = if comic { &["cbz", "cbr", "pdf", "epub"] } else { &["epub", "azw3", "mobi", "fb2", "pdf", "djvu"] };
+    order.iter().position(|e| *e == ext).map(|i| 30 - i as i64 * 5)
+}
+
 /// Pontos de uma versão do Prowlarr para o livro (None: não serve). Vale
 /// o título ou o título original; nome muito maior que título e autor perde
 /// pontos (biografia "… the Man Who Wrote Dracula" não é o Drácula).
@@ -259,6 +275,8 @@ fn pick_file(files: &[crate::services::TorrentFileInfo], title: &str, comic: boo
 pub struct Downloads {
     orch: Arc<Orchestrator>,
     libgen: LibGen,
+    /// canais aprovados do Telegram (só na passada do português)
+    telegram: Option<Arc<Telegram>>,
     /// downloads diretos (LibGen) antes de irem para o Drive
     tmp: PathBuf,
     bookshelf: Option<Bookshelf>,
@@ -278,12 +296,12 @@ fn kind_of(folder: &str) -> Kind {
 }
 
 impl Downloads {
-    pub fn load(orch: Arc<Orchestrator>, bookshelf: Option<Bookshelf>, drive: String, state_dir: &Path) -> Result<Arc<Self>> {
+    pub fn load(orch: Arc<Orchestrator>, bookshelf: Option<Bookshelf>, telegram: Option<Arc<Telegram>>, drive: String, state_dir: &Path) -> Result<Arc<Self>> {
         let path = state_dir.join("leitura-pedidos.json");
         let jobs: HashMap<String, Job> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let tmp = state_dir.join("leitura-tmp");
         std::fs::create_dir_all(&tmp)?;
-        let me = Arc::new(Self { orch, libgen: LibGen::new()?, tmp, bookshelf, drive, path, jobs: Mutex::new(jobs), on_delivered: Arc::new(tokio::sync::Notify::new()) });
+        let me = Arc::new(Self { orch, libgen: LibGen::new()?, telegram, tmp, bookshelf, drive, path, jobs: Mutex::new(jobs), on_delivered: Arc::new(tokio::sync::Notify::new()) });
         let resume = me.clone();
         tokio::spawn(async move {
             let pending: Vec<String> = resume.jobs.lock().await.values().filter(|j| !j.stage.done()).map(|j| j.id.clone()).collect();
@@ -397,12 +415,23 @@ impl Downloads {
             .await;
             return Ok(());
         }
-        // português primeiro: LibGen em português, depois torrents marcados
-        // PT, conferidos pelo texto
+        // português primeiro: LibGen em português, os canais do Telegram,
+        // depois torrents marcados PT, conferidos pelo texto
         if !job.english_ok {
+            let mut telegram_tried = false;
             for attempt in 0..=LIBGEN_RETRIES {
-                match self.via_libgen(id, kind, true).await? {
-                    Outcome::Delivered => return Ok(()),
+                let outcome = self.via_libgen(id, kind, true).await?;
+                if matches!(outcome, Outcome::Delivered) {
+                    return Ok(());
+                }
+                // LibGen sem versão (ou ocupado): o Telegram antes de esperar
+                if !telegram_tried {
+                    telegram_tried = true;
+                    if self.via_telegram(id, kind).await? {
+                        return Ok(());
+                    }
+                }
+                match outcome {
                     Outcome::Busy if attempt < LIBGEN_RETRIES => {
                         let next = chrono::Local::now() + chrono::Duration::from_std(LIBGEN_RETRY).unwrap_or_default();
                         self.update(id, |j| {
@@ -420,7 +449,7 @@ impl Downloads {
             }
             self.update(id, |j| {
                 j.stage = Stage::SemPortugues;
-                j.detail = "Nada em português nos torrents".into();
+                j.detail = "Nada em português (LibGen, Telegram e torrents)".into();
             })
             .await;
             return Ok(());
@@ -558,10 +587,6 @@ impl Downloads {
             }
         }
         let comic = kind == Kind::Comic;
-        let fmt = |ext: &str| -> Option<i64> {
-            let order: &[&str] = if comic { &["cbz", "cbr", "pdf", "epub"] } else { &["epub", "azw3", "mobi", "fb2", "pdf", "djvu"] };
-            order.iter().position(|e| *e == ext).map(|i| 30 - i as i64 * 5)
-        };
         let mut ranked: Vec<(i64, crate::libgen::Entry)> = found
             .into_iter()
             // versão tentada que deu problema de verdade não volta; a que só
@@ -572,14 +597,9 @@ impl Downloads {
                 if only_pt && !pt {
                     return None;
                 }
-                let name = fold(&e.text);
-                let matches = titles.iter().map(|t| words(t)).filter(|w| !w.is_empty()).any(|want| {
-                    let hits = want.iter().filter(|w| name.contains(w.as_str())).count();
-                    hits as f64 >= (want.len() as f64 * 0.6).ceil()
-                });
                 let too_big = kind == Kind::Book && e.size > 300_000_000;
-                (matches && !too_big).then_some(())?;
-                Some((if pt { 100 } else { 0 } + fmt(&e.ext)?, e))
+                (names_title(&fold(&e.text), &titles) && !too_big).then_some(())?;
+                Some((if pt { 100 } else { 0 } + format_rank(&e.ext, comic)?, e))
             })
             .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0));
@@ -659,6 +679,100 @@ impl Downloads {
             }
         }
         Ok(if busy { Outcome::Busy } else { Outcome::Nothing })
+    }
+
+    /// Os canais aprovados do Telegram (são em português): as melhores
+    /// versões (até 3), conferidas como as outras.
+    async fn via_telegram(&self, id: &str, kind: Kind) -> Result<bool> {
+        let Some(tg) = &self.telegram else { return Ok(false) };
+        let job = self.job(id).await.context("pedido sumiu")?;
+        self.update(id, |j| {
+            j.stage = Stage::Procurando;
+            j.detail = "Procurando nos canais do Telegram".into();
+        })
+        .await;
+        let (titles, _) = Self::queries(&job);
+        // a busca do Telegram é por palavra: o título como está e sem acento
+        let mut queries: Vec<String> = titles.iter().flat_map(|t| [t.clone(), fold(t)]).collect();
+        queries.dedup();
+        let mut found: Vec<crate::telegram::Achado> = vec![];
+        for q in &queries {
+            match tg.buscar(q).await {
+                Ok(list) => {
+                    for a in list {
+                        if !found.iter().any(|f| f.chave == a.chave) {
+                            found.push(a);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::info!("leitura: Telegram ({q}): {e:#}");
+                    return Ok(false);
+                }
+            }
+        }
+        let comic = kind == Kind::Comic;
+        let author = job.author.as_deref().map(words).unwrap_or_default();
+        let mut ranked: Vec<(i64, crate::telegram::Achado)> = found
+            .into_iter()
+            .filter(|a| !job.tried.contains(&a.chave))
+            .filter_map(|a| {
+                // o nome do arquivo e a legenda juntos (um tem o título, o outro o autor)
+                let text = fold(&format!("{} {}", a.nome, a.texto));
+                let too_big = kind == Kind::Book && a.tamanho > 300_000_000;
+                (names_title(&text, &titles) && !too_big).then_some(())?;
+                let by_author = !author.is_empty() && author.iter().any(|w| text.contains(w.as_str()));
+                Some((format_rank(&a.ext, comic)? + if by_author { 10 } else { 0 }, a))
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, a) in ranked.into_iter().take(3) {
+            self.update(id, |j| {
+                j.stage = Stage::Baixando;
+                j.detail = format!("Baixando do Telegram ({}, {})", a.ext.to_uppercase(), a.canal);
+                j.progress = 0.0;
+            })
+            .await;
+            let name = match &job.author {
+                Some(au) => format!("{} ({au}).{}", job.title, a.ext),
+                None => format!("{}.{}", job.title, a.ext),
+            }
+            .replace('/', "-");
+            let file = self.tmp.join(&name);
+            let shown = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let watcher = {
+                let (shown, me, id) = (shown.clone(), self, id.to_string());
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let p = shown.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+                        me.update(&id, |j| j.progress = p).await;
+                    }
+                }
+            };
+            let fetch = tg.baixar(&a, &file, |done, total| {
+                if total > 0 {
+                    shown.store(done * 1000 / total, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            let res = tokio::select! {
+                r = fetch => r,
+                _ = watcher => unreachable!(),
+            };
+            let delivered = match res {
+                Ok(()) => self.deliver(id, &file, kind, true).await?,
+                Err(e) => {
+                    tracing::info!("leitura: Telegram {}: {e:#}", a.nome);
+                    false
+                }
+            };
+            let _ = tokio::fs::remove_file(&file).await;
+            if delivered {
+                return Ok(true);
+            }
+            self.update(id, |j| j.tried.push(a.chave.clone())).await;
+        }
+        Ok(false)
     }
 
     /// Busca no Prowlarr e tenta as melhores versões (até MAX_TORRENTS).

@@ -42,6 +42,7 @@ mod season;
 mod services;
 mod stream;
 mod subs;
+mod telegram;
 mod temas;
 mod uninstall;
 mod vitrine_livros;
@@ -78,12 +79,18 @@ async fn main() -> Result<()> {
     }
     let mut config = None;
     let mut command = None;
+    let mut rest: Vec<String> = vec![];
     while let Some(a) = args.next() {
         match a.as_str() {
             "--config" | "-c" => config = Some(PathBuf::from(args.next().context("--config precisa de um caminho")?)),
             "serve" | "plan" if command.is_none() => command = Some(a),
+            // `anubis telegram …`: login e consultas da fonte Telegram
+            "telegram" if command.is_none() => {
+                command = Some(a);
+                rest = args.by_ref().collect();
+            }
             "-h" | "--help" => {
-                println!("uso: anubis [--config ARQ] [serve|plan] · anubis verificar ARQ…");
+                println!("uso: anubis [--config ARQ] [serve|plan|telegram …] · anubis verificar ARQ…");
                 return Ok(());
             }
             other => bail!("argumento desconhecido: {other} (veja --help)"),
@@ -91,6 +98,10 @@ async fn main() -> Result<()> {
     }
     let config = config.or_else(|| std::env::var_os("ANUBIS_CONFIG").map(PathBuf::from)).unwrap_or_else(default_config);
     let mut cfg = config::Config::load(&config)?;
+    if command.as_deref() == Some("telegram") {
+        let tg = cfg.leitura.as_ref().and_then(|l| l.telegram.as_ref()).context("falta [leitura.telegram] na configuração")?;
+        return telegram::cli(tg, &cfg.state_dir(), &rest).await;
+    }
     let serving = command.as_deref().unwrap_or("serve") == "serve";
     let self_url = format!("http://{}", cfg.server.listen[0]);
     let streamer = match cfg.stream.as_mut() {
@@ -172,7 +183,9 @@ async fn serve(orch: Arc<Orchestrator>) -> Result<()> {
     let leitura = orch.cfg.leitura.as_ref().map(|l| {
         let ol = openlibrary::OpenLibrary::load(orch.cfg.state_dir())?;
         let bookshelf = l.bookshelf.as_ref().map(|b| leitura_dl::Bookshelf::new(&b.url, &b.api_key)).transpose()?;
-        let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, l.drive.clone(), &orch.cfg.state_dir())?;
+        // sem login, o Telegram só fica fora da cadeia (avisa no log)
+        let telegram = l.telegram.as_ref().map(|t| telegram::Telegram::new(t, &orch.cfg.state_dir())).transpose()?.map(Arc::new);
+        let downloads = leitura_dl::Downloads::load(orch.clone(), bookshelf, telegram, l.drive.clone(), &orch.cfg.state_dir())?;
         let vitrine = vitrine_livros::Vitrine::load(l.flaresolverr.clone(), orch.cfg.state_dir())?;
         let estudo = estudo::Estudo::load(l.areas.clone(), l.openalex_api_key.clone(), l.openalex_campos.clone(), orch.cfg.state_dir())?;
         let leitura = Arc::new(leitura::Leitura::new(drive::Drive::new(l.drive.clone()), kosync.clone(), ol, downloads.clone(), orch.clone(), vitrine, estudo));

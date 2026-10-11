@@ -11,7 +11,10 @@
 //!
 //! `anubis telegram canais` lista os canais e grupos da conta com quantos
 //! livros (EPUB/PDF) cada um tem, para escolher os aprovados;
-//! `anubis telegram buscar "título"` mostra o que a cadeia acharia.
+//! `anubis telegram procurar "termo"…` faz o mesmo com os canais públicos
+//! achados pelo nome (sem entrar neles); `anubis telegram buscar "título"`
+//! mostra o que a cadeia acharia. Um canal público aprovado pelo
+//! `@usuario` é consultado sem que a conta precise entrar nele.
 
 use crate::config::TelegramCfg;
 use anyhow::{Context, Result, bail};
@@ -167,6 +170,7 @@ pub struct Achado {
 #[derive(Clone)]
 struct Canal {
     nome: String,
+    usuario: Option<String>,
     peer: PeerRef,
 }
 
@@ -234,7 +238,22 @@ impl Telegram {
                 None => chave(a) == chave(&nome),
             });
             if aprovado {
-                canais.push(Canal { nome, peer: d.peer_ref() });
+                canais.push(Canal { nome, usuario: user, peer: d.peer_ref() });
+            }
+        }
+        // públicos aprovados pelo @usuario em que a conta não entrou
+        for a in &self.aprovados {
+            let Some(u) = a.strip_prefix('@') else { continue };
+            if canais.iter().any(|c| c.usuario.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(u))) {
+                continue;
+            }
+            match client.resolve_username(u).await {
+                Ok(Some(peer)) if !matches!(peer, Peer::User(_)) => match peer.to_ref().await {
+                    Ok(Some(r)) => canais.push(Canal { nome: titulo(&peer), usuario: Some(u.to_string()), peer: r }),
+                    _ => tracing::warn!("telegram: @{u} sem acesso"),
+                },
+                Ok(_) => tracing::warn!("telegram: @{u} não é canal"),
+                Err(e) => tracing::warn!("telegram: @{u}: {e}"),
             }
         }
         if canais.len() < self.aprovados.len() {
@@ -388,13 +407,47 @@ pub async fn cli(cfg: &TelegramCfg, state_dir: &Path, args: &[String]) -> Result
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }
+        Some("procurar") => {
+            anyhow::ensure!(args.len() > 1, "uso: anubis telegram procurar \"termo\"…");
+            let client = tg.conectar()?;
+            anyhow::ensure!(client.is_authorized().await?, "sem login: anubis telegram entrar +55…");
+            let mut vistos = std::collections::HashSet::new();
+            println!("epub\tpdf\tcanal\texemplos");
+            for termo in &args[1..] {
+                let tl::enums::contacts::Found::Found(achados) = client.invoke(&tl::functions::contacts::Search { broadcasts: false, bots: false, q: termo.clone(), limit: 50 }).await?;
+                for chat in achados.chats {
+                    let peer = Peer::from_raw(&client, chat);
+                    let Some(user) = peer.username().map(String::from) else { continue };
+                    if !vistos.insert(user.to_lowercase()) {
+                        continue;
+                    }
+                    let Ok(Some(r)) = peer.to_ref().await else { continue };
+                    let conta = |q: &'static str| {
+                        let mut it = client.search_messages(r).filter(tl::enums::MessagesFilter::InputMessagesFilterDocument).query(q);
+                        async move { it.total().await.unwrap_or(0) }
+                    };
+                    let (epub, pdf) = (conta("epub").await, conta("pdf").await);
+                    let mut exemplos = vec![];
+                    if epub + pdf > 0 {
+                        let mut it = client.search_messages(r).filter(tl::enums::MessagesFilter::InputMessagesFilterDocument).limit(4);
+                        while let Ok(Some(m)) = it.next().await {
+                            if let Some(Media::Document(d)) = m.media() {
+                                exemplos.push(d.name().unwrap_or_default().to_string());
+                            }
+                        }
+                    }
+                    println!("{epub}\t{pdf}\t{} @{user}\t{}", titulo(&peer), exemplos.join(" | "));
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+            }
+        }
         Some("buscar") => {
             let q = args.get(1).context("uso: anubis telegram buscar \"título\"")?;
             for a in tg.buscar(q).await? {
                 println!("{}\t{:.1} MB\t{}\t{}", a.canal, a.tamanho as f64 / 1e6, a.nome, a.texto.lines().next().unwrap_or(""));
             }
         }
-        _ => bail!("uso: anubis telegram entrar +55… | canais | buscar \"título\""),
+        _ => bail!("uso: anubis telegram entrar +55… | canais | procurar \"termo\"… | buscar \"título\""),
     }
     Ok(())
 }

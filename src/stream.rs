@@ -21,6 +21,7 @@ use crate::dubsync::DubSync;
 use crate::orchestrator::Orchestrator;
 use crate::search::Kind;
 use crate::services::TorrentSource;
+use crate::tosho::Tracks;
 use anyhow::{Context, Result, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{
@@ -383,6 +384,17 @@ impl Candidate {
 }
 
 /// O idioma original de um filme ou série do Radarr/Sonarr.
+/// Os indexadores de torrent ligados que não são brasileiros (`language` do
+/// Prowlarr), para as buscas pelo nome romaji de um anime.
+pub(crate) fn foreign_indexers(list: &Value) -> Vec<i64> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["enable"] == true && i["protocol"] == "torrent" && i["language"] != "pt-BR")
+        .filter_map(|i| i["id"].as_i64())
+        .collect()
+}
+
 pub(crate) fn original_language(item: &Value) -> Option<&str> {
     item["originalLanguage"]["name"].as_str().filter(|l| !l.is_empty() && *l != "Unknown")
 }
@@ -535,7 +547,7 @@ pub(crate) fn series_name(t: &str) -> String {
 /// formatos personalizados (dublagem, legenda) somam o mínimo do perfil?
 /// Devolve a versão no formato das do Sonarr (com `rejected`/`rejections`),
 /// ou None se não é deste episódio.
-fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value> {
+fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted, tracks: Option<&Tracks>) -> Option<Value> {
     let title = r["title"].as_str().unwrap_or_default();
     let pe = &parsed["parsedEpisodeInfo"];
     // da série: o Sonarr reconheceu, ou o nome (inglês ou português) está no título
@@ -553,7 +565,7 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted) -> Option<Value
     if !this {
         return None;
     }
-    let mut v = rate(r, &title, pe, parsed, parsed["series"].is_null(), profile, w.original.as_deref());
+    let mut v = rate(r, &title, pe, parsed, parsed["series"].is_null(), profile, w.original.as_deref(), tracks);
     v["fullSeason"] = json!(pack);
     v["seasonNumber"] = json!(w.season);
     v["episodeNumbers"] = json!(episodes);
@@ -572,14 +584,15 @@ fn judge_movie(r: &Value, parsed: &Value, profile: &Value, movie: &Value, names:
                 && pm["year"].as_i64().filter(|y| *y > 0).is_none_or(|y| Some(y) == movie["year"].as_i64())
         }
     };
-    same.then(|| rate(r, title, pm, parsed, parsed["movie"].is_null(), profile, original_language(movie)))
+    same.then(|| rate(r, title, pm, parsed, parsed["movie"].is_null(), profile, original_language(movie), None))
 }
 
 /// A nota de uma versão pelo perfil: a qualidade está entre as aceitas? Os
 /// formatos personalizados (dublagem, legenda) somam o mínimo? `info` é o
 /// `parsedEpisodeInfo` (Sonarr) ou o `parsedMovieInfo` (Radarr); `unknown`:
 /// o Radarr/Sonarr não reconheceu de que título é.
-fn rate(r: &Value, title: &str, info: &Value, parsed: &Value, unknown: bool, profile: &Value, original: Option<&str>) -> Value {
+#[allow(clippy::too_many_arguments)]
+fn rate(r: &Value, title: &str, info: &Value, parsed: &Value, unknown: bool, profile: &Value, original: Option<&str>, tracks: Option<&Tracks>) -> Value {
     // qualidades do perfil, na ordem (da pior para a melhor), e as aceitas
     let mut order: Vec<(String, bool)> = vec![];
     for it in profile["items"].as_array().into_iter().flatten() {
@@ -594,19 +607,37 @@ fn rate(r: &Value, title: &str, info: &Value, parsed: &Value, unknown: bool, pro
     }
     let quality = info["quality"]["quality"]["name"].as_str().unwrap_or("Unknown");
     let rank = order.iter().position(|(q, _)| q == quality);
-    let scores: HashMap<i64, i64> =
-        profile["formatItems"].as_array().into_iter().flatten().filter_map(|f| Some((f["format"].as_i64()?, f["score"].as_i64().unwrap_or(0)))).collect();
-    let mut score: i64 = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| scores.get(&c["id"].as_i64()?)).sum();
+    let items: Vec<&Value> = profile["formatItems"].as_array().into_iter().flatten().collect();
+    let id_of = |name: &str| items.iter().find(|f| f["name"] == name).and_then(|f| f["format"].as_i64());
+    // os formatos personalizados da versão (ids)
+    let mut formats: HashSet<i64> = parsed["customFormats"].as_array().into_iter().flatten().filter_map(|c| c["id"].as_i64()).collect();
+    let mut languages = info["languages"].clone();
     // título que o Radarr/Sonarr não reconheceu (nome em português, ou da
     // DHT): sem ele, não sabem o idioma original e não marcam o formato do
     // original — marca aqui, tomando o nome sem idioma como original
     if unknown {
         let langs: Vec<&str> = info["languages"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
         if langs.iter().all(|l| *l == "Unknown") || original.is_some_and(|o| langs.contains(&o)) {
-            let original = profile["formatItems"].as_array().into_iter().flatten().find(|f| f["name"] == crate::prefs::ORIGINAL_FORMAT);
-            score += original.and_then(|f| f["score"].as_i64()).unwrap_or(0);
+            formats.extend(id_of(crate::prefs::ORIGINAL_FORMAT));
         }
     }
+    // as faixas de verdade (Anime Tosho) valem mais que o nome: "MULTi" sem
+    // português não é dublado, e a legenda em português conta mesmo sem
+    // aparecer no nome
+    if let Some(t) = tracks {
+        let mut mark = |name: &str, on: bool| {
+            if let Some(id) = id_of(name) {
+                if on { formats.insert(id) } else { formats.remove(&id) };
+            }
+        };
+        mark(crate::prefs::FORMAT, t.portuguese_audio());
+        mark(crate::prefs::SUBS_FORMAT, t.portuguese_subs());
+        if let Some(o) = original {
+            mark(crate::prefs::ORIGINAL_FORMAT, t.has_audio(o));
+        }
+        languages = json!(t.arr_languages());
+    }
+    let score: i64 = items.iter().filter(|f| f["format"].as_i64().is_some_and(|id| formats.contains(&id))).filter_map(|f| f["score"].as_i64()).sum();
     let min = profile["minFormatScore"].as_i64().unwrap_or(0);
     let mut reasons: Vec<String> = vec![];
     if !rank.is_some_and(|i| order[i].1) {
@@ -623,7 +654,7 @@ fn rate(r: &Value, title: &str, info: &Value, parsed: &Value, unknown: bool, pro
         "guid": r["guid"], "title": title, "size": r["size"], "seeders": r["seeders"], "protocol": "torrent", "indexer": r["indexer"],
         "magnetUrl": magnet, "downloadUrl": download,
         "rejected": !reasons.is_empty(), "rejections": reasons,
-        "languages": info["languages"], "quality": info["quality"], "customFormatScore": score,
+        "languages": languages, "quality": info["quality"], "customFormatScore": score,
         // menor = melhor: pontuação dos formatos, depois a qualidade
         "releaseWeight": -(score * 100 + rank.unwrap_or(0) as i64),
     })
@@ -1837,7 +1868,16 @@ impl Orchestrator {
     /// episódios, qualidade, formatos), e a decisão segue o perfil da série —
     /// a busca do Sonarr fazia uma consulta por variação do nome (inclusive em
     /// espanhol e italiano), uma de cada vez, e não reconhecia o português.
+    /// Os nomes vão sem pontuação: "Frieren: Beyond Journey's End S01E05" não
+    /// acha nada, "frieren beyond journey s end s01e05" acha.
+    ///
+    /// Anime: também o nome romaji com o número do episódio ("sousou no
+    /// frieren 05" acha "[SubsPlease] Sousou no Frieren S2 - 05" e "[Erai-raws]
+    /// Sousou no Frieren 2nd Season - 05") e o absoluto, se for outro; e as
+    /// faixas de verdade de cada versão (Anime Tosho) decidem dublagem e
+    /// legenda em português.
     async fn prowlarr_episode(&self, p: &crate::services::Prowlarr, series: &Value, episode_id: i64, s: i64, e: i64, always_dht: bool) -> Result<Vec<Value>> {
+        use crate::avail::query;
         let sonarr = self.sonarr.as_ref().context("Sonarr não configurado")?;
         let name = series_name(series["title"].as_str().unwrap_or_default());
         let pt = match (&self.tmdb, series["tmdbId"].as_i64().filter(|id| *id > 0)) {
@@ -1845,26 +1885,37 @@ impl Orchestrator {
             _ => None,
         }
         .filter(|pt| norm(pt) != norm(&name));
+        let anime = series["seriesType"] == "anime";
+        let romaji = if anime { self.romaji(series).await.filter(|r| norm(r) != norm(&name)) } else { None };
+        let absolute = async || sonarr.episode(episode_id).await.ok().and_then(|x| x["absoluteEpisodeNumber"].as_i64());
+        let abs = if anime { absolute().await } else { None };
         use crate::services::ONE_PAGE;
         // sem filtro de categoria: os sites brasileiros não marcam as temporadas
         // como TV ("O Mentalista - 1ª Temporada" sumia) e até o Pirate Bay perde
         // episódios; o `judge` já confere série, temporada e episódio
-        let (q_ep, q_season) = (format!("{name} S{s:02}E{e:02}"), format!("{name} S{s:02}"));
-        let (pt_query, dht_name) = (pt.clone(), name.clone());
-        let (a, b, c) = tokio::join!(
-            p.search(&q_ep, &[], ONE_PAGE),
-            p.search(&q_season, &[], ONE_PAGE),
-            async {
-                match &pt {
-                    Some(pt) => p.search(pt, &[], ONE_PAGE).await,
-                    None => Ok(vec![]),
-                }
-            }
-        );
+        let (q_ep, q_season) = (format!("{} S{s:02}E{e:02}", query(&name, None)), format!("{} S{s:02}", query(&name, None)));
+        let mut queries = vec![(q_ep.clone(), vec![]), (q_season.clone(), vec![])];
+        queries.extend(pt.as_deref().map(|pt| (query(pt, None), vec![])));
+        if let Some(r) = &romaji {
+            // o romaji só nos sites de fora: os brasileiros não usam esse nome, e
+            // cada busca neles entra na fila do FlareSolverr (~2 s cada)
+            let foreign = match p.get_json("indexer").await {
+                Ok(list) => foreign_indexers(&list),
+                Err(_) => vec![],
+            };
+            queries.push((format!("{} {e:02}", query(r, None)), foreign.clone()));
+            queries.extend(abs.filter(|a| *a != e).map(|a| (format!("{} {a:02}", query(r, None)), foreign)));
+        }
+        let started = Instant::now();
+        let mut set = tokio::task::JoinSet::new();
+        for (q, ids) in queries {
+            let p = p.clone();
+            set.spawn(async move { p.search_in(&q, &[], ONE_PAGE, &ids).await });
+        }
         let mut found: Vec<Value> = vec![];
         let mut seen = HashSet::new();
-        for list in [a, b, c] {
-            for r in list.unwrap_or_else(|e| {
+        while let Some(list) = set.join_next().await {
+            for r in list.context("busca no Prowlarr")?.unwrap_or_else(|e| {
                 warn!("Prowlarr: {e:#}");
                 vec![]
             }) {
@@ -1873,23 +1924,43 @@ impl Orchestrator {
                 }
             }
         }
+        let searched = started.elapsed();
         let profile = sonarr.get_json(&format!("qualityprofile/{}", series["qualityProfileId"])).await?;
         let wanted = Wanted {
             series_id: series["id"].as_i64().unwrap_or(0),
-            names: [Some(name), pt].into_iter().flatten().map(|n| norm(&n)).collect(),
+            names: [Some(name.clone()), pt.clone(), romaji.clone()].into_iter().flatten().map(|n| norm(&n)).collect(),
             original: original_language(series).map(str::to_owned),
             episode_id,
             season: s,
             episode: e,
         };
-        let mut out = vec![];
-        for r in found {
-            let title = r["title"].as_str().unwrap_or_default();
-            let Ok(parsed) = sonarr.parse(&scene_title(title)).await else { continue };
-            if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
-                out.push(v);
+        // as deste episódio (sem nota ainda) e, em anime, as faixas de cada uma
+        // (o `parse` de várias ao mesmo tempo: com o romaji passam de 300)
+        let mut mine: Vec<(Value, Value)> = vec![];
+        for chunk in found.chunks(8) {
+            let mut set = tokio::task::JoinSet::new();
+            for r in chunk {
+                let (sonarr, r) = (sonarr.clone(), r.clone());
+                set.spawn(async move {
+                    let parsed = sonarr.parse(&scene_title(r["title"].as_str().unwrap_or_default())).await;
+                    (r, parsed)
+                });
+            }
+            while let Some(done) = set.join_next().await {
+                if let Ok((r, Ok(parsed))) = done
+                    && judge(&r, &parsed, &profile, &wanted, None).is_some()
+                {
+                    mine.push((r, parsed));
+                }
             }
         }
+        let judged = started.elapsed();
+        let tracks = if anime { self.tracks_of(mine.iter().map(|(r, _)| r)).await } else { HashMap::new() };
+        info!("{name} S{s:02}E{e:02}: {} versões deste episódio — buscas {searched:.1?}, nomes {:.1?}, faixas {:.1?}", mine.len(), judged - searched, started.elapsed() - judged);
+        let mut out: Vec<Value> = mine
+            .iter()
+            .filter_map(|(r, parsed)| judge(r, parsed, &profile, &wanted, crate::tosho::info_hash(r).and_then(|h| tracks.get(&h))))
+            .collect();
         // último caso: nenhuma versão aprovada nas fontes (ou as aprovadas não
         // acharam fontes: `always_dht`) → o catálogo da DHT (bitmagnet), com as
         // mesmas buscas e o mesmo julgamento
@@ -1898,8 +1969,12 @@ impl Orchestrator {
             // na DHT os nomes vêm como os arquivos: programas de variedade sem
             // temporada ("Running Man - 794 [260315]"), daí também o número
             // absoluto e o nome sozinho (o `judge` fica só com este episódio)
-            let abs = sonarr.episode(episode_id).await.ok().and_then(|x| x["absoluteEpisodeNumber"].as_i64());
-            for q in [Some(q_ep), Some(q_season), pt_query, abs.map(|a| format!("{dht_name} {a}")), Some(dht_name.clone())].into_iter().flatten() {
+            let abs = match abs {
+                Some(a) => Some(a),
+                None => absolute().await,
+            };
+            let dht_queries = [Some(q_ep), Some(q_season), pt.as_deref().map(|pt| query(pt, None)), abs.map(|a| format!("{} {a}", query(&name, None))), Some(query(&name, None))];
+            for q in dht_queries.into_iter().flatten() {
                 for r in self.bitmagnet_search(&q).await.unwrap_or_else(|e| {
                     warn!("bitmagnet: {e:#}");
                     vec![]
@@ -1909,13 +1984,41 @@ impl Orchestrator {
                     }
                     let title = r["title"].as_str().unwrap_or_default();
                     let Ok(parsed) = sonarr.parse(&scene_title(title)).await else { continue };
-                    if let Some(v) = judge(&r, &parsed, &profile, &wanted) {
+                    if let Some(v) = judge(&r, &parsed, &profile, &wanted, None) {
                         out.push(v);
                     }
                 }
             }
         }
         Ok(out)
+    }
+
+    /// O nome romaji de um anime ("Sousou no Frieren"): o do TMDB, ou o
+    /// primeiro nome alternativo do Sonarr que vale para todas as temporadas.
+    pub(crate) async fn romaji(&self, series: &Value) -> Option<String> {
+        if let (Some(t), Some(id)) = (&self.tmdb, series["tmdbId"].as_i64().filter(|id| *id > 0))
+            && let Ok(v) = t.get(&format!("tv/{id}/alternative_titles")).await
+            && let Some(r) = crate::avail::romaji_in(&v)
+        {
+            return Some(r);
+        }
+        series["alternateTitles"]
+            .as_array()?
+            .iter()
+            .filter(|a| a["sceneSeasonNumber"].as_i64().is_none_or(|n| n < 0))
+            .filter_map(|a| a["title"].as_str())
+            .find(|t| t.is_ascii())
+            .map(str::to_owned)
+    }
+
+    /// As faixas (Anime Tosho) das versões mais semeadas, até 6 s.
+    pub(crate) async fn tracks_of<'a>(&self, releases: impl Iterator<Item = &'a Value>) -> HashMap<String, Tracks> {
+        /// versões conferidas por busca (as mais semeadas)
+        const MAX: usize = 24;
+        let mut list: Vec<&Value> = releases.collect();
+        list.sort_by_key(|r| std::cmp::Reverse(r["seeders"].as_i64().unwrap_or(0)));
+        let hashes: Vec<String> = list.iter().filter_map(|r| crate::tosho::info_hash(r)).take(MAX).collect();
+        self.tosho.tracks(&hashes, Duration::from_secs(6)).await
     }
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar
@@ -2304,20 +2407,20 @@ mod tests {
             "customFormats": cfs,
         });
         // nome em português (o Sonarr não reconhece a série), dublado: aceito
-        let dub = judge(&r("A Lenda de Vox Machina S03E01-02-03 WEB-DL 1080p DUAL"), &parsed(Value::Null, 3, json!([1, 2, 3]), false, "WEBDL-1080p", json!([{ "id": 7 }])), &profile, &w).unwrap();
+        let dub = judge(&r("A Lenda de Vox Machina S03E01-02-03 WEB-DL 1080p DUAL"), &parsed(Value::Null, 3, json!([1, 2, 3]), false, "WEBDL-1080p", json!([{ "id": 7 }])), &profile, &w, None).unwrap();
         assert_eq!(dub["rejected"], false);
         // em inglês, sem dublagem: recusado pelos formatos (a página oferece o legendado)
-        let eng = judge(&r("The.Legend.of.Vox.Machina.S03E02.1080p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).unwrap();
+        let eng = judge(&r("The.Legend.of.Vox.Machina.S03E02.1080p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w, None).unwrap();
         assert!(eng["rejections"][0].as_str().unwrap().contains("Custom Formats"));
         // qualidade fora do perfil
-        let low = judge(&r("The.Legend.of.Vox.Machina.S03E02.720p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-720p", json!([{ "id": 7 }])), &profile, &w).unwrap();
+        let low = judge(&r("The.Legend.of.Vox.Machina.S03E02.720p.WEB"), &parsed(json!({ "id": 5 }), 3, json!([2]), false, "WEBDL-720p", json!([{ "id": 7 }])), &profile, &w, None).unwrap();
         assert!(low["rejections"][0].as_str().unwrap().starts_with("Qualidade"));
         // pacote da temporada serve; outro episódio, outra temporada ou outra série, não
-        assert!(judge(&r("The.Legend.of.Vox.Machina.S03.1080p"), &parsed(json!({ "id": 5 }), 3, json!([]), true, "WEBDL-1080p", json!([])), &profile, &w).is_some());
-        assert!(judge(&r("The.Legend.of.Vox.Machina.S03E05"), &parsed(json!({ "id": 5 }), 3, json!([5]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
-        assert!(judge(&r("The.Legend.of.Vox.Machina.S02E02"), &parsed(json!({ "id": 5 }), 2, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
-        assert!(judge(&r("Outra.Serie.S03E02"), &parsed(json!({ "id": 9 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
-        assert!(judge(&r("Outra Serie S03E02"), &parsed(Value::Null, 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w).is_none());
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S03.1080p"), &parsed(json!({ "id": 5 }), 3, json!([]), true, "WEBDL-1080p", json!([])), &profile, &w, None).is_some());
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S03E05"), &parsed(json!({ "id": 5 }), 3, json!([5]), false, "WEBDL-1080p", json!([])), &profile, &w, None).is_none());
+        assert!(judge(&r("The.Legend.of.Vox.Machina.S02E02"), &parsed(json!({ "id": 5 }), 2, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w, None).is_none());
+        assert!(judge(&r("Outra.Serie.S03E02"), &parsed(json!({ "id": 9 }), 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w, None).is_none());
+        assert!(judge(&r("Outra Serie S03E02"), &parsed(Value::Null, 3, json!([2]), false, "WEBDL-1080p", json!([])), &profile, &w, None).is_none());
         assert_eq!(series_name("Doctor Who (2005)"), "Doctor Who");
 
         // perfil sem dublagem: mínimo no idioma original (formato 9, por nome)
@@ -2330,16 +2433,56 @@ mod tests {
             p
         };
         // nome em português, legendado, sem idioma no nome: o Sonarr não marca o original, o Anubis marca
-        let br = judge(&r("A Lenda de Vox Machina S03E02 LEGENDADO"), &with_langs(Value::Null, &["Unknown"], json!([{ "id": 8 }])), &fallback, &w).unwrap();
+        let br = judge(&r("A Lenda de Vox Machina S03E02 LEGENDADO"), &with_langs(Value::Null, &["Unknown"], json!([{ "id": 8 }])), &fallback, &w, None).unwrap();
         assert_eq!((br["rejected"].as_bool(), br["customFormatScore"].as_i64()), (Some(false), Some(60)));
         // dublado em espanhol, com legenda em português: terceiro idioma, recusado
-        let es = judge(&r("A Lenda de Vox Machina S03E02 Latino LEGENDADO"), &with_langs(Value::Null, &["Spanish"], json!([{ "id": 8 }])), &fallback, &w).unwrap();
+        let es = judge(&r("A Lenda de Vox Machina S03E02 Latino LEGENDADO"), &with_langs(Value::Null, &["Spanish"], json!([{ "id": 8 }])), &fallback, &w, None).unwrap();
         assert_eq!(es["rejected"], true);
         // série reconhecida: vale só o que o Sonarr marcou
-        let fr = judge(&r("The.Legend.of.Vox.Machina.S03E02.FRENCH"), &with_langs(json!({ "id": 5 }), &["French"], json!([])), &fallback, &w).unwrap();
+        let fr = judge(&r("The.Legend.of.Vox.Machina.S03E02.FRENCH"), &with_langs(json!({ "id": 5 }), &["French"], json!([])), &fallback, &w, None).unwrap();
         assert_eq!(fr["rejected"], true);
-        let en = judge(&r("The.Legend.of.Vox.Machina.S03E02"), &with_langs(json!({ "id": 5 }), &["Unknown"], json!([{ "id": 9 }])), &fallback, &w).unwrap();
+        let en = judge(&r("The.Legend.of.Vox.Machina.S03E02"), &with_langs(json!({ "id": 5 }), &["Unknown"], json!([{ "id": 9 }])), &fallback, &w, None).unwrap();
         assert_eq!(en["rejected"], false);
+    }
+
+    #[test]
+    fn romaji_only_on_foreign_indexers() {
+        let list = json!([
+            { "id": 2, "name": "Nyaa.si", "language": "en-US", "enable": true, "protocol": "torrent" },
+            { "id": 3, "name": "Comando Torrents (BR)", "language": "pt-BR", "enable": true, "protocol": "torrent" },
+            { "id": 6, "name": "bitmagnet (DHT)", "language": "en-US", "enable": false, "protocol": "torrent" },
+            { "id": 11, "name": "NZB", "language": "en-US", "enable": true, "protocol": "usenet" },
+        ]);
+        assert_eq!(foreign_indexers(&list), [2]);
+    }
+
+    #[test]
+    fn real_tracks_decide_dub_and_subtitles() {
+        let profile = json!({
+            "minFormatScore": 100,
+            "items": [{ "quality": { "name": "WEBDL-1080p" }, "allowed": true }],
+            "formatItems": [
+                { "format": 1, "name": crate::prefs::FORMAT, "score": 100 },
+                { "format": 2, "name": crate::prefs::ORIGINAL_FORMAT, "score": 0 },
+                { "format": 3, "name": crate::prefs::SUBS_FORMAT, "score": 10 },
+            ],
+        });
+        let w = Wanted { series_id: 16, names: vec![norm("Sousou no Frieren")], original: Some("Japanese".into()), episode_id: 7, season: 2, episode: 5 };
+        let r = |t: &str| json!({ "title": t, "guid": t, "seeders": 9, "size": 1 });
+        // o Sonarr leu "MULTi" e "Multi-Subs": sem idioma, legenda PT pela regex
+        let parsed = json!({ "series": { "id": 16 }, "episodes": [{ "id": 7 }], "customFormats": [{ "id": 2 }, { "id": 3 }],
+            "parsedEpisodeInfo": { "seasonNumber": 2, "episodeNumbers": [5], "quality": { "quality": { "name": "WEBDL-1080p" } }, "languages": [{ "name": "Unknown" }] } });
+        let tracks = |audio: &[&str], subs: &[&str]| Tracks { audio: audio.iter().map(|s| s.to_string()).collect(), subs: subs.iter().map(|s| s.to_string()).collect() };
+        let title = "[ToonsHub] Frieren S02E05 1080p CR WEB-DL MULTi (Multi-Audio, Multi-Subs)";
+        // pelo nome: não é dublado (dublagem obrigatória recusa)
+        assert_eq!(judge(&r(title), &parsed, &profile, &w, None).unwrap()["rejected"], true);
+        // as faixas têm português: dublado, aprovado e na frente
+        let pt = judge(&r(title), &parsed, &profile, &w, Some(&tracks(&["Japanese", "Portuguese (BR)"], &["English", "Portuguese (BR)"]))).unwrap();
+        assert_eq!((pt["rejected"].as_bool(), pt["customFormatScore"].as_i64()), (Some(false), Some(110)));
+        assert!(candidates(vec![json!({ "protocol": "torrent", "seeders": 9, "languages": pt["languages"].clone() })])[0].portuguese());
+        // "Multi-Subs" sem legenda em português: a legenda não conta
+        let hi = judge(&r(title), &parsed, &profile, &w, Some(&tracks(&["Japanese", "English", "Hindi"], &["English", "Spanish"]))).unwrap();
+        assert_eq!((hi["rejected"].as_bool(), hi["customFormatScore"].as_i64()), (Some(true), Some(0)));
     }
 
     #[test]

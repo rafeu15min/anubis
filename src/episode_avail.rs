@@ -10,7 +10,7 @@
 //! em segundo plano e a página pergunta de novo. Fica em memória pelo tempo
 //! de validade do selo.
 
-use crate::avail::{Audio, Avail, arr_audio, br_audio, is_br, skipped};
+use crate::avail::{Audio, Avail, arr_audio, br_audio, is_br, query, skipped};
 use crate::orchestrator::Orchestrator;
 use crate::search::Kind;
 use crate::stream::{norm, original_language, scene_title, series_name};
@@ -87,12 +87,14 @@ impl Orchestrator {
             _ => None,
         }
         .filter(|pt| norm(pt) != norm(&name));
-        let names: Vec<String> = [Some(name.clone()), pt.clone()].into_iter().flatten().map(|n| norm(&n)).collect();
+        // anime: o nome romaji e os de cada temporada que falta ("Sousou no
+        // Frieren 2nd Season"), que é como os grupos de fora chamam
+        let romaji = if series["seriesType"] == "anime" { self.romaji(&series).await.filter(|r| norm(r) != norm(&name)) } else { None };
+        let names: Vec<String> = [Some(name.clone()), pt.clone(), romaji.clone()].into_iter().flatten().map(|n| norm(&n)).collect();
         let original = original_language(&series).map(str::to_owned);
         // como a checagem dos cartões: só os indexadores de torrent, sem o 1337x
-        let ids: Vec<i64> = p
-            .get_json("indexer")
-            .await?
+        let indexers = p.get_json("indexer").await?;
+        let ids: Vec<i64> = indexers
             .as_array()
             .into_iter()
             .flatten()
@@ -100,13 +102,27 @@ impl Orchestrator {
             .filter_map(|i| i["id"].as_i64())
             .collect();
         let seasons: BTreeSet<i64> = missing.iter().filter_map(|e| e["seasonNumber"].as_i64()).collect();
-        let mut queries: Vec<String> = seasons.iter().map(|s| format!("{name} S{s:02}")).collect();
-        queries.push(name.clone());
-        queries.extend(pt.clone());
+        let mut queries: Vec<String> = seasons.iter().map(|s| format!("{} S{s:02}", query(&name, None))).collect();
+        queries.push(query(&name, None));
+        queries.extend(pt.as_deref().map(|pt| query(pt, None)));
+        queries.dedup();
+        // os nomes romaji só nos sites de fora (os brasileiros não os usam)
+        let mut romaji_queries: Vec<String> = vec![];
+        if let Some(r) = &romaji {
+            romaji_queries.push(query(r, None));
+            for s in seasons.iter().filter(|s| **s > 1) {
+                let scene = series["alternateTitles"].as_array().into_iter().flatten().filter(|a| a["sceneSeasonNumber"].as_i64() == Some(*s));
+                romaji_queries.extend(scene.filter_map(|a| a["title"].as_str()).find(|t| t.is_ascii()).map(|t| query(t, None)));
+            }
+        }
+        romaji_queries.retain(|q| !queries.contains(q));
+        romaji_queries.dedup();
+        let foreign: Vec<i64> = crate::stream::foreign_indexers(&indexers).into_iter().filter(|i| ids.contains(i)).collect();
         let mut found: Vec<Value> = vec![];
-        for q in &queries {
+        let all = queries.iter().map(|q| (q, &ids)).chain(romaji_queries.iter().map(|q| (q, &foreign)));
+        for (q, ids) in all {
             // uma por vez: os sites com Cloudflare bloqueiam rajadas
-            found.extend(p.search_in(q, &[], crate::services::ONE_PAGE, &ids).await.with_context(|| format!("busca \"{q}\""))?);
+            found.extend(p.search_in(q, &[], crate::services::ONE_PAGE, ids).await.with_context(|| format!("busca \"{q}\""))?);
         }
         if self.cfg.bitmagnet.is_some() {
             found.extend(self.bitmagnet_search(&name).await.unwrap_or_default());

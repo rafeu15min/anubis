@@ -50,6 +50,8 @@ pub struct Orchestrator {
     pub(crate) indexers: crate::indexers::Cache,
     /// a varredura da DHT do bitmagnet (liga com tudo ocioso)
     pub(crate) dht: crate::bitmagnet::Dht,
+    /// faixas de áudio e legenda dos torrents de anime (Anime Tosho)
+    pub(crate) tosho: crate::tosho::Tosho,
     running: Mutex<()>,
     /// último ciclo executado (não os de só planejar), para GET /storage
     pub last: Mutex<Option<serde_json::Value>>,
@@ -95,6 +97,7 @@ impl Orchestrator {
             versions_cache: Mutex::new(HashMap::new()),
             indexers: crate::indexers::Cache::default(),
             dht: crate::bitmagnet::Dht::default(),
+            tosho: crate::tosho::Tosho::new()?,
             availability: crate::avail::Checker::load(cfg.stream.as_ref().map_or_else(|| std::path::PathBuf::from("/var/lib/anubis"), |s| s.state_dir.clone())),
             episode_avail: crate::episode_avail::Cache::default(),
             cfg,

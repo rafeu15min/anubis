@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const FORMAT: &str = "Anubis · Português (BR)";
+pub const FORMAT: &str = "Anubis · Português (BR)";
 const SCORE: i64 = 100;
 /// áudio no idioma original do título; vale menos que o dublado. O Radarr e
 /// o Sonarr tomam o nome sem idioma como original ("[SubsPlease] Frieren - 01")
@@ -26,9 +26,10 @@ const ORIGINAL_SCORE: i64 = 50;
 /// id do idioma "Original" nos formatos do Radarr e do Sonarr
 const ORIGINAL_LANGUAGE: i64 = -2;
 /// legenda em português pelo nome da versão; vale menos que o dublado
-const SUBS_FORMAT: &str = "Anubis · Legenda PT-BR";
+pub const SUBS_FORMAT: &str = "Anubis · Legenda PT-BR";
 const SUBS_SCORE: i64 = 10;
-const SUBS_REGEX: &str = r"\b(legendad[oa]s?|leg|multi[ ._-]?subs?|pt[ ._-]?br[ ._-]?subs?|subs?[ ._-]?pt[ ._-]?br)\b";
+/// "Multiple Subtitle" e "[POR-BR]": a lista de legendas dos grupos de anime
+const SUBS_REGEX: &str = r"\b(legendad[oa]s?|leg|multi[ ._-]?subs?|multiple[ ._-]?subtitles?|por[ ._-]?br|pt[ ._-]?br[ ._-]?subs?|subs?[ ._-]?pt[ ._-]?br)\b";
 /// Sonarr: perfil de uma série (ou anime) sem versão dublada em nenhuma
 /// fonte, quando a pessoa aceita o legendado: baixa legendado e troca pelo
 /// dublado se ele surgir
@@ -228,13 +229,21 @@ impl Orchestrator {
         Ok(all.as_array().and_then(|a| a.iter().find(|p| p["name"] == name).cloned()))
     }
 
-    /// Id de um formato personalizado do Anubis, criando na primeira vez.
+    /// Id de um formato personalizado do Anubis, criando na primeira vez; o
+    /// que já existe é regravado se a regra mudou (a regex da legenda).
     async fn format_id(arr: &Arr, name: &str, spec: Value) -> Result<i64> {
         let formats = arr.get_json("customformat").await?;
-        if let Some(id) = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).and_then(|f| f["id"].as_i64()) {
+        let body = json!({ "name": name, "includeCustomFormatWhenRenaming": false, "specifications": [spec] });
+        if let Some(f) = formats.as_array().and_then(|a| a.iter().find(|f| f["name"] == name)) {
+            let id = f["id"].as_i64().context("formato sem id")?;
+            let value = |s: &Value| s["fields"].as_array().and_then(|a| a.iter().find(|x| x["name"] == "value")).map(|x| x["value"].clone());
+            if value(&f["specifications"][0]) != value(&spec) {
+                let mut body = body;
+                body["id"] = json!(id);
+                arr.send_json(Method::PUT, &format!("customformat/{id}"), &body).await?;
+            }
             return Ok(id);
         }
-        let body = json!({ "name": name, "includeCustomFormatWhenRenaming": false, "specifications": [spec] });
         arr.send_json(Method::POST, "customformat", &body).await?["id"].as_i64().context("formato sem id")
     }
 
@@ -458,6 +467,22 @@ mod tests {
         let before = p.clone();
         assert!(apply_quality(&mut p, &bad(&["Bluray-1080p", "Remux-1080p"], "Bluray-1080p")).is_err());
         assert_eq!(p, before);
+    }
+
+    #[test]
+    fn subtitle_names_of_anime_groups() {
+        let re = regex::RegexBuilder::new(SUBS_REGEX).case_insensitive(true).build().unwrap();
+        for t in [
+            "[Erai-raws] Sousou no Frieren 2nd Season - 05 [1080p CR WEB-DL AVC AAC][MultiSub][42940134]",
+            "[ToonsHub] Frieren Beyond Journeys End S02E05 1080p BILI WEB-DL AAC2.0 H.265 (Sousou no Frieren, Multi-Subs)",
+            "[Erai-raws] Kimetsu no Yaiba - 01 [1080p][Multiple Subtitle] [ENG][POR-BR][SPA-LA]",
+            "Frieren S02E01 LEGENDADO",
+        ] {
+            assert!(re.is_match(t), "{t}");
+        }
+        for t in ["[SubsPlease] Sousou no Frieren S2 - 05 (1080p) [6AAEC79A].mkv", "Pecadores.2025.1080p.WEB-DL.DUAL.5.1 (brazilian, eng)"] {
+            assert!(!re.is_match(t), "{t}");
+        }
     }
 
     #[test]

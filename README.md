@@ -66,6 +66,39 @@ que o Sonarr não reconhecia, passa a ser achado. Na importação, se o Sonarr
 não reconhece o nome em 30 s, o Anubis faz a importação manual dizendo a
 série. Sem `[prowlarr]`, a busca é a do Sonarr.
 
+**Animes: nomes, legendas e dublagem** (`src/tosho.rs`). Os nomes vão às
+buscas sem pontuação, em toda série: "Frieren: Beyond Journey's End S02E05"
+não achava nada nos indexadores, "frieren beyond journey s end s02e05" acha
+57 versões. Num anime (série com o gênero Anime), a busca do "Assistir" usa
+também o nome romaji (o do TMDB, tipo "Romaji"; senão, o nome alternativo do
+Sonarr) com o número do episódio, e o absoluto quando é outro — é como os
+grupos publicam: "[SubsPlease] Sousou no Frieren S2 - 05", "[Erai-raws]
+Sousou no Frieren 2nd Season - 05". A lista de episódios busca o romaji e o
+nome de cada temporada que falta ("Sousou no Frieren 2nd Season"), e os
+cartões da vitrine buscam o romaji no lugar do inglês. As buscas pelo romaji
+vão só aos indexadores que não são brasileiros (o `language` do Prowlarr): os
+sites brasileiros não usam esse nome, e o Prowlarr enfileira as consultas a
+cada site (~2 s cada, mais com o FlareSolverr). O "Assistir" registra no log
+quanto levou cada etapa (buscas, nomes, faixas).
+
+O nome da versão não diz ao certo o que ela tem: "MULTi" ou "Multi-Audio"
+pode vir sem português (japonês, inglês, hindi, tâmil…), e "Dual Audio" pode
+trazer legenda em português sem dizer. O Anime Tosho publica o MediaInfo dos
+torrents de anime (Nyaa, nekoBT, AniDex); o Anubis consulta pelo hash
+(`feed.animetosho.net/json?show=torrent&btih=`) as 24 versões mais semeadas
+de cada busca, por até 6 s, e as faixas de verdade decidem: áudio em
+português conta como dublado (passa até na dublagem obrigatória e vem
+primeiro), legenda em português soma o formato "Legenda PT-BR", e sem ela o
+formato sai mesmo que o nome diga "Multi-Subs"; sem áudio no idioma original,
+o formato do original também sai. Nos cartões (originais em japonês ou
+chinês), uma dublagem em português achada assim marca o título como dublado.
+Torrent que o Tosho não tem continua julgado pelo nome. As respostas ficam em
+memória (sem faixas: pergunta de novo em 6 h).
+
+A regex do formato "Anubis · Legenda PT-BR" também reconhece "Multiple
+Subtitle" e "[POR-BR]" (a lista de legendas dos grupos de anime) e é
+regravada no Radarr/Sonarr quando muda.
+
 **Não quero ver** (no cartão de um título da vitrine): ele sai de todas as
 fileiras da vitrine e vira sinal contra no Para você — o que o TMDB recomenda
 a partir dele desce, e os gêneros dele pesam menos (cada um vale −2; um
@@ -343,6 +376,7 @@ src/external.rs      histórico de fora: CSV da Netflix e lista do AniList (Crun
 src/live.rs          central de estado (qBittorrent, Radarr/Sonarr, webhooks)
 src/mux.rs           juntar dublagem (sincronia pelo áudio, ffmpeg, import manual)
 src/autodub.rs       dublagem automática da biblioteca sem português
+src/tosho.rs         faixas de áudio e legenda de torrents de anime (Anime Tosho)
 src/api.rs           rotas HTTP
 web/index.html       página de busca (embutida no binário)
 web/player.html      player

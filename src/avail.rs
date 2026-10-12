@@ -251,9 +251,20 @@ fn title_matches(names: &[String], year: Option<i64>, release: &str) -> bool {
 /// brasileiros não acha "Bob Esponja: O Incrível Resgate 2024", mas acha
 /// "Bob Esponja O Incrivel Resgate". O ano só vai no nome original (os sites
 /// de fora aceitam); o filtro do ano vale para os resultados de todos.
-fn query(name: &str, year: Option<i64>) -> String {
+pub(crate) fn query(name: &str, year: Option<i64>) -> String {
     let q = words(name).join(" ");
     year.map_or(q.clone(), |y| format!("{q} {y}"))
+}
+
+/// O nome romaji nos nomes alternativos do TMDB (`results` em séries,
+/// `titles` em filmes): "Sousou no Frieren".
+pub(crate) fn romaji_in(v: &Value) -> Option<String> {
+    let list = v["results"].as_array().or(v["titles"].as_array())?;
+    list.iter()
+        .filter(|t| t["type"].as_str().is_some_and(|k| k.eq_ignore_ascii_case("romaji")))
+        .filter_map(|t| t["title"].as_str())
+        .find(|t| latin(t))
+        .map(str::to_owned)
 }
 
 /// Nome em alfabeto latino (dá para buscar)? "君の名は。" não; "Amélie" sim.
@@ -339,6 +350,17 @@ impl Orchestrator {
                 names.push(en.to_owned());
             }
         }
+        // anime: o nome romaji, que é como os grupos de fora chamam
+        // ("Sousou no Frieren", não "Frieren and the Journey…")
+        let anime = matches!(w.original_language.as_deref(), Some("ja" | "zh"));
+        let mut romaji = None;
+        if w.original_language.as_deref() == Some("ja")
+            && let Some(t) = &self.tmdb
+        {
+            let path = if w.kind == Kind::Movie { format!("movie/{}/alternative_titles", w.tmdb) } else { format!("tv/{}/alternative_titles", w.tmdb) };
+            romaji = t.get(&path).await.ok().and_then(|v| romaji_in(&v));
+            names.extend(romaji.clone());
+        }
         let mut seen = HashSet::new();
         names.retain(|n| seen.insert(words(n)));
         let cats: &[u32] = if w.kind == Kind::Movie { &[2000] } else { &[5000, 5070] };
@@ -358,7 +380,7 @@ impl Orchestrator {
         // o primeiro nome (português) sem ano; o segundo (ou o mesmo, se só há
         // um) com o ano, em filme
         let Some(first) = names.first() else { return Avail::Unknown };
-        let second = names.get(1).unwrap_or(first);
+        let second = romaji.as_ref().filter(|r| words(r) != words(first)).or(names.get(1)).unwrap_or(first);
         let mut queries = vec![query(first, None), query(second, w.year.filter(|_| w.kind == Kind::Movie))];
         queries.dedup();
         let mut found: Vec<Value> = vec![];
@@ -387,7 +409,7 @@ impl Orchestrator {
         matched.sort_by_key(|r| !is_br(r));
         let arr = if w.kind == Kind::Movie { self.radarr.as_ref() } else { self.sonarr.as_ref() };
         let (mut original_found, mut parsed) = (false, 0);
-        for r in matched {
+        for &r in &matched {
             let title = r["title"].as_str().unwrap_or_default();
             let audio = if is_br(r) {
                 br_audio(title)
@@ -403,6 +425,14 @@ impl Orchestrator {
                 Audio::Portuguese => return Avail::Dubbed,
                 Audio::Original => original_found = true,
                 Audio::Other => {}
+            }
+        }
+        // anime: a dublagem em português que o nome não diz ("Multi-Audio",
+        // "Dual Audio"), pelas faixas de verdade das versões de fora
+        if anime {
+            let foreign = matched.iter().copied().filter(|r| !is_br(r));
+            if self.tracks_of(foreign).await.values().any(|t| t.portuguese_audio()) {
+                return Avail::Dubbed;
             }
         }
         if original_found {
@@ -489,6 +519,14 @@ mod tests {
         assert_eq!(query("Bob Esponja: O Incrível Resgate", None), "bob esponja o incrivel resgate");
         assert_eq!(query("Saving Bikini Bottom: The Sandy Cheeks Movie", Some(2024)), "saving bikini bottom the sandy cheeks movie 2024");
         assert_eq!(language_name("ja"), Some("Japanese"));
+        let alt = json!({ "results": [
+            { "iso_3166_1": "JP", "title": "そうそうのフリーレン", "type": "Kana" },
+            { "iso_3166_1": "JP", "title": "Sōsō no Furīren", "type": "Hepburn Romanization" },
+            { "iso_3166_1": "JP", "title": "Sousou no Frieren", "type": "Romaji" } ] });
+        assert_eq!(romaji_in(&alt).as_deref(), Some("Sousou no Frieren"));
+        assert_eq!(romaji_in(&json!({ "titles": [] })), None);
+        // o nome romaji acha as versões dos grupos de anime
+        assert!(title_matches(&["Sousou no Frieren".to_owned()], None, "[SubsPlease] Sousou no Frieren S2 - 05 (1080p) [6AAEC79A].mkv"));
     }
 
     #[test]

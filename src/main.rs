@@ -44,6 +44,7 @@ mod stream;
 mod subs;
 mod telegram;
 mod temas;
+mod tosho;
 mod uninstall;
 mod vitrine_livros;
 

@@ -36,6 +36,7 @@ async fn send<T: DeserializeOwned>(req: RequestBuilder, what: &str) -> Result<T>
 // ---------------------------------------------------------------- Sonarr/Radarr
 
 /// Sonarr e Radarr falam o mesmo "dialeto" (API v3, chave no cabeçalho).
+#[derive(Clone)]
 pub struct Arr {
     name: &'static str,
     base: String,
@@ -320,6 +321,7 @@ impl Bazarr {
 pub const ONE_PAGE: u32 = 20;
 
 /// Prowlarr: busca em todos os indexadores de uma vez.
+#[derive(Clone)]
 pub struct Prowlarr {
     base: String,
     key: String,

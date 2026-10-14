@@ -1,11 +1,15 @@
 <script setup>
 // Preferências: áudio, qualidade e legendas (Radarr/Sonarr/Bazarr, pela API
-// /prefs), "gostei", ocultos e o histórico de outros serviços.
+// /prefs), "gostei", ocultos, os pedidos de leitura e o histórico de outros serviços.
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
 import Queue from '../components/Queue.vue';
-import { api, sleep } from '../lib/util.js';
+import { api, sleep, pct } from '../lib/util.js';
+import { L, loadJobs, busy } from '../lib/leitura.js';
 import crSource from '../lib/crunchyroll.js?raw';
+
+// volta para onde veio (Vídeos ou Leitura); aberta direto, vai à busca de vídeos
+const backTo = history.state?.back || '/';
 
 const RULES = {
   required: ['Obrigatório (dublado)', 'Só aceita versões em português do Brasil. O que não tiver versão dublada fica esperando.'],
@@ -145,12 +149,48 @@ async function loadHidden() { try { hidden.value = (await api('/hidden')).slice(
 async function unlike(h) { removing.value['l' + h.kind + h.id] = true; await fetch(`/liked/${h.kind}/${h.id}`, { method: 'DELETE' }); loadLiked(); }
 async function unhide(h) { removing.value['h' + h.kind + h.id] = true; await fetch(`/hidden/${h.kind}/${h.id}`, { method: 'DELETE' }); loadHidden(); }
 
-onMounted(() => { load(); loadHistory(); loadLiked(); loadHidden(); });
+// ---- pedidos de leitura: o registro (src/leitura_dl.rs). Andamento a cada 3 s
+// enquanto algum procura ou baixa
+const JOB_LABEL = { procurando: 'procurando', baixando: 'baixando', conferindo: 'conferindo', enviando_ao_drive: 'enviando ao Drive', no_drive: 'no Drive', sem_portugues: 'sem português', sem_fonte: 'sem fonte', falhou: 'falhou' };
+const RETRYABLE = ['sem_portugues', 'sem_fonte', 'falhou'];
+const DONE = [...RETRYABLE, 'no_drive'];
+const jobsLoaded = ref(false), jobBusy = ref({});
+const jobDate = (t) => new Date(t * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+let jobTimer;
+async function pollJobs() {
+  clearTimeout(jobTimer);
+  await loadJobs();
+  jobsLoaded.value = true;
+  if (busy()) jobTimer = setTimeout(pollJobs, 3000);
+}
+async function jobAction(j, path, method) {
+  jobBusy.value[j.id] = true;
+  try { await api(`/leitura/pedidos/${encodeURIComponent(j.id)}${path}`, { method }); }
+  catch (e) { alert(e.message); }
+  finally { delete jobBusy.value[j.id]; pollJobs(); }
+}
+const retryJob = (j) => jobAction(j, '/tentar', 'POST');
+const englishJob = (j) => jobAction(j, '/ingles', 'POST');
+const removeJob = (j) => jobAction(j, '', 'DELETE');
+const delivered = computed(() => L.jobs.filter((j) => j.stage === 'no_drive').length);
+const clearing = ref(false);
+async function clearDelivered() {
+  clearing.value = true;
+  try { await api('/leitura/pedidos', { method: 'DELETE' }); } catch (e) { alert(e.message); }
+  finally { clearing.value = false; pollJobs(); }
+}
+onBeforeUnmount(() => clearTimeout(jobTimer));
+
+onMounted(() => {
+  load(); loadHistory(); loadLiked(); loadHidden(); pollJobs();
+  // vindo do aviso da leitura (/preferencias#pedidos): rola até a seção
+  if (location.hash === '#pedidos') setTimeout(() => document.getElementById('pedidos')?.scrollIntoView({ block: 'start' }), 300);
+});
 </script>
 
 <template>
   <div class="prefs">
-    <header class="pbar"><div class="bar"><RouterLink to="/" title="Voltar à busca" aria-label="Voltar à busca"><i class="i i-back"></i></RouterLink><h1>Preferências</h1></div></header>
+    <header class="pbar"><div class="bar"><RouterLink :to="backTo" title="Voltar" aria-label="Voltar"><i class="i i-back"></i></RouterLink><h1>Preferências</h1></div></header>
     <main>
       <section>
         <h2>Idioma do áudio</h2>
@@ -233,6 +273,33 @@ onMounted(() => { load(); loadHistory(); loadLiked(); loadHidden(); });
           <li v-for="h in hidden || []" :key="h.kind + h.id">
             <span>{{ h.title }}<small>{{ kindName(h.kind) }} · {{ h.at }}</small></span>
             <button type="button" :disabled="removing['h' + h.kind + h.id]" @click="unhide(h)">Mostrar</button>
+          </li>
+        </ul>
+      </section>
+
+      <section id="pedidos">
+        <div class="shead">
+          <h2>Pedidos de leitura</h2>
+          <button v-if="delivered" type="button" class="ic" :disabled="clearing" :title="`Tirar da lista os ${delivered} que já estão no Drive`" :aria-label="`Tirar da lista os ${delivered} que já estão no Drive`" @click="clearDelivered"><i class="i i-broom"></i></button>
+        </div>
+        <p class="help">Os livros pedidos na Leitura e o que aconteceu com cada um. Tirar um pedido da lista não apaga o livro do Drive.</p>
+        <ul class="items jobs">
+          <li v-if="!jobsLoaded" class="empty">Carregando…</li>
+          <li v-else-if="!L.jobs.length" class="empty">Nenhum pedido.</li>
+          <li v-for="j in L.jobs" :key="j.id">
+            <span>
+              {{ j.title }}
+              <small>
+                <b class="jst" :class="{ ok: j.stage === 'no_drive', bad: j.stage === 'sem_fonte' || j.stage === 'falhou', warn: j.stage === 'sem_portugues' }">{{ JOB_LABEL[j.stage] || j.stage }}<template v-if="j.stage === 'baixando'"> {{ pct(j.progress) }}</template></b>
+                · {{ j.folder }} · {{ jobDate(j.at) }}
+              </small>
+              <small class="jdetail">{{ j.detail }}</small>
+            </span>
+            <span class="jacts">
+              <button v-if="j.stage === 'sem_portugues'" type="button" class="ic" :disabled="jobBusy[j.id]" title="Não há em português: baixar a versão em inglês" aria-label="Baixar em inglês" @click="englishJob(j)"><i class="i i-download"></i></button>
+              <button v-if="RETRYABLE.includes(j.stage)" type="button" class="ic" :disabled="jobBusy[j.id]" title="Tentar de novo (procura do zero)" aria-label="Tentar de novo" @click="retryJob(j)"><i class="i i-retry"></i></button>
+              <button v-if="DONE.includes(j.stage)" type="button" class="ic" :disabled="jobBusy[j.id]" title="Tirar da lista (o livro, se veio, fica no Drive)" aria-label="Tirar da lista" @click="removeJob(j)"><i class="i i-trash"></i></button>
+            </span>
           </li>
         </ul>
       </section>
@@ -323,6 +390,14 @@ onMounted(() => { load(); loadHistory(); loadLiked(); loadHidden(); });
 .prefs .src { font-size: 11px; padding: 0 6px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .prefs .src.jf { border-color: color-mix(in srgb, var(--info) 50%, transparent); color: var(--info); }
 .prefs .empty { color: var(--muted); font-size: 13px; margin: 0; }
+/* pedidos de leitura */
+.prefs #pedidos { scroll-margin-top: 80px; }
+.prefs .shead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.prefs .shead h2 { margin-bottom: 0; }
+.prefs ul.jobs .jst { font-weight: 600; color: var(--info); }
+.prefs ul.jobs .jst.ok { color: var(--ok); } .prefs ul.jobs .jst.bad { color: var(--err); } .prefs ul.jobs .jst.warn { color: var(--accent); }
+.prefs ul.jobs .jdetail { overflow-wrap: anywhere; }
+.prefs .jacts { display: flex; gap: 4px; }
 .prefs .svc { padding: 12px 0; border-top: 1px solid var(--line); }
 .prefs .svc:first-of-type { border-top: 0; }
 .prefs .svc .lbl { font-weight: 600; }

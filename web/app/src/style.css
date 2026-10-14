@@ -18,14 +18,14 @@
 @media (prefers-reduced-motion: reduce) { :root { --troca: 0s; } }
 
 /* ícones: Nerd Font reduzida aos usados (web/icones.py) */
-@font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=5') format('woff2'); font-display: block; }
+@font-face { font-family: 'Anubis Icones'; src: url('/icones.woff2?v=6') format('woff2'); font-display: block; }
 .i { display: inline-block; font-family: 'Anubis Icones'; font-style: normal; font-weight: normal; line-height: 1; }
 .i-play::before { content: "\f04b"; } .i-x::before { content: "\f00d"; } .i-gear::before { content: "\f013"; } .i-check::before { content: "\f00c"; }
 .i-left::before { content: "\f053"; } .i-right::before { content: "\f054"; }
 .i-like::before { content: "\f164"; } .i-dislike::before { content: "\f165"; } .i-trash::before { content: "\f1f8"; }
 .i-download::before { content: "\f019"; } .i-book::before { content: "\f02d"; } .i-film::before { content: "\f008"; } .i-bell::before { content: "\f0f3"; } .i-microphone::before { content: "\f130"; }
 .i-cloud::before { content: "\f0c2"; } .i-back::before { content: "\f060"; } .i-arrow-up::before { content: "\f062"; } .i-arrow-down::before { content: "\f063"; }
-.i-plus::before { content: "\f067"; } .i-goal::before { content: "\f140"; } .i-upload::before { content: "\f093"; } .i-heart::before { content: "\f004"; }
+.i-retry::before { content: "\f01e"; } .i-broom::before { content: "\ede4"; } .i-plus::before { content: "\f067"; } .i-goal::before { content: "\f140"; } .i-upload::before { content: "\f093"; } .i-heart::before { content: "\f004"; }
 .i-s1::before { content: "\f0a9e"; } .i-s2::before { content: "\f0a9f"; } .i-s3::before { content: "\f0aa0"; } .i-s4::before { content: "\f0aa1"; }
 .i-s5::before { content: "\f0aa2"; } .i-s6::before { content: "\f0aa3"; } .i-s7::before { content: "\f0aa4"; } .i-s8::before { content: "\f0aa5"; }
 
@@ -40,6 +40,8 @@ input[type=search] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 1
 input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .gear { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; border-radius: 10px; color: var(--muted); font-size: 22px; text-decoration: none; }
 .gear:hover { color: var(--accent); background: var(--panel); }
+.gear { position: relative; }
+.gear .dot { position: absolute; top: 9px; right: 9px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tabs button { min-height: 40px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; transition: background-color var(--troca), border-color var(--troca), color .2s; }
 .tabs button:hover { color: var(--text); }

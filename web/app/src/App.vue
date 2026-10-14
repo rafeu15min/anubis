@@ -7,13 +7,21 @@ import { useRoute, useRouter } from 'vue-router';
 import Marca from './components/Marca.vue';
 import { sections, pickTab } from './lib/sections.js';
 import { prefetch as prefetchVideos, setNavigate } from './lib/videos.js';
-import { prefetch as prefetchLeitura } from './lib/leitura.js';
+import { prefetch as prefetchLeitura, L } from './lib/leitura.js';
 
 const route = useRoute();
 const router = useRouter();
 const section = computed(() => route.meta.section);
 setNavigate((path) => router.push(path));
 const S = computed(() => sections[section.value]);
+
+// pedido de leitura que precisa de você (sem português, sem fonte, falhou):
+// ponto na engrenagem, que leva ao registro em Preferências
+const attention = computed(() => L.jobs.filter((j) => ['sem_portugues', 'sem_fonte', 'falhou'].includes(j.stage)).length);
+const gearTo = computed(() => (section.value === 'leitura' ? '/preferencias#pedidos' : '/preferencias'));
+const gearTitle = computed(() => (section.value === 'leitura' && attention.value
+  ? `Preferências: ${attention.value} pedido(s) de leitura precisam de você`
+  : 'Preferências'));
 
 function toggle() {
   router.push(section.value === 'leitura' ? '/' : '/leitura');
@@ -37,7 +45,7 @@ onMounted(() => {
       </Transition>
       <input v-model.trim="S.query" type="search" :placeholder="S.placeholder" autocomplete="off" :aria-label="S.placeholder">
       <Transition name="cabec">
-        <RouterLink v-if="section === 'video'" class="gear" to="/preferencias" title="Preferências" aria-label="Preferências"><i class="i i-gear"></i></RouterLink>
+        <RouterLink class="gear" :to="gearTo" :title="gearTitle" :aria-label="gearTitle"><i class="i i-gear"></i><span v-if="section === 'leitura' && attention" class="dot" aria-hidden="true"></span></RouterLink>
       </Transition>
     </div>
   </header>

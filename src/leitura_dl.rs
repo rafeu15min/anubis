@@ -7,6 +7,8 @@
 //! conferidas pelo idioma do texto. Sem
 //! nenhuma, para em "sem versão em português" e só baixa em inglês com o
 //! clique (`POST /leitura/pedidos/{id}/ingles`): LibGen → Bookshelf → torrent.
+//! Pedido terminado sem o livro pode ser tentado de novo (`retry`); terminado,
+//! sai do registro com `remove` (os da Drive todos de uma vez: `clear_delivered`).
 //!
 //! Cada arquivo passa pelo validador (`quality`) antes de ir para o Drive;
 //! versão ruim é descartada e a próxima é tentada. O torrent continua
@@ -72,6 +74,21 @@ impl Stage {
     fn done(self) -> bool {
         matches!(self, Stage::NoDrive | Stage::SemPortugues | Stage::SemFonte | Stage::Falhou)
     }
+
+    /// Terminou sem o livro: dá para tentar de novo (um que já está no Drive não).
+    fn retryable(self) -> bool {
+        matches!(self, Stage::SemPortugues | Stage::SemFonte | Stage::Falhou)
+    }
+}
+
+/// Por que uma ação num pedido não foi feita.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    NotFound,
+    /// ainda procurando ou baixando: excluir agora deixaria o download sem dono
+    Busy,
+    /// já está no Drive: tentar de novo baixaria uma segunda cópia
+    Delivered,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +377,58 @@ impl Downloads {
             .await?;
         self.clone().spawn(id.to_string());
         Some(job)
+    }
+
+    /// Terminou sem o livro (sem fonte, falhou, sem português): procura do zero,
+    /// inclusive as versões já descartadas. Quem aceitou inglês continua aceitando.
+    pub async fn retry(self: &Arc<Self>, id: &str) -> Result<Job, Refused> {
+        let job = {
+            let mut jobs = self.jobs.lock().await;
+            let j = jobs.get_mut(id).ok_or(Refused::NotFound)?;
+            if !j.stage.done() {
+                return Err(Refused::Busy);
+            }
+            if !j.stage.retryable() {
+                return Err(Refused::Delivered);
+            }
+            j.stage = Stage::Procurando;
+            j.detail = "Procurando de novo".into();
+            j.progress = 0.0;
+            j.tried.clear();
+            j.at = chrono::Utc::now().timestamp();
+            j.clone()
+        };
+        self.save().await;
+        self.clone().spawn(id.to_string());
+        Ok(job)
+    }
+
+    /// Tira o pedido do registro. O que já foi para o Drive continua lá.
+    pub async fn remove(&self, id: &str) -> Result<(), Refused> {
+        {
+            let mut jobs = self.jobs.lock().await;
+            let j = jobs.get(id).ok_or(Refused::NotFound)?;
+            if !j.stage.done() {
+                return Err(Refused::Busy);
+            }
+            jobs.remove(id);
+        }
+        self.save().await;
+        Ok(())
+    }
+
+    /// Tira do registro os pedidos que já chegaram ao Drive. Devolve quantos saíram.
+    pub async fn clear_delivered(&self) -> usize {
+        let n = {
+            let mut jobs = self.jobs.lock().await;
+            let before = jobs.len();
+            jobs.retain(|_, j| j.stage != Stage::NoDrive);
+            before - jobs.len()
+        };
+        if n > 0 {
+            self.save().await;
+        }
+        n
     }
 
     fn spawn(self: Arc<Self>, id: String) {
@@ -923,6 +992,19 @@ impl Downloads {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn retry_only_after_ending_without_the_book() {
+        for st in [Stage::SemPortugues, Stage::SemFonte, Stage::Falhou] {
+            assert!(st.done() && st.retryable(), "{st:?}");
+        }
+        // no Drive: terminou, mas tentar de novo baixaria outra cópia
+        assert!(Stage::NoDrive.done() && !Stage::NoDrive.retryable());
+        // em andamento: nem terminou
+        for st in [Stage::Procurando, Stage::Baixando, Stage::Conferindo, Stage::EnviandoAoDrive] {
+            assert!(!st.done() && !st.retryable(), "{st:?}");
+        }
+    }
     use super::*;
 
     fn rel(title: &str, seeders: i64) -> Value {

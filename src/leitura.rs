@@ -19,7 +19,12 @@
 //!                                obras do Open Library que ainda não estão lá
 //! POST   /leitura/temas/{aba}         — {"nome"}: a pessoa põe um tema de busca
 //! DELETE /leitura/temas/{aba}/{nome}  — tira um tema (o do sistema não volta)
-//! GET  /leitura/pedidos        — andamento dos pedidos
+//! GET  /leitura/pedidos        — andamento dos pedidos (o registro fica em
+//!                                Preferências, não na página da leitura)
+//! DELETE /leitura/pedidos              — tira do registro os que já estão no Drive
+//! DELETE /leitura/pedidos/{id}         — tira um pedido terminado do registro
+//!                                       (o livro, se veio, fica no Drive)
+//! POST   /leitura/pedidos/{id}/tentar  — terminado sem o livro: procura de novo
 //!
 //! O Kindle navega pelas mesmas abas pelo endereço público do kosync (o
 //! Tailscale Funnel só publica /kosync), com o usuário e a chave do kosync:
@@ -201,7 +206,20 @@ impl Leitura {
             .route("/{categoria}", get(shelf))
             .route("/lido/{doc}", put(mark))
             .route("/baixar", post(download))
-            .route("/pedidos", get(|State(l): State<Arc<Leitura>>| async move { Json(l.downloads.list().await) }))
+            .route("/pedidos", get(|State(l): State<Arc<Leitura>>| async move { Json(l.downloads.list().await) })
+                .delete(|State(l): State<Arc<Leitura>>| async move { Json(json!({ "removidos": l.downloads.clear_delivered().await })) }))
+            .route("/pedidos/{id}", axum::routing::delete(|State(l): State<Arc<Leitura>>, Path(id): Path<String>| async move {
+                match l.downloads.remove(&id).await {
+                    Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                    Err(r) => refused(r),
+                }
+            }))
+            .route("/pedidos/{id}/tentar", post(|State(l): State<Arc<Leitura>>, Path(id): Path<String>| async move {
+                match l.downloads.retry(&id).await {
+                    Ok(j) => (StatusCode::ACCEPTED, Json(json!(j))).into_response(),
+                    Err(r) => refused(r),
+                }
+            }))
             .route("/pedidos/{id}/ingles", post(|State(l): State<Arc<Leitura>>, Path(id): Path<String>| async move {
                 match l.downloads.accept_english(&id).await {
                     Some(j) => (StatusCode::ACCEPTED, Json(json!(j))).into_response(),
@@ -210,6 +228,16 @@ impl Leitura {
             }))
             .with_state(self)
     }
+}
+
+fn refused(r: crate::leitura_dl::Refused) -> Response {
+    use crate::leitura_dl::Refused;
+    let (code, msg) = match r {
+        Refused::NotFound => (StatusCode::NOT_FOUND, "pedido não existe"),
+        Refused::Busy => (StatusCode::CONFLICT, "o pedido ainda está procurando ou baixando"),
+        Refused::Delivered => (StatusCode::CONFLICT, "o livro já está no Drive"),
+    };
+    (code, Json(json!({ "error": msg }))).into_response()
 }
 
 #[cfg(test)]

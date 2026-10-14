@@ -279,6 +279,15 @@ Qualidade: Bluray 1080p primeiro e WEB 1080p como segunda opção (o alvo do
 perfil fica no WEB, então um WEB baixado não é trocado sozinho) e, nos
 filmes, recusar gravações de cinema (CAM, Telesync, Telecine, Workprint).
 
+**Pedidos de leitura** (Preferências → Pedidos de leitura; a engrenagem também
+aparece na Leitura e ganha um ponto quando algum pedido precisa de você): o
+registro dos livros pedidos, com o estado e o que aconteceu. Sem português:
+baixar em inglês. Sem fonte, falhou ou sem português: tentar de novo (procura
+do zero, inclusive as versões já descartadas). Terminado: tirar da lista; a
+vassoura tira todos os que já estão no Drive. Tirar da lista não apaga o livro
+do Drive. A página da Leitura não mostra mais a lista: ao pedir, um aviso
+curto leva até aqui.
+
 **Tocar enquanto baixa sem travar.** No "Assistir", uma versão com menos de
 5 fontes perde para uma bem semeada (um Bluray mal semeado dá lugar ao WEB).
 Se o download ficar ~30 s abaixo do que o vídeo consome, com pouco já

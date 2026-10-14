@@ -1,6 +1,7 @@
 <script setup>
 // Leitura: estante do Drive (com o progresso do Kindle/kosync), "Para você",
-// pedidos de download e a busca (estante + Open Library). API: src/leitura.rs.
+// a busca (estante + Open Library) e os pedidos de download, cujo registro
+// fica em Preferências. API: src/leitura.rs.
 import { ref, computed, watch, nextTick, onActivated, onDeactivated } from 'vue';
 import Rail from '../components/Rail.vue';
 import Modal from '../components/Modal.vue';
@@ -26,10 +27,8 @@ const rows = computed(() => [['Para você', 'para_voce'], ['Destaques', 'destaqu
   .map(([title, k]) => ({ title, items: shelf.value?.[k] || [] }))
   .filter((r) => r.items.length));
 
-// ---- pedidos: andamento a cada 3 s enquanto algum trabalha; um livro que
-// chega ao Drive faz a estante relistar
-const LABEL = { procurando: 'procurando', baixando: 'baixando', conferindo: 'conferindo', enviando_ao_drive: 'enviando ao Drive', no_drive: 'no Drive', sem_portugues: 'sem português', sem_fonte: 'sem fonte', falhou: 'falhou' };
-const jobs = computed(() => L.jobs.filter((j) => (FOLDERS[S.tab] || []).includes(j.folder)).slice(0, 8));
+// ---- pedidos: a lista fica em Preferências; aqui só o andamento a cada 3 s
+// enquanto algum trabalha, para a estante relistar quando um livro chega
 let jobTimer, wasBusy = false, active = false;
 async function pollJobs() {
   clearTimeout(jobTimer);
@@ -39,11 +38,13 @@ async function pollJobs() {
   wasBusy = now;
   if (now && active) jobTimer = setTimeout(pollJobs, 3000);
 }
-const ingles = ref({});
-async function acceptEnglish(id) {
-  ingles.value[id] = true;
-  try { await api(`/leitura/pedidos/${encodeURIComponent(id)}/ingles`, { method: 'POST' }); } catch {}
-  pollJobs();
+// aviso de pedido feito (some sozinho)
+const notice = ref(null);
+let noticeTimer;
+function showNotice(title) {
+  clearTimeout(noticeTimer);
+  notice.value = title;
+  noticeTimer = setTimeout(() => (notice.value = null), 8000);
 }
 
 // ---- estante: o que já se tem aparece na hora; atualiza por trás. "Para
@@ -123,8 +124,7 @@ async function download() {
   try {
     await api('/leitura/baixar', { method: 'POST', body: { title: s.title, author: s.author, categoria, pasta, pdf: s.pdf || null } });
     card.value = null;
-    // o pedido aparece na aba da pasta escolhida
-    if (categoria !== S.tab || S.query) { S.query = ''; S.tab = categoria; }
+    showNotice(s.title);
     pollJobs();
   } catch (e) {
     alert(`Não consegui pedir: ${e.message}`);
@@ -178,20 +178,13 @@ const sugKey = (s) => s.key;
     </template>
 
     <template v-else>
-      <template v-if="jobs.length">
-        <h2>Pedidos</h2>
-        <div class="jobs">
-          <div v-for="j in jobs" :key="j.id" class="job">
-            <b>{{ j.title }}</b>
-            <span class="st" :class="{ ok: j.stage === 'no_drive', bad: j.stage === 'sem_fonte' || j.stage === 'falhou' }">
-              {{ LABEL[j.stage] || j.stage }}<template v-if="j.stage === 'baixando'"> {{ pct(j.progress) }}</template>
-              <button v-if="j.stage === 'sem_portugues'" class="icon" :disabled="ingles[j.id]" title="Não há em português: baixar a versão em inglês" aria-label="Baixar em inglês" @click="acceptEnglish(j.id)"><i class="i i-download"></i></button>
-            </span>
-            <small>{{ j.detail }}</small>
-          </div>
-        </div>
-      </template>
 
+      <Transition name="aviso">
+        <p v-if="notice" class="notice" role="status">
+          <i class="i i-check"></i>
+          <span>Pedido feito: <b>{{ notice }}</b>. O andamento fica em <RouterLink to="/preferencias#pedidos">Preferências → Pedidos de leitura</RouterLink>.</span>
+        </p>
+      </Transition>
       <p v-if="!shelf" class="msg">Carregando…</p>
       <template v-else>
         <p v-if="shelf.error && !shelf.estante.length" class="msg err">Não consegui ler o Drive: {{ shelf.error }}</p>
@@ -274,11 +267,11 @@ const sugKey = (s) => s.key;
 </template>
 
 <style>
-.jobs { display: grid; gap: 8px; }
-.job { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.job small { color: var(--muted); grid-column: 1 / -1; }
-.job .st { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--info); }
-.job .st.ok { color: var(--ok); } .job .st.bad { color: var(--err); }
+.notice { display: flex; gap: 10px; align-items: baseline; margin: 0 0 18px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line)); border-radius: 10px; background: var(--panel); font-size: 14px; }
+.notice .i { color: var(--ok); }
+.notice a { color: var(--accent); }
+.aviso-enter-active, .aviso-leave-active { transition: opacity .25s, translate .25s; }
+.aviso-enter-from, .aviso-leave-to { opacity: 0; translate: 0 -6px; }
 /* capa desenhada: o Drive não dá capa pública */
 .cover { position: relative; width: 100%; aspect-ratio: 2/3; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; background: var(--c, #2a2733); }
 .cover b { font-size: 14px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }

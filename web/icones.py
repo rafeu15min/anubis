@@ -38,6 +38,9 @@ ICONES = {
     'fa-book': 0xF02D,
     'fa-film': 0xF008,
     'fa-cloud': 0xF0C2,
+    # pedidos de leitura (Preferências): tentar de novo e limpar concluídos
+    'fa-arrow_rotate_right': 0xF01E,
+    'fa-broom': 0xEDE4,
     # fatia do círculo = quanto já foi assistido (1/8 a 8/8)
     **{f'md-circle_slice_{n}': 0xF0A9E + n - 1 for n in range(1, 9)},
 }

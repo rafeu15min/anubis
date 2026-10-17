@@ -32,9 +32,6 @@
 //! GET/DELETE /library/{kind}/{id} — o que sai ao desinstalar o título / desinstala (filme, série ou episódio)
 //! GET  /indexers · POST /indexers/test — indexadores fora do ar · testar de novo (tira do castigo)
 //! GET  /where/{kind}/{id}       — onde assistir oficialmente (streaming no Brasil, pelo TMDB)
-//! GET  /mux/{tmdb}/options     — versões para juntar: vídeo e dublagem PT-BR
-//! POST /mux                     — juntar dublagem: {"id":tmdb,"video":guid,"audio":guid}
-//! GET  /mux/{tmdb}  ·  DELETE   — andamento · desistir (apaga os downloads)
 //! GET  /autodub                — dublagem automática: o que sabe de cada título
 //! POST /autodub/{kind}/{id}    — dublagem na hora: movie (tmdb), episode (Sonarr), series (tvdb)
 //! GET  /preferencias            — página de preferências
@@ -132,9 +129,6 @@ pub fn router(state: AppState) -> Router {
         .route("/series/{tvdb}/subbed", post(series_subbed))
         .route("/movie/{tmdb}/subbed", post(movie_subbed))
         .route("/where/{kind}/{id}", get(where_to_watch))
-        .route("/mux", post(start_mux))
-        .route("/mux/{tmdb}", get(mux_status).delete(cancel_mux))
-        .route("/mux/{tmdb}/options", get(mux_options))
         .route("/autodub", get(|State(s): State<AppState>| async move { Json(s.orch.autodub_state().await) }))
         .route("/autodub/{kind}/{id}", post(autodub_now))
         .route("/health", get(health))
@@ -714,41 +708,6 @@ async fn autodub_now(State(s): State<AppState>, Path((kind, id)): Path<(Kind, i6
     match s.orch.autodub_now(kind, id).await {
         Ok(keys) => (StatusCode::ACCEPTED, Json(json!({ "queued": keys }))).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
-    }
-}
-
-async fn mux_options(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
-    match s.orch.mux_options(tmdb).await {
-        Ok(o) => Json(o).into_response(),
-        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct MuxBody {
-    id: i64,
-    video: String,
-    audio: String,
-}
-
-async fn start_mux(State(s): State<AppState>, Json(b): Json<MuxBody>) -> Response {
-    match s.orch.start_mux(b.id, &b.video, &b.audio).await {
-        Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "status": "baixando" }))).into_response(),
-        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
-    }
-}
-
-async fn mux_status(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
-    match s.orch.mux_status(Kind::Movie, tmdb).await {
-        Some(v) => Json(v).into_response(),
-        None => error(StatusCode::NOT_FOUND, "nada sendo juntado aqui"),
-    }
-}
-
-async fn cancel_mux(State(s): State<AppState>, Path(tmdb): Path<i64>) -> Response {
-    match s.orch.cancel_mux(Kind::Movie, tmdb).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => error(StatusCode::CONFLICT, format!("{e:#}")),
     }
 }
 

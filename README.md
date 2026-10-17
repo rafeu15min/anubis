@@ -188,8 +188,7 @@ nas fontes, tenta de novo em 2 dias; uma dublagem que não serviu fica de fora
 por 30 dias (`state_dir/dublagem.json`). `POST /autodub/{kind}/{id}` pede na
 hora (filme, episódio ou a série inteira). O ffmpeg roda numa cópia
 descartável da imagem do Jellyfin (`docker run`) com o `/data` montado como o
-Radarr o vê. O mesmo mecanismo junta duas versões baixadas de um filme
-(`POST /mux`, só pela API).
+Radarr o vê.
 
 **Onde assistir** (opcional, com `[tmdb]` na config): quando não há versão
 para baixar — no "Assistir" sem versão aceita —, a página mostra em quais serviços de streaming do
@@ -327,9 +326,6 @@ pé com o PC desligado com `ignore-carrier` no NetworkManager do FeuVault
 | `GET /watch/{kind}/{id}/info` | andamento do download e trechos já no disco |
 | `GET /watch/{kind}/{id}/lighter` | versões mais leves (o download não acompanha o vídeo) |
 | `GET /where/{kind}/{id}` | onde assistir no Brasil (filme: tmdbId; série: tvdbId) |
-| `GET /mux/{tmdb}/options` | versões para juntar: vídeo e dublagem PT-BR |
-| `POST /mux` | juntar dublagem: `{"id":tmdb,"video":guid,"audio":guid}` |
-| `GET /mux/{tmdb}` · `DELETE` | andamento · desistir (apaga os downloads) |
 | `GET /autodub` | dublagem automática: o que sabe de cada título e o que está embutindo |
 | `POST /autodub/{kind}/{id}` | dublagem na hora: `movie` (tmdb), `episode` (id no Sonarr) ou `series` (tvdb) |
 | `GET /preferencias` | página de preferências |

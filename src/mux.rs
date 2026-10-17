@@ -1,9 +1,7 @@
 //! "Juntar dublagem": o vídeo de uma versão (em qualquer idioma) com o áudio
-//! em PT-BR de outra. Dois usos:
-//! - a dublagem automática (`autodub`): o vídeo é o arquivo que já está na
-//!   biblioteca (filme ou episódio) e só a dublagem é baixada;
-//! - o pedido avulso de um filme (POST /mux, fora da página): as duas versões
-//!   vêm da busca do Radarr e as duas são baixadas.
+//! em PT-BR de outra. Só pela dublagem automática (`autodub`): o vídeo é o
+//! arquivo que já está na biblioteca (filme ou episódio) e só a dublagem é
+//! baixada. (O pedido avulso de duas versões, `POST /mux`, foi removido.)
 //!
 //! 1. As versões vêm da mesma busca do "assistir".
 //! 2. O Anubis baixa com o librqbit só o vídeo de cada torrent (num pacote de
@@ -23,7 +21,7 @@
 use crate::orchestrator::Orchestrator;
 use crate::search::Kind;
 use crate::services::{Method, TorrentSource, url_encode};
-use crate::stream::{Candidate, candidates, folder_name, video_file};
+use crate::stream::{Candidate, folder_name, video_file};
 use anyhow::{Context, Result, bail};
 use librqbit::ManagedTorrent;
 use librqbit::api::TorrentIdOrHash;
@@ -192,15 +190,6 @@ impl MuxJob {
         let i = self.info();
         i.video.into_iter().chain([i.audio]).collect()
     }
-}
-
-/// As versões que a página oferece: o vídeo (qualquer idioma, melhor imagem
-/// primeiro) e a dublagem (as que têm áudio em português).
-#[derive(Debug, Serialize)]
-pub struct Options {
-    pub title: String,
-    pub video: Vec<Candidate>,
-    pub audio: Vec<Candidate>,
 }
 
 // ------------------------------------------------------------ sincronia
@@ -513,64 +502,6 @@ impl Orchestrator {
 // ------------------------------------------------------------ pedido
 
 impl Orchestrator {
-    /// Versões para escolher: vídeo (melhor imagem primeiro) e dublagem.
-    pub async fn mux_options(&self, tmdb: i64) -> Result<Options> {
-        let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
-        let movie = self.ensure_movie(tmdb).await?;
-        let movie_id = movie["id"].as_i64().context("filme sem id")?;
-        // filme recém-adicionado: a primeira busca do Radarr volta vazia
-        let mut all = vec![];
-        for wait in [0, 5, 10] {
-            tokio::time::sleep(Duration::from_secs(wait)).await;
-            all = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
-            if !all.is_empty() {
-                break;
-            }
-        }
-        let portuguese = |c: &Candidate| c.portuguese();
-        let mut video: Vec<Candidate> = all.iter().filter(|c| !portuguese(c)).cloned().collect();
-        video.sort_by_key(|c| (std::cmp::Reverse(c.raw["qualityWeight"].as_i64().unwrap_or(0)), std::cmp::Reverse(c.seeders)));
-        let mut audio: Vec<Candidate> = all.into_iter().filter(portuguese).collect();
-        audio.sort_by_key(|c| std::cmp::Reverse(c.seeders));
-        video.truncate(15);
-        audio.truncate(15);
-        Ok(Options { title: movie["title"].as_str().unwrap_or_default().to_owned(), video, audio })
-    }
-
-    /// Começa a juntar: baixa as duas versões e segue sozinho até o Radarr.
-    pub async fn start_mux(self: &Arc<Self>, tmdb: i64, video_guid: &str, audio_guid: &str) -> Result<()> {
-        if video_guid == audio_guid {
-            bail!("escolha versões diferentes para o vídeo e a dublagem");
-        }
-        let old = self.muxes.lock().await.get(&(Kind::Movie, tmdb)).cloned();
-        if old.as_ref().is_some_and(|j| j.active()) {
-            bail!("este filme já está sendo juntado");
-        }
-        let radarr = self.radarr.as_ref().context("Radarr não configurado")?;
-        let stream_cfg = self.cfg.stream.as_ref().context("configure [stream]")?;
-        let movie = self.ensure_movie(tmdb).await?;
-        let movie_id = movie["id"].as_i64().context("filme sem id")?;
-        let all = candidates(radarr.releases(&format!("movieId={movie_id}")).await?);
-        let find = |g: &str| all.iter().find(|c| c.guid == g).cloned().context("a versão sumiu dos indexadores — busque de novo");
-        let (v, a) = (find(video_guid)?, find(audio_guid)?);
-        let base = stream_cfg.download_dir.join(format!(".juntar-{tmdb}"));
-        let (video, vh) = self.mux_source(&v, &base, None, crate::stream::ADD_TIMEOUT).await?;
-        let (audio, ah) = self.mux_source(&a, &base, None, crate::stream::ADD_TIMEOUT).await?;
-        // tentativa anterior (que falhou): fica só o que for reaproveitado
-        if let Some(old) = old {
-            let keep: HashSet<String> = [video.info_hash.clone(), audio.info_hash.clone()].into();
-            self.discard_sources(&old, &keep).await;
-        }
-        let title = movie["title"].as_str().unwrap_or_default().to_owned();
-        info!("juntar dublagem: {title} — vídeo {} + áudio {}", v.title, a.title);
-        let target = Target::Movie { tmdb, movie_id };
-        let job = MuxJob::new(MuxInfo { target, title, video: Some(video), library: None, audio, step: Step::Downloading, error: None }, vec![vh, ah]);
-        self.muxes.lock().await.insert(target.key(), job.clone());
-        self.save_muxes().await;
-        tokio::spawn(run(self.clone(), job));
-        Ok(())
-    }
-
     /// Dublagem automática: baixa só a dublagem `dub` e a embute no arquivo
     /// da biblioteca. Segue sozinho até o Radarr/Sonarr; o job diz como acabou.
     pub async fn start_dub(self: &Arc<Self>, target: Target, title: String, library: LibraryVideo, dub: &Candidate) -> Result<Arc<MuxJob>> {

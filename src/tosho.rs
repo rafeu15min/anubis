@@ -11,7 +11,7 @@
 
 use reqwest::Client;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -71,45 +71,54 @@ impl Tosho {
     }
 
     /// As faixas de vários torrents (hash em hexadecimal), no máximo até
-    /// `limit`: o que não respondeu a tempo fica de fora (e no cache, se
-    /// terminar depois).
+    /// `limit`: o que não respondeu a tempo fica de fora, mas a consulta em
+    /// andamento termina em segundo plano e vai para o cache.
     pub async fn tracks(&self, hashes: &[String], limit: Duration) -> HashMap<String, Tracks> {
         let mut out = HashMap::new();
-        let mut todo = vec![];
-        {
-            let cache = self.cache.lock().await;
-            for h in hashes {
-                let h = h.to_lowercase();
-                match cache.get(&h) {
-                    Some((_, Some(t))) => {
-                        out.insert(h, t.clone());
-                    }
-                    Some((at, None)) if at.elapsed() < RETRY => {}
-                    _ if !todo.contains(&h) => todo.push(h),
-                    _ => {}
-                }
-            }
-        }
+        let todo: Vec<String> = self.split_cached(hashes, &mut out).await.into_iter().collect();
         let fetch = async {
             for chunk in todo.chunks(PARALLEL) {
-                let mut set = tokio::task::JoinSet::new();
-                for h in chunk {
-                    let (http, cache, h) = (self.http.clone(), self.cache.clone(), h.clone());
-                    set.spawn(async move {
-                        let t = fetch(&http, &h).await;
-                        cache.lock().await.insert(h.clone(), (Instant::now(), t.clone()));
-                        (h, t)
-                    });
-                }
-                while let Some(Ok((h, t))) = set.join_next().await {
-                    if let Some(t) = t {
-                        out.insert(h, t);
-                    }
-                }
+                out.extend(self.fetch_chunk(chunk).await);
             }
         };
         let _ = tokio::time::timeout(limit, fetch).await;
         out
+    }
+
+    /// Põe em `out` o que o cache já sabe e devolve os hashes que faltam consultar.
+    async fn split_cached(&self, hashes: &[String], out: &mut HashMap<String, Tracks>) -> HashSet<String> {
+        let cache = self.cache.lock().await;
+        let mut todo = HashSet::new();
+        for h in hashes.iter().map(|h| h.to_lowercase()) {
+            match cache.get(&h) {
+                Some((_, Some(t))) => out.extend([(h, t.clone())]),
+                Some((at, None)) if at.elapsed() < RETRY => {}
+                _ => todo.extend([h]),
+            }
+        }
+        todo
+    }
+
+    /// Consulta um lote ao mesmo tempo e devolve só os torrents com faixas.
+    async fn fetch_chunk(&self, chunk: &[String]) -> Vec<(String, Tracks)> {
+        let tasks: Vec<_> = chunk.iter().cloned().map(|h| self.fetch_and_cache(h)).collect();
+        let mut found = vec![];
+        for task in tasks {
+            found.extend(task.await.ok().and_then(|(h, t)| Some((h, t?))));
+        }
+        found
+    }
+
+    /// Solta a consulta numa tarefa própria: se quem pediu desistir de esperar,
+    /// ela termina e grava no cache do mesmo jeito (num `JoinSet` dentro do
+    /// `timeout`, seria abortada junto e o cache nunca receberia nada).
+    fn fetch_and_cache(&self, h: String) -> tokio::task::JoinHandle<(String, Option<Tracks>)> {
+        let (http, cache) = (self.http.clone(), self.cache.clone());
+        tokio::spawn(async move {
+            let t = fetch(&http, &h).await;
+            cache.lock().await.insert(h.clone(), (Instant::now(), t.clone()));
+            (h, t)
+        })
     }
 }
 
@@ -216,5 +225,22 @@ mod tests {
         assert_eq!(info_hash(&json!({ "infoHash": h.to_uppercase() })), Some(h.to_owned()));
         assert_eq!(info_hash(&json!({ "guid": format!("magnet:?xt=urn:btih:{h}&dn=x") })), Some(h.to_owned()));
         assert_eq!(info_hash(&json!({ "guid": "https://nyaa.si/view/1" })), None);
+    }
+
+    #[tokio::test]
+    async fn split_cached_separates_known_from_missing() {
+        let tosho = Tosho::new().unwrap();
+        let known = Tracks { audio: vec!["Japanese".into()], ..Default::default() };
+        {
+            let mut cache = tosho.cache.lock().await;
+            cache.insert("aaa".into(), (Instant::now(), Some(known.clone())));
+            cache.insert("bbb".into(), (Instant::now(), None));
+        }
+        let mut out = HashMap::new();
+        let hashes = ["AAA", "bbb", "ccc", "CCC"].map(String::from);
+        let todo = tosho.split_cached(&hashes, &mut out).await;
+        assert_eq!(out.get("aaa"), Some(&known));
+        // "bbb" foi consultado há pouco e não tinha faixas: não pergunta de novo
+        assert_eq!(todo, HashSet::from(["ccc".to_owned()]));
     }
 }

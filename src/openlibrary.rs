@@ -26,7 +26,6 @@ pub struct Work {
     pub cover_i: Option<i64>,
     #[serde(default)]
     pub language: Vec<String>,
-    pub ratings_count: Option<i64>,
     #[serde(default)]
     pub alternative_title: Vec<String>,
     #[serde(default)]
@@ -47,7 +46,7 @@ struct Search {
     docs: Vec<Work>,
 }
 
-const FIELDS: &str = "key,title,author_name,first_publish_year,cover_i,language,ratings_count,alternative_title,subject";
+const FIELDS: &str = "key,title,author_name,first_publish_year,cover_i,language,alternative_title,subject";
 
 /// Versão da busca da obra de cada livro do Drive: mudou, busca de novo.
 const OWNED_VERSION: u32 = 3;

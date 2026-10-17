@@ -59,7 +59,7 @@ pub struct Showcase {
 
 #[derive(Default)]
 pub struct Cache {
-    rows: Mutex<HashMap<(Category, &'static str), (Instant, Vec<Value>)>>,
+    rows: crate::foryou::Cached<(Category, &'static str), Vec<Value>>,
     tvdb: Mutex<HashMap<i64, Option<i64>>>,
 }
 

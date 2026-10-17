@@ -565,7 +565,7 @@ fn judge(r: &Value, parsed: &Value, profile: &Value, w: &Wanted, tracks: Option<
     if !this {
         return None;
     }
-    let mut v = rate(r, &title, pe, parsed, parsed["series"].is_null(), profile, w.original.as_deref(), tracks);
+    let mut v = rate(r, title, pe, parsed, parsed["series"].is_null(), profile, w.original.as_deref(), tracks);
     v["fullSeason"] = json!(pack);
     v["seasonNumber"] = json!(w.season);
     v["episodeNumbers"] = json!(episodes);
@@ -2381,6 +2381,7 @@ fn progress_update(t: f64, duration: f64) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn prowlarr_results_are_judged_like_sonarr() {
@@ -2548,7 +2549,6 @@ mod tests {
         assert_eq!(magnet_hash(&hex), magnet_hash(&b32));
         assert_eq!(magnet_hash(&TorrentSource::File(bytes::Bytes::from_static(b"d4:infoe"))), None);
     }
-    use super::*;
 
     #[test]
     fn puts_the_series_name_before_the_season() {

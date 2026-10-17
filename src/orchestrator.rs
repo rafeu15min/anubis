@@ -30,7 +30,6 @@ pub struct Orchestrator {
     pub(crate) muxes: Mutex<HashMap<(crate::search::Kind, i64), std::sync::Arc<crate::mux::MuxJob>>>,
     /// a dublagem automática dos títulos da biblioteca sem português
     pub(crate) autodub: crate::autodub::AutoDub,
-    /// última busca de versões de um pedido parado (evita repetir nos indexadores)
     /// central de estado (pedidos e downloads) que as rotas consultam
     pub(crate) live: crate::live::Live,
     /// listas do TMDB da vitrine (6 h) e ids do TVDB das séries
@@ -41,6 +40,7 @@ pub struct Orchestrator {
     pub(crate) external: crate::external::External,
     /// perfis do Sonarr que o Anubis usa (o dos pedidos e o sem dublagem)
     pub(crate) profile_ids: Mutex<Option<crate::prefs::ProfileIds>>,
+    /// última busca de versões de um pedido parado (evita repetir nos indexadores)
     pub(crate) versions_cache: Mutex<HashMap<(crate::search::Kind, i64), (std::time::Instant, crate::search::Versions)>>,
     /// o que os indexadores têm de cada título da vitrine
     pub(crate) availability: crate::avail::Checker,

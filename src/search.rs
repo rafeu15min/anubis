@@ -504,7 +504,6 @@ impl Orchestrator {
         Ok(st)
     }
 
-    /// Aviso do que foi para o legendado.
     /// Episódio (id no Sonarr): na biblioteca, na fila ou monitorado (procurando).
     async fn episode_status(&self, id: i64) -> Result<Status> {
         let sonarr = self.arr(Kind::Episode)?;
@@ -521,6 +520,7 @@ impl Orchestrator {
         Ok(st)
     }
 
+    /// Aviso do que foi para o legendado.
     async fn dub_note(&self, kind: Kind, item: &Value) -> Option<String> {
         let ids = (*self.profile_ids.lock().await)?;
         let fallback = match kind {
@@ -637,7 +637,7 @@ impl Orchestrator {
         let outside_of = |season: i64, number: i64, title: Option<&str>| -> Option<Progress> {
             // pelo nome primeiro: o Sonarr (TVDB) pode numerar diferente do TMDB
             let t = title.map(crate::external::ep_norm).unwrap_or_default();
-            let by_name = (t.len() >= 3).then(|| outside.iter().find(|(_, w)| w.names.iter().any(|n| *n == t))).flatten();
+            let by_name = (t.len() >= 3).then(|| outside.iter().find(|(_, w)| w.names.contains(&t))).flatten();
             let (src, w) = by_name.or_else(|| outside.iter().find(|(_, w)| w.season == season && w.number == number))?;
             Some(Progress { played: w.full, percent: if w.full { None } else { w.percent.or(Some(50)) }, source: Some(src.name()) })
         };

@@ -40,7 +40,9 @@ pub(crate) fn season_of(d: NaiveDate) -> (&'static str, i32, &'static str) {
 
 /// Os animes da temporada no TMDB, na ordem de popularidade do AniList.
 type List = Vec<Value>;
-static CACHE: OnceLock<Mutex<Option<(Instant, &'static str, i32, List)>>> = OnceLock::new();
+/// Última montagem: (hora, nome da temporada, ano, cartões).
+type Montagem = (Instant, &'static str, i32, List);
+static CACHE: OnceLock<Mutex<Option<Montagem>>> = OnceLock::new();
 static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl Orchestrator {

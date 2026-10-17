@@ -179,15 +179,18 @@ pub(crate) struct Profile {
     pub keywords: HashMap<String, f64>,
 }
 
+/// Mapa guardado com a hora em que cada valor entrou (para vencer por tempo).
+pub(crate) type Cached<K, V> = tokio::sync::Mutex<HashMap<K, (Instant, V)>>;
+
 #[derive(Default)]
 pub struct Cache {
-    recs: tokio::sync::Mutex<HashMap<(Media, i64), (Instant, Vec<Value>)>>,
-    rows: tokio::sync::Mutex<HashMap<Category, (Instant, Vec<Found>)>>,
+    recs: Cached<(Media, i64), Vec<Value>>,
+    rows: Cached<Category, Vec<Found>>,
     /// populares dos gêneros preferidos, pelo caminho no TMDB
-    by_genre: tokio::sync::Mutex<HashMap<String, (Instant, Vec<Value>)>>,
+    by_genre: Cached<String, Vec<Value>>,
     profile: tokio::sync::Mutex<Option<(Instant, Arc<Profile>)>>,
     /// palavras-chave do TMDB por semente
-    keywords: tokio::sync::Mutex<HashMap<(Media, i64), (Instant, Vec<String>)>>,
+    keywords: Cached<(Media, i64), Vec<String>>,
     /// palavra-chave (vocabulário comum) → (id no TMDB, quantos filmes têm
     /// ela) (None: não existe lá)
     keyword_ids: tokio::sync::Mutex<HashMap<String, Option<(i64, i64)>>>,

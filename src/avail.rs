@@ -28,6 +28,7 @@ use tracing::{info, warn};
 /// Ritmo: um título por vez, com pausa entre eles, e só uma página de cada
 /// site — duas checagens juntas com 100 resultados (5 páginas do 1337x por
 /// busca) fizeram o Cloudflare do 1337x bloquear o IP do servidor em minutos.
+/// (indexador de castigo não precisa de pausa aqui: o Prowlarr já não o consulta)
 const GAP: std::time::Duration = std::time::Duration::from_secs(15);
 /// O 1337x fica fora da checagem (é o que bloqueia o IP); as outras fontes
 /// bastam para saber se o título existe. O Radarr/Sonarr e o "Assistir"
@@ -35,7 +36,6 @@ const GAP: std::time::Duration = std::time::Duration::from_secs(15);
 pub(crate) fn skipped(indexer: &str) -> bool {
     indexer.to_lowercase().contains("1337x")
 }
-// indexador de castigo não precisa de pausa aqui: o Prowlarr já não o consulta
 /// versões de fora do Brasil conferidas pelo `parse` do Radarr/Sonarr, no máximo
 const MAX_PARSE: usize = 30;
 

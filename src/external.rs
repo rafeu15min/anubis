@@ -179,9 +179,12 @@ pub struct External {
     state: Mutex<State>,
     anilist: Mutex<Option<(Instant, Vec<Seed>)>>,
     /// id do AniList → ids no TMDB (série e/ou filme) e no TVDB
-    anime_map: Mutex<Option<HashMap<i64, AnimeIds>>>,
+    anime_map: Mutex<Option<(Instant, Arc<AnimeMap>)>>,
     progress: Mutex<Progress>,
 }
+
+/// AniList → ids no TMDB/TVDB (da lista pública Fribb).
+type AnimeMap = HashMap<i64, AnimeIds>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AnimeIds {
@@ -402,8 +405,11 @@ fn group(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>
     group_eps(rows).into_iter().map(|(k, s, n, d, _)| (k, s, n, d)).collect()
 }
 
+/// Um título único: (chave, é série, vezes, data mais recente, episódios vistos).
+type Titulo = (String, bool, u32, Option<NaiveDate>, Vec<RawEp>);
+
 /// Como `group`, com os episódios vistos de cada série.
-fn group_eps(rows: &[(String, String)]) -> Vec<(String, bool, u32, Option<NaiveDate>, Vec<RawEp>)> {
+fn group_eps(rows: &[(String, String)]) -> Vec<Titulo> {
     let dmy = day_first(rows);
     // "Fullmetal Alchemist: Os motivos dela": a Netflix nem sempre marca o
     // episódio; o mesmo prefixo em dois títulos diferentes é série
@@ -679,9 +685,8 @@ impl Orchestrator {
         let tmdb = self.tmdb.as_ref()?;
         let q = crate::services::url_encode(&w.title);
         let path = match w.want {
-            Want::Series | Want::MovieOrSeries => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
-            // a Crunchyroll lista filme como série de um episódio: busca os dois
-            Want::Anime => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
+            // (anime: a Crunchyroll lista filme como série de um episódio, então busca os dois)
+            Want::Series | Want::MovieOrSeries | Want::Anime => format!("search/multi?query={q}&language=pt-BR&include_adult=false"),
             Want::AnimeMovie => format!("search/movie?query={q}&language=pt-BR&include_adult=false"),
         };
         let mut res = tmdb.get(&path).await;
@@ -1043,29 +1048,38 @@ impl Orchestrator {
         id
     }
 
-    /// AniList → TMDB/TVDB, da lista pública (baixada a cada 7 dias).
-    pub(crate) async fn anime_map(&self) -> Result<HashMap<i64, AnimeIds>> {
-        if let Some(m) = &*self.external.anime_map.lock().await {
-            return Ok(m.clone());
+    /// AniList → TMDB/TVDB, da lista pública (baixada a cada 7 dias, também
+    /// no servidor que fica semanas ligado).
+    pub(crate) async fn anime_map(&self) -> Result<Arc<AnimeMap>> {
+        let loaded = self.external.anime_map.lock().await.as_ref().filter(|(at, _)| at.elapsed() < ANIME_MAP_TTL).map(|(_, m)| m.clone());
+        if let Some(map) = loaded {
+            return Ok(map);
         }
+        self.refresh_anime_file().await?;
+        let raw: Vec<Value> = serde_json::from_slice(&std::fs::read(&self.external.map_path)?)?;
+        let map: Arc<AnimeMap> = Arc::new(raw.iter().filter_map(anime_ids).collect());
+        *self.external.anime_map.lock().await = Some((Instant::now(), map.clone()));
+        Ok(map)
+    }
+
+    /// Baixa a lista de ids se a cópia em disco venceu; sem internet, segue com a antiga, se houver.
+    async fn refresh_anime_file(&self) -> Result<()> {
         let path = &self.external.map_path;
         let fresh = std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() < ANIME_MAP_TTL);
-        if !fresh {
-            let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
-            match http.get(ANIME_MAP_URL).send().await.and_then(|r| r.error_for_status()) {
-                Ok(r) => {
-                    let body = r.bytes().await?;
-                    std::fs::write(path, &body).with_context(|| format!("gravando {}", path.display()))?;
-                }
-                // sem internet: segue com a cópia antiga, se houver
-                Err(e) if path.exists() => warn!("lista de ids de anime não renovada: {e}"),
-                Err(e) => return Err(e).context("baixando a lista de ids de anime"),
-            }
+        if fresh {
+            return Ok(());
         }
-        let raw: Vec<Value> = serde_json::from_slice(&std::fs::read(path)?)?;
-        let map: HashMap<i64, AnimeIds> = raw.iter().filter_map(anime_ids).collect();
-        *self.external.anime_map.lock().await = Some(map.clone());
-        Ok(map)
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
+        let res = http.get(ANIME_MAP_URL).send().await.and_then(|r| r.error_for_status());
+        let body = match res {
+            Ok(r) => r.bytes().await?,
+            Err(e) if path.exists() => {
+                warn!("lista de ids de anime não renovada: {e}");
+                return Ok(());
+            }
+            Err(e) => return Err(e).context("baixando a lista de ids de anime"),
+        };
+        std::fs::write(path, &body).with_context(|| format!("gravando {}", path.display()))
     }
 }
 

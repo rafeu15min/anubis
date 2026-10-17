@@ -314,8 +314,6 @@ impl Bazarr {
 
 // ---------------------------------------------------------------- TMDB
 
-/// Só o "onde assistir": os serviços de streaming de um país (o TMDB recebe
-/// esses dados do JustWatch).
 /// Resultados por busca no Prowlarr: uma página de cada site (o 1337x tem 20
 /// por página; pedir mais multiplica as consultas a ele).
 pub const ONE_PAGE: u32 = 20;

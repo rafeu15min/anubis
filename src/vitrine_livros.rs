@@ -188,17 +188,9 @@ impl Vitrine {
     }
 
     async fn keep(&self, url: &str, items: &[Item]) {
-        let bytes = {
-            let mut s = self.store.lock().await;
-            s.lists.insert(url.to_string(), (chrono::Utc::now().timestamp(), items.to_vec()));
-            serde_json::to_vec(&*s)
-        };
-        if let Ok(bytes) = bytes {
-            let tmp = self.path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &self.path).await;
-            }
-        }
+        let mut s = self.store.lock().await;
+        s.lists.insert(url.to_string(), (chrono::Utc::now().timestamp(), items.to_vec()));
+        crate::disk::save_json_or_warn(&self.path, &*s).await;
     }
 
     /// A lista guardada mesmo vencida (a fonte falhou agora: melhor a de ontem).

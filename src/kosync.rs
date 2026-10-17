@@ -62,11 +62,7 @@ pub struct Kosync {
 }
 
 async fn save<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
-    // grava inteiro e troca de uma vez: um desligamento no meio não corrompe
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, serde_json::to_vec(value)?).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
+    crate::disk::save_json(path, value).await
 }
 
 impl Kosync {

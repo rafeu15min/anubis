@@ -683,11 +683,7 @@ impl Orchestrator {
         let Ok(streamer) = self.streamer() else { return };
         let list: Vec<MuxInfo> = self.muxes.lock().await.values().map(|j| j.info()).filter(|i| i.step != Step::Done).collect();
         let path = streamer.state_dir.join(JOBS_FILE);
-        let tmp = path.with_extension("tmp");
-        let res = serde_json::to_vec_pretty(&list).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(&tmp, b)?)).and_then(|_| Ok(std::fs::rename(&tmp, &path)?));
-        if let Err(e) = res {
-            warn!("não gravei {}: {e:#}", path.display());
-        }
+        crate::disk::save_json_or_warn(&path, &list).await;
     }
 
     /// Retoma o que estava sendo juntado antes de um reinício.

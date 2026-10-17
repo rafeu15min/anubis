@@ -47,13 +47,7 @@ impl Temas {
     }
 
     async fn save(&self) {
-        let bytes = serde_json::to_vec_pretty(&*self.edits.lock().await);
-        if let Ok(bytes) = bytes {
-            let tmp = self.path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &self.path).await;
-            }
-        }
+        crate::disk::save_json_or_warn(&self.path, &*self.edits.lock().await).await;
     }
 
     /// Os temas da aba: os do sistema sem os tirados, mais os da pessoa

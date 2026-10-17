@@ -211,11 +211,7 @@ impl Checker {
             _ => avail,
         };
         map.insert(k, Entry { avail: kept, until: Utc::now() + avail.ttl() });
-        let tmp = self.path.with_extension("tmp");
-        let res = serde_json::to_vec(&*map).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(&tmp, b)?)).and_then(|_| Ok(std::fs::rename(&tmp, &self.path)?));
-        if let Err(e) = res {
-            warn!("não gravei {}: {e:#}", self.path.display());
-        }
+        crate::disk::save_json_or_warn(&self.path, &*map).await;
     }
 }
 

@@ -755,11 +755,7 @@ impl Streamer {
     async fn save(&self) {
         let jobs: Vec<JobInfo> = self.jobs.lock().await.values().filter(|j| j.handle().is_some()).map(|j| j.snapshot()).collect();
         let path = self.state_dir.join(JOBS_FILE);
-        let tmp = path.with_extension("tmp");
-        let res = serde_json::to_vec_pretty(&jobs).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(&tmp, b)?)).and_then(|_| Ok(std::fs::rename(&tmp, &path)?));
-        if let Err(e) = res {
-            warn!("não gravei os pedidos em {}: {e:#}", path.display());
-        }
+        crate::disk::save_json_or_warn(&path, &jobs).await;
     }
 
     pub(crate) fn find_handle(&self, info_hash: &str) -> Option<Arc<ManagedTorrent>> {

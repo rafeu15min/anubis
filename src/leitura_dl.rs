@@ -446,12 +446,7 @@ impl Downloads {
 
     async fn save(&self) {
         let jobs = self.jobs.lock().await;
-        if let Ok(bytes) = serde_json::to_vec(&*jobs) {
-            let tmp = self.path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &self.path).await;
-            }
-        }
+        crate::disk::save_json_or_warn(&self.path, &*jobs).await;
     }
 
     async fn update(&self, id: &str, f: impl FnOnce(&mut Job)) -> Option<Job> {

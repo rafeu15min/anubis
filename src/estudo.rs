@@ -153,12 +153,7 @@ impl Estudo {
             .flatten();
         let mut topics = self.topics.lock().await;
         topics.insert(path.to_string(), topic.clone());
-        if let Ok(bytes) = serde_json::to_vec(&*topics) {
-            let tmp = self.path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &self.path).await;
-            }
-        }
+        crate::disk::save_json_or_warn(&self.path, &*topics).await;
         topic
     }
 

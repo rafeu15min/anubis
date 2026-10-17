@@ -77,9 +77,7 @@ impl Orchestrator {
         let _guard = CACHE_LOCK.lock().await;
         let mut all = read_cache(&path);
         all.insert(key, result.clone());
-        if let Err(e) = serde_json::to_vec_pretty(&all).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(&path, b)?)) {
-            warn!("gravando {}: {e:#}", path.display());
-        }
+        crate::disk::save_json_or_warn(&path, &all).await;
         result
     }
 

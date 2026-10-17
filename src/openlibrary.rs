@@ -193,13 +193,7 @@ impl OpenLibrary {
     }
 
     async fn save(&self) {
-        let bytes = serde_json::to_vec(&*self.store.lock().await);
-        if let Ok(bytes) = bytes {
-            let tmp = self.path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &self.path).await;
-            }
-        }
+        crate::disk::save_json_or_warn(&self.path, &*self.store.lock().await).await;
     }
 
     /// A obra de um título qualquer (sem guardar): o título original.

@@ -233,13 +233,8 @@ impl Leitura {
             .iter()
             .map(|(k, (at, r))| (k.clone(), (epoch - now.saturating_duration_since(*at).as_secs() as i64 + at.saturating_duration_since(now).as_secs() as i64, (**r).clone())))
             .collect();
-        if let Ok(bytes) = serde_json::to_vec(&snapshot) {
-            let path = self.orch.cfg.state_dir().join("leitura-fileiras.json");
-            let tmp = path.with_extension("json.tmp");
-            if tokio::fs::write(&tmp, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&tmp, &path).await;
-            }
-        }
+        let path = self.orch.cfg.state_dir().join("leitura-fileiras.json");
+        crate::disk::save_json_or_warn(&path, &snapshot).await;
     }
 
     async fn load_rows(&self) {

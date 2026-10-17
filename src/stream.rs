@@ -215,6 +215,9 @@ impl Job {
     }
 }
 
+/// Quantas legendas convertidas ficam em memória (cada uma é um VTT inteiro).
+const SUB_CACHE_MAX: usize = 32;
+
 pub struct Streamer {
     pub(crate) api: Api,
     jobs: Mutex<HashMap<(Kind, i64), Arc<Job>>>,
@@ -734,6 +737,7 @@ impl Streamer {
     /// o torrent do librqbit e apaga o que já tinha baixado.
     async fn cancel(&self, job: &Job) {
         self.jobs.lock().await.remove(&(job.info.kind, job.info.id));
+        self.sub_cache.lock().unwrap().retain(|(kind, id, _), _| (*kind, *id) != (job.info.kind, job.info.id));
         let handle = job.handle.lock().unwrap().take();
         if let Some(h) = handle
             && let Err(e) = self.api.session().delete(TorrentIdOrHash::Id(h.id()), true).await
@@ -1039,7 +1043,13 @@ impl Streamer {
             }
         };
         let vtt = Arc::new(vtt);
-        self.sub_cache.lock().unwrap().insert(key, vtt.clone());
+        let mut cache = self.sub_cache.lock().unwrap();
+        // legenda embutida chega a centenas de KB: não deixa o cache crescer sem fim
+        if cache.len() >= SUB_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, vtt.clone());
+        drop(cache);
         Ok(shift_vtt(&vtt, shift))
     }
 

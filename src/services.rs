@@ -23,11 +23,18 @@ fn counted(req: RequestBuilder) -> RequestBuilder {
     req
 }
 
+/// Tira chaves de um texto de erro: o Prowlarr devolve a URL do indexador, com `apikey=…`.
+fn without_keys(text: &str) -> String {
+    static KEYS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| regex::Regex::new(r#"(?i)\b(api_?key|token|passkey|password)=[^&\s"')]+"#).unwrap());
+    keys.replace_all(text, "$1=***").into_owned()
+}
+
 async fn send<T: DeserializeOwned>(req: RequestBuilder, what: &str) -> Result<T> {
     let res = counted(req).send().await.with_context(|| format!("{what}: sem resposta"))?;
     let status = res.status();
     if !status.is_success() {
-        bail!("{what}: HTTP {status}: {}", res.text().await.unwrap_or_default());
+        bail!("{what}: HTTP {status}: {}", without_keys(&res.text().await.unwrap_or_default()));
     }
     let body = res.text().await?;
     serde_json::from_str(if body.trim().is_empty() { "null" } else { &body }).with_context(|| format!("{what}: resposta inesperada"))
@@ -767,5 +774,19 @@ impl Jellyfin {
         let updates: Vec<Value> = paths.iter().map(|p| json!({ "Path": p, "UpdateType": "Deleted" })).collect();
         send::<Value>(self.req(Method::POST, "Library/Media/Updated").json(&json!({ "Updates": updates })), "Jellyfin atualizar").await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_keys;
+
+    #[test]
+    fn keys_in_urls_are_hidden_in_error_text() {
+        let raw = r#"Unable to connect to indexer: http://torrent-indexer:7006/indexers/comando?apikey=abc123&q=loki "https://x.test/t?token=zzz""#;
+        let clean = without_keys(raw);
+        assert!(!clean.contains("abc123") && !clean.contains("zzz"));
+        assert!(clean.contains("apikey=***&q=loki"));
+        assert_eq!(without_keys("sem chave nenhuma"), "sem chave nenhuma");
     }
 }

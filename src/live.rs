@@ -53,12 +53,16 @@ impl Snapshot {
     }
 }
 
+/// Quando se perguntou ao Jellyfin e o link que ele deu (`None`: ainda não tem o item).
+pub(crate) type JellyfinLink = (Instant, Option<String>);
+
 pub struct Live {
     pub(crate) arr: Mutex<Snapshot>,
     /// hash (minúsculo) → campos do qBittorrent (progress, size, eta…)
     pub(crate) torrents: Mutex<HashMap<String, Value>>,
     rid: Mutex<u64>,
-    pub(crate) jellyfin: Mutex<HashMap<(Kind, i64), String>>,
+    /// link do item no Jellyfin; `None` = ainda não está lá (vale por pouco tempo)
+    pub(crate) jellyfin: Mutex<HashMap<(Kind, i64), JellyfinLink>>,
     last_access: std::sync::Mutex<Option<Instant>>,
     /// webhook do Radarr/Sonarr (ou um pedido novo): refazer as listas agora
     pub(crate) dirty: Notify,

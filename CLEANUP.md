@@ -38,6 +38,26 @@ de arquivos grandes (`stream.rs` 2744 linhas).
 4. Itens de requisição/RAM: medir antes e depois (UPSTREAM_CALLS, RSS).
 5. UI: botões só com ícone.
 
+## Progresso (atualizado em 2026-10-17)
+
+- **Camada 1: feita** (`6e4bb04`, `f9bdc89`), mais os bugs L3-4 (cache do Tosho) e
+  L3-14 (prazo do mapa de anime). Instalada no FeuVault (binário `8b33e28e…`,
+  backup `/usr/local/bin/anubis.bak-a4a28d1`).
+- **Camada 2: L2-1 feita** (`7638b44`, `disk::save_json`). Falta o resto da camada
+  (L2-2 a L2-10); L2-8 espera a decisão do `ñ`.
+- **Camada 3, primeira leva:** L3-3 (cache negativo do Jellyfin, 60 s), L3-6 (teto de
+  32 legendas e limpeza ao cancelar) e chaves removidas das mensagens de erro do
+  Prowlarr/Arr (achado novo, ver abaixo).
+- **Achados novos da instalação em produção** (o agente de instalação mediu):
+  1. A instância antiga chegou a 256,5 MB com `MemoryMax=256M` e 78 MB de swap em
+     quase 3 dias: os itens L3-6 e L3-7 (jobs que nunca saem da memória) sobem de
+     prioridade.
+  2. O journal mostrava `apikey=` nas URLs de erro de indexador: eram corpos de erro
+     do próprio Prowlarr repassados por `services::send` (os clientes mandam a chave
+     em cabeçalho; o TMDB já usa `without_url()`). Corrigido com `without_keys()`.
+- Sobras no FeuVault, fora do repositório: `~/anubis/anubis.new` e `~/anubis/anubis`
+  (binários antigos).
+
 ## Camada 1 — morto ou risco zero
 
 - **L1-1** Comentários soltos: services.rs:317-318 (doc do TMDB sobre

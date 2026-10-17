@@ -7,6 +7,7 @@
 
 use crate::orchestrator::Orchestrator;
 use crate::services::Arr;
+use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -323,6 +324,9 @@ pub(crate) fn found(kind: Kind, v: &Value) -> Option<Found> {
     })
 }
 
+/// Quanto tempo vale "o Jellyfin ainda não tem este item" antes de buscar de novo.
+const JELLYFIN_MISS_TTL: Duration = Duration::from_secs(60);
+
 impl Orchestrator {
     fn arr(&self, kind: Kind) -> Result<&Arr> {
         match kind {
@@ -563,12 +567,16 @@ impl Orchestrator {
 
     /// Link do Jellyfin, calculado uma vez por item (é uma busca no Jellyfin).
     async fn cached_jellyfin_url(&self, kind: Kind, id: i64, item: &Value) -> Option<String> {
-        if let Some(u) = self.live.jellyfin.lock().await.get(&(kind, id)) {
-            return Some(u.clone());
+        let known = self.live.jellyfin.lock().await.get(&(kind, id)).cloned();
+        match known {
+            Some((_, Some(url))) => return Some(url),
+            // sem o item no Jellyfin: o SSE pergunta a cada 2 s, então não busca de novo logo
+            Some((at, None)) if at.elapsed() < JELLYFIN_MISS_TTL => return None,
+            _ => {}
         }
-        let url = self.jellyfin_url(kind, item).await?;
-        self.live.jellyfin.lock().await.insert((kind, id), url.clone());
-        Some(url)
+        let url = self.jellyfin_url(kind, item).await;
+        self.live.jellyfin.lock().await.insert((kind, id), (std::time::Instant::now(), url.clone()));
+        url
     }
 
     /// A série no Sonarr, adicionando se preciso — sem monitorar e sem buscar:

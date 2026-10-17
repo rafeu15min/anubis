@@ -63,7 +63,7 @@ use tokio_util::io::ReaderStream;
 use axum::extract::{Path, Query, State};
 use axum::response::Html;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -572,8 +572,14 @@ pub async fn app_page() -> Response {
 }
 
 /// Arquivos do build: o nome muda com o conteúdo, então podem ficar em cache para sempre.
-async fn asset(Path(file): Path<String>) -> Response {
-    let Some(f) = DIST.get_file(format!("assets/{file}")) else {
+/// O build.sh deixa um `.gz` ao lado de cada .js e .css: se o navegador aceita
+/// gzip, vai esse (pronto, sem gastar CPU na hora).
+async fn asset(Path(file): Path<String>, headers: HeaderMap) -> Response {
+    if file.ends_with(".gz") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let gz = accepts_gzip(&headers).then(|| DIST.get_file(format!("assets/{file}.gz"))).flatten();
+    let Some(f) = gz.or_else(|| DIST.get_file(format!("assets/{file}"))) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let kind = match file.rsplit('.').next() {
@@ -584,7 +590,20 @@ async fn asset(Path(file): Path<String>) -> Response {
         Some("png") => "image/png",
         _ => "application/octet-stream",
     };
-    ([("content-type", kind), ("cache-control", "public, max-age=31536000, immutable")], f.contents()).into_response()
+    let mut res = ([("content-type", kind), ("cache-control", "public, max-age=31536000, immutable"), ("vary", "accept-encoding")], f.contents()).into_response();
+    if gz.is_some() {
+        res.headers_mut().insert("content-encoding", HeaderValue::from_static("gzip"));
+    }
+    res
+}
+
+/// O navegador aceita gzip? (`Accept-Encoding: gzip, deflate, br`; `gzip;q=0` é recusa)
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    let accepted = headers.get("accept-encoding").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    accepted.split(',').any(|e| {
+        let mut parts = e.trim().split(';');
+        parts.next() == Some("gzip") && parts.next().map(str::trim) != Some("q=0")
+    })
 }
 
 /// Página embutida no binário: o navegador confere a cada carga (uma versão
@@ -920,3 +939,44 @@ async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Resp
     s.wake.notify_one();
     (StatusCode::ACCEPTED, Json(json!({ "status": "agendado" }))).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_encoding(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("accept-encoding", HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn gzip_is_accepted_only_when_the_browser_says_so() {
+        assert!(accepts_gzip(&with_encoding("gzip, deflate, br")));
+        assert!(accepts_gzip(&with_encoding("br;q=1.0, gzip;q=0.8")));
+        assert!(!accepts_gzip(&with_encoding("br, deflate")));
+        assert!(!accepts_gzip(&with_encoding("gzip;q=0")));
+        assert!(!accepts_gzip(&HeaderMap::new()));
+    }
+
+    /// Todo .js/.css do build tem seu `.gz` (o build.sh gera) e o servidor entrega o certo.
+    #[tokio::test]
+    async fn every_script_and_style_has_a_gzip_twin_that_is_served() {
+        let assets = DIST.get_dir("assets").expect("web/dist/assets (rode web/app/build.sh)");
+        let names: Vec<&str> = assets.files().filter_map(|f| f.path().file_name()?.to_str()).filter(|n| n.ends_with(".js") || n.ends_with(".css")).collect();
+        assert!(!names.is_empty());
+        for name in names {
+            let plain = asset(Path(name.to_owned()), HeaderMap::new()).await;
+            assert_eq!(plain.status(), StatusCode::OK);
+            assert!(plain.headers().get("content-encoding").is_none());
+            let gz = asset(Path(name.to_owned()), with_encoding("gzip")).await;
+            assert_eq!(gz.status(), StatusCode::OK, "{name}.gz não existe: rode web/app/build.sh");
+            assert_eq!(gz.headers()["content-encoding"], "gzip");
+            assert_eq!(gz.headers()["content-type"], plain.headers()["content-type"]);
+            let body = axum::body::to_bytes(gz.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..2], &[0x1f, 0x8b], "{name}.gz não é gzip");
+        }
+        assert_eq!(asset(Path("qualquer.js.gz".to_owned()), with_encoding("gzip")).await.status(), StatusCode::NOT_FOUND);
+    }
+}
+

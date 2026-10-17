@@ -10,7 +10,7 @@ export default defineConfig({
   server: {
     proxy: Object.fromEntries(
       ['/search', '/prefs', '/history', '/hidden', '/library', '/liked', '/request', '/events', '/discover', '/availability', '/indexers',
-        '/jellyfin', '/requests', '/status', '/series', '/movie', '/where', '/mux', '/autodub', '/health', '/icones.woff2', '/kosync']
+        '/jellyfin', '/requests', '/status', '/series', '/movie', '/where', '/autodub', '/health', '/icones.woff2', '/kosync']
         .map((p) => [p, anubis])
         .concat([
           // /leitura e /watch: a página é do app; o resto, da API

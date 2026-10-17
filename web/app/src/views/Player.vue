@@ -488,7 +488,7 @@ async function goNext() {
 // conta: desce um degrau (720p → 480p → 360p) e reabre no ponto atual. Conta
 // como travada uma espera de mais de 2,5 s ou 3 esperas em 1 minuto, fora os
 // primeiros 5 s depois de abrir o vídeo
-let srcAt = 0, stallAt = 0, stalls = [], phase = null;
+let srcAt = 0, stallAt = 0, stalls = [], phase = null, settled = false;
 function setSrc(u) { srcAt = performance.now(); stallAt = 0; v.value.src = u; }
 // travada sem voltar a tocar (chamada a cada 2 s)
 function stuck() { if (stallAt && performance.now() - stallAt > 5000) { stallAt = 0; degrade(); } }
@@ -561,6 +561,8 @@ async function info() {
     have.value = d.have || [];
     if (d.transcode_height) T = d.transcode_height;
     phase = d.phase;
+    // baixado e com a dublagem conferida: só o link do Jellyfin pode mudar
+    settled = d.phase === 'done' && !(d.dub && d.dub.state === 'checking');
     // começa quando o formato é conhecido. O servidor sempre responde (o
     // ffprobe tem 2 min; sem ele, "toca direto"): só sem resposta nenhuma em
     // ~130 s o player arrisca tocar o arquivo como está
@@ -656,9 +658,15 @@ onMounted(() => {
 
   poke();
   loadSubs();
-  info();
-  const i1 = setInterval(loadSubs, 15000), i2 = setInterval(info, 2000);
-  offs.push(() => { clearInterval(i1); clearInterval(i2); });
+  // /info a cada 2 s enquanto baixa; depois de pronto, a cada 10 s (em série, cada /info vai ao Sonarr)
+  let infoTimer;
+  const tick = async () => {
+    await info();
+    if (alive) infoTimer = setTimeout(tick, settled ? 10000 : 2000);
+  };
+  tick();
+  const i1 = setInterval(loadSubs, 15000);
+  offs.push(() => { clearInterval(i1); clearTimeout(infoTimer); });
 });
 
 onBeforeUnmount(() => {

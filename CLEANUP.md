@@ -43,8 +43,16 @@ de arquivos grandes (`stream.rs` 2744 linhas).
 - **Camada 1: feita** (`6e4bb04`, `f9bdc89`), mais os bugs L3-4 (cache do Tosho) e
   L3-14 (prazo do mapa de anime). Instalada no FeuVault (binário `8b33e28e…`,
   backup `/usr/local/bin/anubis.bak-a4a28d1`).
-- **Camada 2: L2-1 feita** (`7638b44`, `disk::save_json`). Falta o resto da camada
-  (L2-2 a L2-10); L2-8 espera a decisão do `ñ`.
+- **Camada 2:** L2-1 feita (`7638b44`, `disk::save_json`) e L2-8 feita (normalizadores
+  de título unificados em `gosto::key`/`gosto::fold`; o `ñ` agora é tratado igual em
+  todo o projeto, inclusive nos nomes de torrent de `leitura_dl.rs`). Falta o resto
+  (L2-2 a L2-7, L2-9, L2-10 e a duplicação de `leitura_dl.rs` L2-8 parcial: regra dos
+  60% de palavras, nome de arquivo e laço de progresso).
+- **Decisão (2026-10-17): rotas `/mux*` removidas** — o "juntar dublagem" é automático
+  (`autodub`: varredura de 6 h, após importação e `POST /autodub/{kind}/{id}`, que o
+  front usa). Saíram 4 rotas, 4 handlers, `Options`, `mux_options` e `start_mux`
+  (-109 linhas). Sobra: `MuxInfo.video` é sempre `None` agora (candidato a limpeza).
+- **Instalação em produção:** o usuário pediu para instalar tudo só no fim da otimização.
 - **Camada 3, primeira leva:** L3-3 (cache negativo do Jellyfin, 60 s), L3-6 (teto de
   32 legendas e limpeza ao cancelar) e chaves removidas das mensagens de erro do
   Prowlarr/Arr (achado novo, ver abaixo).

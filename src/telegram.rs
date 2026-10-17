@@ -190,7 +190,7 @@ pub struct Telegram {
 
 /// Minúsculas, sem acento, só letras e números (para casar títulos de canal).
 fn chave(s: &str) -> String {
-    crate::gosto::fold(s).chars().filter(|c| c.is_alphanumeric()).collect()
+    crate::gosto::key(s)
 }
 
 fn titulo(peer: &Peer) -> String {

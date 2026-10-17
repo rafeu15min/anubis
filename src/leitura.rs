@@ -126,20 +126,7 @@ struct Shelved {
 
 /// Título comparável: só letras e números, minúsculas, sem acento.
 pub(crate) fn norm(s: &str) -> String {
-    s.chars()
-        .flat_map(char::to_lowercase)
-        .map(|c| match c {
-            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
-            'é' | 'è' | 'ê' | 'ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' => 'i',
-            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
-            'ú' | 'ù' | 'û' | 'ü' => 'u',
-            'ç' => 'c',
-            'ñ' => 'n',
-            c => c,
-        })
-        .filter(|c| c.is_alphanumeric())
-        .collect()
+    crate::gosto::key(s)
 }
 
 /// Já se tem: mesmo título, um contém o outro ("Sprawl #2 Count Zero" tem

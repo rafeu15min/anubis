@@ -18,6 +18,7 @@
 //! O Z-Library (3ª fonte, só com clique: créditos limitados) entra quando
 //! houver conta; até lá, sem torrent bom = "sem fonte".
 
+use crate::gosto::fold;
 use crate::libgen::LibGen;
 use crate::orchestrator::Orchestrator;
 use crate::quality::{self, Kind};
@@ -194,22 +195,6 @@ fn urlencode(s: &str) -> String {
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
             _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-/// Minúsculas e sem acento (os nomes de torrent quase nunca têm acento).
-fn fold(s: &str) -> String {
-    s.chars()
-        .flat_map(char::to_lowercase)
-        .map(|c| match c {
-            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
-            'é' | 'è' | 'ê' | 'ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' => 'i',
-            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
-            'ú' | 'ù' | 'û' | 'ü' => 'u',
-            'ç' => 'c',
-            c => c,
         })
         .collect()
 }

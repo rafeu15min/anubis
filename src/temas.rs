@@ -7,7 +7,6 @@
 //! (Diferente dos vídeos, onde o gosto vem só do sistema.)
 
 use crate::estudo::{Area, Origem};
-use crate::gosto::fold;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,7 +30,7 @@ pub struct Temas {
 }
 
 fn key(nome: &str) -> String {
-    fold(nome).chars().filter(|c| c.is_alphanumeric()).collect()
+    crate::gosto::key(nome)
 }
 
 /// Um tema posto pela pessoa: o nome é o termo de busca.

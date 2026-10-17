@@ -53,7 +53,7 @@ const OWNED_VERSION: u32 = 3;
 
 /// Título comparável: só letras e números, minúsculas, sem acento.
 fn norm(s: &str) -> String {
-    crate::gosto::fold(s).chars().filter(|c| c.is_alphanumeric()).collect()
+    crate::gosto::key(s)
 }
 
 /// O nome do arquivo como título de livro: sem "Sprawl #1", "(Z-Library)",

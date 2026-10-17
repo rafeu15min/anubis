@@ -117,7 +117,7 @@ pub struct WatchedEp {
 
 /// Nome de episódio comparável: só letras e números, minúsculas, sem acento.
 pub fn ep_norm(s: &str) -> String {
-    crate::gosto::fold(s).chars().filter(|c| c.is_alphanumeric()).collect()
+    crate::gosto::key(s)
 }
 
 /// Mesmo nome, ou um contém o outro sendo quase do mesmo tamanho ("Episódio

@@ -90,6 +90,11 @@ pub fn fold(s: &str) -> String {
         .collect()
 }
 
+/// Chave para comparar títulos e nomes: sem acento (o `ñ` também), minúscula, só letras e números.
+pub fn key(s: &str) -> String {
+    fold(s).chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
 fn singular(w: &str) -> String {
     let w = w.trim_end_matches("'s").trim_end_matches('\'');
     if w.len() > 4 && w.ends_with("ies") {
@@ -331,5 +336,11 @@ mod tests {
         let (g, k) = anilist_terms(&s(&["Action", "Sci-Fi"]), &s(&["Cyberpunk", "Male Protagonist"]));
         assert_eq!(g, vec![10759, 10765]);
         assert!(k.contains(&"cyberpunk".to_string()));
+    }
+
+    #[test]
+    fn key_ignores_accents_enye_case_and_punctuation() {
+        assert_eq!(key("Ação & Reação: El Niño (2 ed.)"), "acaoreacaoelnino2ed");
+        assert_eq!(key("España"), key("ESPANA"));
     }
 }

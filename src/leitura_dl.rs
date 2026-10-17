@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// onde o qBittorrent grava os torrents diretos (caminho dos contêineres)
@@ -614,7 +615,7 @@ impl Downloads {
             // página no lugar do PDF (o repositório pede um clique): não serve
             let html = res.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("text/html"));
             anyhow::ensure!(!html, "o endereço deu uma página, não o PDF");
-            tokio::fs::write(&file, res.bytes().await?).await?;
+            save_body(res, &file).await?;
             anyhow::Ok(())
         };
         let ok = match got.await {
@@ -985,6 +986,16 @@ impl Downloads {
     }
 }
 
+/// Grava a resposta no arquivo aos pedaços: um PDF grande não passa inteiro pela memória.
+async fn save_body(mut res: reqwest::Response, file: &Path) -> Result<()> {
+    let mut out = tokio::fs::File::create(file).await?;
+    while let Some(chunk) = res.chunk().await? {
+        out.write_all(&chunk).await?;
+    }
+    out.flush().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1029,5 +1040,28 @@ mod tests {
         let files = vec![f("Pack/Mistborn 1 - O Imperio Final.epub"), f("Pack/Mistborn 1 - O Imperio Final.pdf"), f("Pack/Elantris.epub"), f("Pack/capa.jpg")];
         assert_eq!(pick_file(&files, "Mistborn O Império Final", false), Some(0));
         assert_eq!(pick_file(&[f("capa.jpg")], "x", false), None);
+    }
+
+    #[tokio::test]
+    async fn save_body_writes_the_whole_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = body.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // lê a requisição antes de responder, senão o fechamento vira um reset
+            let _ = sock.read(&mut [0u8; 1024]).await.unwrap();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", served.len());
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(&served).await.unwrap();
+            sock.shutdown().await.unwrap();
+        });
+        let res = reqwest::get(format!("http://127.0.0.1:{port}/livro.pdf")).await.unwrap();
+        let file = std::env::temp_dir().join(format!("anubis-pdf-{}.pdf", std::process::id()));
+        save_body(res, &file).await.unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), body);
+        std::fs::remove_file(file).unwrap();
     }
 }

@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(without_keys("sem chave nenhuma"), "sem chave nenhuma");
     }
 
-    /// O Radarr/Sonarr devolvem o erro em JSON, com o `&` da URL escrito `&`:
+    /// O Radarr/Sonarr devolvem o erro em JSON, com o `&` da URL escrito `\u0026`:
     /// o `6` grudado no `apikey` não deixava a chave ser reconhecida.
     #[test]
     fn keys_after_any_separator_are_hidden() {

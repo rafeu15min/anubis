@@ -26,7 +26,7 @@ fn counted(req: RequestBuilder) -> RequestBuilder {
 /// Tira chaves de um texto de erro: o Prowlarr devolve a URL do indexador, com `apikey=…`.
 fn without_keys(text: &str) -> String {
     static KEYS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let keys = KEYS.get_or_init(|| regex::Regex::new(r#"(?i)\b(api_?key|token|passkey|password)=[^&\s"')]+"#).unwrap());
+    let keys = KEYS.get_or_init(|| regex::Regex::new(r#"(?i)(api_?key|token|passkey|password)=[^&\\\s"')]+"#).unwrap());
     keys.replace_all(text, "$1=***").into_owned()
 }
 
@@ -788,5 +788,27 @@ mod tests {
         assert!(!clean.contains("abc123") && !clean.contains("zzz"));
         assert!(clean.contains("apikey=***&q=loki"));
         assert_eq!(without_keys("sem chave nenhuma"), "sem chave nenhuma");
+    }
+
+    /// O Radarr/Sonarr devolvem o erro em JSON, com o `&` da URL escrito `&`:
+    /// o `6` grudado no `apikey` não deixava a chave ser reconhecida.
+    #[test]
+    fn keys_after_any_separator_are_hidden() {
+        for raw in [
+            "http://prowlarr:9696/1/api?apikey=SEGREDO1",
+            "http://prowlarr:9696/1/api?t=caps&apikey=SEGREDO1",
+            "http://prowlarr:9696/1/api?t=caps&amp;apikey=SEGREDO1",
+            r#"[{"errorMessage":"http://prowlarr:9696/1/api?t=caps&apikey=SEGREDO1"}]"#,
+            "http://prowlarr:9696/1/api?t=caps%26apikey=SEGREDO1",
+            r#"{"errorMessage":"http://prowlarr:9696/1/api?t=caps\u0026apikey=SEGREDO1\u0026x=1"}"#,
+            "http://x.test/t?api_key=SEGREDO1",
+            "http://x.test/t?q=a&token=SEGREDO1",
+            r"http://x.test/t?q=a&passkey=SEGREDO1",
+            "login falhou: password=SEGREDO1",
+        ] {
+            let clean = without_keys(raw);
+            assert!(!clean.contains("SEGREDO1"), "chave à mostra: {clean}");
+            assert!(clean.contains("=***"), "sem o marcador: {clean}");
+        }
     }
 }

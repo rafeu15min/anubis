@@ -290,7 +290,7 @@ async fn indexers(State(s): State<AppState>) -> Response {
 }
 
 async fn indexers_test(State(s): State<AppState>) -> Response {
-    Json(json!({ "down": s.orch.retest_indexers().await })).into_response()
+    Json(json!({ "down": s.orch.retest_indexers(&Default::default()).await })).into_response()
 }
 
 fn kind_str(k: Kind) -> &'static str {

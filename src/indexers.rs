@@ -11,6 +11,7 @@ use crate::orchestrator::Orchestrator;
 use crate::services::Arr;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -21,22 +22,53 @@ const TTL: Duration = Duration::from_secs(60);
 /// de quanto em quanto tempo os indexadores de castigo são testados sozinhos
 const RETEST_EVERY: Duration = Duration::from_secs(15 * 60);
 
+/// Teto do intervalo entre testes de um indexador que não para de falhar.
+const RETEST_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// Intervalo até o próximo teste de quem já falhou `fails` vezes seguidas:
+/// dobra a cada falha, até `RETEST_MAX`. Testar de 15 em 15 min um site que
+/// bloqueou o IP (1337x, erro 1006 do Cloudflare) só renova o bloqueio e o
+/// castigo do Prowlarr.
+fn retest_delay(fails: u32) -> Duration {
+    RETEST_EVERY.saturating_mul(1 << fails.min(5)).min(RETEST_MAX)
+}
+
+/// Guarda quando cada um que continua fora pode ser testado de novo; quem
+/// voltou sai da lista.
+fn reschedule(next: &mut HashMap<String, (Instant, u32)>, tested: &[String], still: &[String], now: Instant) {
+    for n in tested {
+        if !still.contains(n) {
+            next.remove(n);
+            continue;
+        }
+        let fails = next.get(n).map_or(1, |(_, f)| f + 1);
+        next.insert(n.clone(), (now + retest_delay(fails), fails));
+    }
+}
+
 /// Testa de novo, de tempos em tempos, os indexadores de castigo. Uma queda
 /// curta da internet deixava todos de castigo por horas (o Prowlarr estica o
 /// castigo a cada falha): as buscas voltavam vazias muito depois de a
-/// conexão voltar. O teste que passa tira do castigo na hora.
+/// conexão voltar. O teste que passa tira do castigo na hora. Quem continua
+/// falhando é testado cada vez mais devagar (`retest_delay`).
 pub async fn run(orch: Arc<Orchestrator>) {
+    let mut next: HashMap<String, (Instant, u32)> = HashMap::new();
     loop {
         tokio::time::sleep(RETEST_EVERY).await;
         let down = orch.refresh_indexers().await;
-        if down.is_empty() {
+        next.retain(|n, _| down.contains(n));
+        let now = Instant::now();
+        let skip: HashSet<String> = next.iter().filter(|(_, (at, _))| *at > now).map(|(n, _)| n.clone()).collect();
+        let due: Vec<String> = down.iter().filter(|n| !skip.contains(*n)).cloned().collect();
+        if due.is_empty() {
             continue;
         }
-        info!("indexadores de castigo: {}; testando de novo", down.join(", "));
-        let still = orch.retest_indexers().await;
+        info!("indexadores de castigo: {}; testando de novo", due.join(", "));
+        let still = orch.retest_indexers(&skip).await;
         if !still.is_empty() {
             warn!("continuam fora: {}", still.join(", "));
         }
+        reschedule(&mut next, &due, &still, now);
     }
 }
 
@@ -128,8 +160,8 @@ impl Orchestrator {
     /// e em cada Radarr/Sonarr que o tem de castigo. Devolve os que continuam
     /// fora. Um de cada vez: os brasileiros passam todos pelo mesmo
     /// FlareSolverr, que atende um pedido por vez; 9 testes juntos estouravam
-    /// o tempo e os deixavam de castigo.
-    pub async fn retest_indexers(self: &Arc<Self>) -> Vec<String> {
+    /// o tempo e os deixavam de castigo. Os nomes em `skip` não são testados.
+    pub async fn retest_indexers(self: &Arc<Self>, skip: &HashSet<String>) -> Vec<String> {
         let down = self.refresh_indexers().await;
         if down.is_empty() {
             return down;
@@ -156,7 +188,7 @@ impl Orchestrator {
                     continue;
                 }
             };
-            for i in list.as_array().into_iter().flatten().filter(|i| i["name"].as_str().is_some_and(|n| down.iter().any(|d| d == base_name(n)))) {
+            for i in list.as_array().into_iter().flatten().filter(|i| i["name"].as_str().is_some_and(|n| down.iter().any(|d| d == base_name(n)) && !skip.contains(base_name(n)))) {
                 let r = match which {
                     "prowlarr" => self.prowlarr.as_ref().unwrap().test_indexer(i).await,
                     "radarr" => self.radarr.as_ref().unwrap().test_indexer(i).await,
@@ -177,6 +209,24 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retest_slows_down_and_stops_at_the_cap() {
+        let mins = |f| retest_delay(f).as_secs() / 60;
+        assert_eq!([mins(1), mins(2), mins(3), mins(4)], [30, 60, 120, 240]);
+        assert_eq!(retest_delay(5), RETEST_MAX);
+        assert_eq!(retest_delay(40), RETEST_MAX);
+    }
+
+    #[test]
+    fn reschedule_counts_failures_and_forgets_recovered() {
+        let (now, mut next) = (Instant::now(), HashMap::new());
+        let names = ["1337x".to_string(), "EZTV".to_string()];
+        reschedule(&mut next, &names, &names, now);
+        reschedule(&mut next, &names, &names[..1], now);
+        assert_eq!(next["1337x"].1, 2);
+        assert!(!next.contains_key("EZTV"));
+    }
 
     #[test]
     fn reads_the_indexers_down_from_arr_health() {

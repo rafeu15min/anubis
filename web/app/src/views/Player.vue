@@ -619,9 +619,13 @@ onMounted(() => {
   on(vid, 'pause', () => { paused.value = true; poke(); if (target === null && !vid.ended) report(); });
   on(vid, 'ratechange', () => { rate.value = vid.playbackRate; });
   on(vid, 'volumechange', () => { muted.value = vid.muted || vid.volume === 0; volume.value = vid.muted ? 0 : vid.volume; });
+  // um tropeço (rede, trecho ainda não baixado) costuma passar reabrindo no
+  // ponto atual: o aviso só aparece se continuar falhando
+  let errTries = 0, errTimer;
   on(vid, 'error', () => {
-    if (!vid.src) return;
+    if (!vid.src || vid.error?.code === 1) return; // 1: carregamento cancelado por nós
     ui.waiting = false;
+    if (errTries < 2) { errTries++; cancel(errTimer); errTimer = later(reopen, 1500 * errTries); return; }
     msg.text = phase === 'downloading'
       ? 'Este arquivo não tocou no navegador. O download continua; quando terminar, ele abre no Jellyfin.'
       : 'Este trecho não tocou no navegador. Volte ou avance um pouco, ou abra no Jellyfin.';
@@ -629,6 +633,11 @@ onMounted(() => {
   });
   let savedPos = 0;
   on(vid, 'timeupdate', () => {
+    // tocando de verdade: o aviso de erro não fica por cima
+    if (!vid.paused && !vid.error) {
+      msg.on = false;
+      if (errTries && performance.now() - srcAt > 10000) errTries = 0;
+    }
     paint();
     paintBuf();
     if (Math.abs(now() - savedPos) > 5) { savedPos = now(); store(RESUME, String(savedPos)); }

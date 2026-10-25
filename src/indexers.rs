@@ -46,6 +46,13 @@ fn reschedule(next: &mut HashMap<String, (Instant, u32)>, tested: &[String], sti
     }
 }
 
+/// Esquece quem saiu da lista só depois de `RETEST_MAX` do último agendamento:
+/// o aviso de saúde dos *arr some e volta por um ciclo, e zerar o recuo aí
+/// recomeçaria os testes ao site bloqueado.
+fn forget_old(next: &mut HashMap<String, (Instant, u32)>, down: &[String], now: Instant) {
+    next.retain(|n, (at, _)| down.contains(n) || now < *at + RETEST_MAX);
+}
+
 /// Testa de novo, de tempos em tempos, os indexadores de castigo. Uma queda
 /// curta da internet deixava todos de castigo por horas (o Prowlarr estica o
 /// castigo a cada falha): as buscas voltavam vazias muito depois de a
@@ -56,8 +63,8 @@ pub async fn run(orch: Arc<Orchestrator>) {
     loop {
         tokio::time::sleep(RETEST_EVERY).await;
         let down = orch.refresh_indexers().await;
-        next.retain(|n, _| down.contains(n));
         let now = Instant::now();
+        forget_old(&mut next, &down, now);
         let skip: HashSet<String> = next.iter().filter(|(_, (at, _))| *at > now).map(|(n, _)| n.clone()).collect();
         let due: Vec<String> = down.iter().filter(|n| !skip.contains(*n)).cloned().collect();
         if due.is_empty() {
@@ -160,12 +167,14 @@ impl Orchestrator {
     /// e em cada Radarr/Sonarr que o tem de castigo. Devolve os que continuam
     /// fora. Um de cada vez: os brasileiros passam todos pelo mesmo
     /// FlareSolverr, que atende um pedido por vez; 9 testes juntos estouravam
-    /// o tempo e os deixavam de castigo. Os nomes em `skip` não são testados.
+    /// o tempo e os deixavam de castigo. Os nomes em `skip` não são testados, e
+    /// o que falhou no Prowlarr não é testado de novo no Radarr/Sonarr.
     pub async fn retest_indexers(self: &Arc<Self>, skip: &HashSet<String>) -> Vec<String> {
         let down = self.refresh_indexers().await;
         if down.is_empty() {
             return down;
         }
+        let mut failed: HashSet<String> = HashSet::new();
         for which in ["prowlarr", "radarr", "sonarr"] {
             let list = match which {
                 "prowlarr" => match &self.prowlarr {
@@ -188,13 +197,17 @@ impl Orchestrator {
                     continue;
                 }
             };
-            for i in list.as_array().into_iter().flatten().filter(|i| i["name"].as_str().is_some_and(|n| down.iter().any(|d| d == base_name(n)) && !skip.contains(base_name(n)))) {
+            // o teste do Radarr/Sonarr passa pelo Prowlarr: se o dele falhou, o
+            // deles falharia igual, e seria mais um pedido ao site bloqueado
+            let blocked = if which == "prowlarr" { HashSet::new() } else { failed.clone() };
+            for i in list.as_array().into_iter().flatten().filter(|i| i["name"].as_str().is_some_and(|n| down.iter().any(|d| d == base_name(n)) && !skip.contains(base_name(n)) && !blocked.contains(base_name(n)))) {
                 let r = match which {
                     "prowlarr" => self.prowlarr.as_ref().unwrap().test_indexer(i).await,
                     "radarr" => self.radarr.as_ref().unwrap().test_indexer(i).await,
                     _ => self.sonarr.as_ref().unwrap().test_indexer(i).await,
                 };
                 let name = i["name"].as_str().unwrap_or_default();
+                failed.extend((which == "prowlarr" && r.is_err()).then(|| base_name(name).to_owned()));
                 match r {
                     Ok(()) => info!("{which}: indexador {name} respondeu, saiu do castigo"),
                     Err(e) => warn!("{which}: indexador {name} continua fora: {e:#}"),
@@ -216,6 +229,16 @@ mod tests {
         assert_eq!([mins(1), mins(2), mins(3), mins(4)], [30, 60, 120, 240]);
         assert_eq!(retest_delay(5), RETEST_MAX);
         assert_eq!(retest_delay(40), RETEST_MAX);
+    }
+
+    #[test]
+    fn forget_old_keeps_the_count_through_a_short_absence() {
+        let now = Instant::now();
+        let mut next = HashMap::from([("1337x".to_string(), (now, 3))]);
+        forget_old(&mut next, &[], now);
+        assert_eq!(next["1337x"].1, 3);
+        forget_old(&mut next, &[], now + RETEST_MAX);
+        assert!(next.is_empty());
     }
 
     #[test]

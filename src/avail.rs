@@ -427,7 +427,7 @@ impl Orchestrator {
         // "Dual Audio"), pelas faixas de verdade das versões de fora
         if anime {
             let foreign = matched.iter().copied().filter(|r| !is_br(r));
-            if self.tracks_of(foreign).await.values().any(|t| t.portuguese_audio()) {
+            if self.tracks_of(foreign, false).await.values().any(|t| t.portuguese_audio()) {
                 return Avail::Dubbed;
             }
         }

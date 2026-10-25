@@ -1961,7 +1961,7 @@ impl Orchestrator {
             }
         }
         let judged = started.elapsed();
-        let tracks = if anime { self.tracks_of(mine.iter().map(|(r, _)| r)).await } else { HashMap::new() };
+        let tracks = if anime { self.tracks_of(mine.iter().map(|(r, _)| r), always_dht).await } else { HashMap::new() };
         info!("{name} S{s:02}E{e:02}: {} versões deste episódio — buscas {searched:.1?}, nomes {:.1?}, faixas {:.1?}", mine.len(), judged - searched, started.elapsed() - judged);
         let mut out: Vec<Value> = mine
             .iter()
@@ -2017,14 +2017,15 @@ impl Orchestrator {
             .map(str::to_owned)
     }
 
-    /// As faixas (Anime Tosho) das versões mais semeadas, até 6 s.
-    pub(crate) async fn tracks_of<'a>(&self, releases: impl Iterator<Item = &'a Value>) -> HashMap<String, Tracks> {
-        /// versões conferidas por busca (as mais semeadas)
-        const MAX: usize = 24;
+    /// As faixas (Anime Tosho) das versões mais semeadas, até 6 s. Na busca de
+    /// dublagem (`deep`) vão mais versões e mais tempo: os pacotes MULTi com
+    /// dublagem têm poucas fontes e ficavam fora das 24 mais semeadas.
+    pub(crate) async fn tracks_of<'a>(&self, releases: impl Iterator<Item = &'a Value>, deep: bool) -> HashMap<String, Tracks> {
+        let (max, limit) = if deep { (150, Duration::from_secs(30)) } else { (24, Duration::from_secs(6)) };
         let mut list: Vec<&Value> = releases.collect();
         list.sort_by_key(|r| std::cmp::Reverse(r["seeders"].as_i64().unwrap_or(0)));
-        let hashes: Vec<String> = list.iter().filter_map(|r| crate::tosho::info_hash(r)).take(MAX).collect();
-        self.tosho.tracks(&hashes, Duration::from_secs(6)).await
+        let hashes: Vec<String> = list.iter().filter_map(|r| crate::tosho::info_hash(r)).take(max).collect();
+        self.tosho.tracks(&hashes, limit).await
     }
 
     /// Magnet direto, ou o .torrent do link de download (que pode redirecionar

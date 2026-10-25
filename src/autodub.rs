@@ -315,6 +315,14 @@ impl Orchestrator {
             return self.set_entry(&k, Some(entry)).await;
         }
         let host = self.cfg.host_path(&item.path);
+        // o Radarr/Sonarr ainda lista um arquivo que não está mais no disco: não é
+        // culpa das dublagens, que não podem ficar marcadas como falhas por 30 dias
+        if !host.exists() {
+            warn!("{}: o arquivo da biblioteca não está no disco ({})", item.title, host.display());
+            entry.next = now() + 6 * 3600;
+            entry.note = "arquivo da biblioteca ausente no disco".into();
+            return self.set_entry(&k, Some(entry)).await;
+        }
         let mut last = String::new();
         for c in fresh.iter().take(MAX_TRIES) {
             // espaço para a dublagem e para o arquivo juntado (do tamanho do da biblioteca)

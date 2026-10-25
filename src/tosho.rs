@@ -116,13 +116,17 @@ impl Tosho {
         let (http, cache) = (self.http.clone(), self.cache.clone());
         tokio::spawn(async move {
             let t = fetch(&http, &h).await;
-            cache.lock().await.insert(h.clone(), (Instant::now(), t.clone()));
-            (h, t)
+            if let Some(t) = &t {
+                cache.lock().await.insert(h.clone(), (Instant::now(), t.clone()));
+            }
+            (h, t.flatten())
         })
     }
 }
 
-async fn fetch(http: &Client, hash: &str) -> Option<Tracks> {
+/// `None`: não deu para perguntar (rede, erro do servidor) e não vale lembrar;
+/// `Some(None)`: o Tosho respondeu, mas não tem o torrent (404) ou as faixas.
+async fn fetch(http: &Client, hash: &str) -> Option<Option<Tracks>> {
     let res = match http.get(format!("{API}{hash}")).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -130,11 +134,14 @@ async fn fetch(http: &Client, hash: &str) -> Option<Tracks> {
             return None;
         }
     };
-    // 404: o Tosho não tem esse torrent
-    if !res.status().is_success() {
+    let status = res.status();
+    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return None;
     }
-    parse(&res.json::<Value>().await.ok()?)
+    if !status.is_success() {
+        return Some(None);
+    }
+    Some(parse(&res.json::<Value>().await.ok()?))
 }
 
 /// As faixas do primeiro arquivo com MediaInfo (o vídeo; num pacote, os

@@ -365,6 +365,26 @@ impl Prowlarr {
         send::<Value>(req.timeout(Duration::from_secs(120)), "Prowlarr teste do indexador").await?;
         Ok(())
     }
+
+    /// O indexador bateu o limite de consultas configurado no próprio Prowlarr?
+    /// Devolve quanto falta para liberar. A sonda é o `t=caps` da porta Torznab:
+    /// o Prowlarr confere castigo e limite antes de tocar o site, e as
+    /// capacidades saem da definição — não gasta consulta nem chega ao site.
+    pub async fn query_limited(&self, id: i64) -> Result<Option<Duration>> {
+        let req = self.http.get(format!("{}/{id}/api?t=caps", self.base)).header("X-Api-Key", &self.key).timeout(Duration::from_secs(10));
+        let res = counted(req).send().await.context("Prowlarr caps: sem resposta")?;
+        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(None);
+        }
+        let retry = res.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).map_or(Duration::ZERO, Duration::from_secs);
+        Ok(is_query_limit(&res.text().await.unwrap_or_default()).then_some(retry))
+    }
+}
+
+/// O 429 da porta Torznab é limite de consultas (configurado no Prowlarr) e
+/// não castigo por falha ("Indexer is disabled till …").
+fn is_query_limit(body: &str) -> bool {
+    body.contains("Query Limit")
 }
 
 pub struct Tmdb {
@@ -779,7 +799,14 @@ impl Jellyfin {
 
 #[cfg(test)]
 mod tests {
-    use super::without_keys;
+    use super::{is_query_limit, without_keys};
+
+    /// As duas mensagens de 429 da porta Torznab do Prowlarr (v2.6.5).
+    #[test]
+    fn query_limit_is_not_a_failure_penalty() {
+        assert!(is_query_limit(r#"<error code="429" description="User configurable Indexer Query Limit of 1 in last 1 hour(s) reached." />"#));
+        assert!(!is_query_limit(r#"<error code="429" description="Indexer is disabled till 10/28/2026 03:05:11 due to recent failures." />"#));
+    }
 
     #[test]
     fn keys_in_urls_are_hidden_in_error_text() {

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// a lista fica guardada por 1 min (cada consulta são 4–5 chamadas)
 const TTL: Duration = Duration::from_secs(60);
@@ -123,6 +123,14 @@ fn enabled_names(list: &Value) -> Vec<String> {
     list.as_array().into_iter().flatten().filter(|i| i["enable"] != false).filter_map(|i| i["name"].as_str().map(|n| base_name(n).to_owned())).collect()
 }
 
+/// Quem o Radarr/Sonarr dão como fora mas o Prowlarr não pôs de castigo, com o
+/// id no Prowlarr: o Radarr/Sonarr chegam ao site pelo Prowlarr, e o 429 do
+/// limite de consultas dele (1337x: 1 por hora) vira "falha" do lado deles.
+fn suspects(arr_down: &[String], prowlarr_down: &[String], prowlarr_list: &Value) -> Vec<(String, i64)> {
+    let id_of = |n: &str| prowlarr_list.as_array()?.iter().find(|i| i["enable"] != false && i["name"].as_str() == Some(n))?["id"].as_i64();
+    arr_down.iter().filter(|n| !prowlarr_down.contains(n)).filter_map(|n| Some((n.clone(), id_of(n)?))).collect()
+}
+
 async fn down_in_arr(arr: &Arr) -> anyhow::Result<Vec<String>> {
     let (mut names, all) = down_in_health(&arr.get_json("health").await?);
     if all {
@@ -143,24 +151,47 @@ impl Orchestrator {
     }
 
     /// O mesmo, consultando agora (depois de uma busca que pode ter falhado).
+    /// Quem só bateu o limite de consultas do Prowlarr não conta como fora:
+    /// volta sozinho quando o limite vence, e testá-lo antes disso só daria
+    /// outro 429 (e, no Radarr/Sonarr, mais castigo).
     pub async fn refresh_indexers(&self) -> Vec<String> {
-        let mut down = vec![];
+        let mut arr_down = vec![];
         for arr in [&self.radarr, &self.sonarr].into_iter().flatten() {
             match down_in_arr(arr).await {
-                Ok(n) => down.extend(n),
+                Ok(n) => arr_down.extend(n),
                 Err(e) => warn!("indexadores: {e:#}"),
             }
         }
-        if let Some(p) = &self.prowlarr {
-            match tokio::try_join!(p.get_json("indexerstatus"), p.get_json("indexer")) {
-                Ok((status, list)) => down.extend(down_in_prowlarr(&status, &list, Utc::now())),
-                Err(e) => warn!("indexadores: {e:#}"),
-            }
-        }
+        arr_down.sort();
+        arr_down.dedup();
+        let mut down = match &self.prowlarr {
+            Some(p) => self.without_limited(p, arr_down).await,
+            None => arr_down,
+        };
         down.sort();
         down.dedup();
         *self.indexers.0.lock().await = Some((Instant::now(), down.clone()));
         down
+    }
+
+    /// Junta os de castigo no Prowlarr e tira dos do Radarr/Sonarr os que só
+    /// estão no limite de consultas do Prowlarr.
+    async fn without_limited(&self, p: &crate::services::Prowlarr, mut arr_down: Vec<String>) -> Vec<String> {
+        let (status, list) = match tokio::try_join!(p.get_json("indexerstatus"), p.get_json("indexer")) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("indexadores: {e:#}");
+                return arr_down;
+            }
+        };
+        let prowlarr_down = down_in_prowlarr(&status, &list, Utc::now());
+        for (name, id) in suspects(&arr_down, &prowlarr_down, &list) {
+            let Ok(Some(wait)) = p.query_limited(id).await else { continue };
+            debug!("{name}: limite de consultas do Prowlarr, libera em {} min (não conta como fora)", wait.as_secs().div_ceil(60));
+            arr_down.retain(|n| *n != name);
+        }
+        arr_down.extend(prowlarr_down);
+        arr_down
     }
 
     /// Testa de novo, um de cada vez, os indexadores fora do ar — no Prowlarr
@@ -279,5 +310,19 @@ mod tests {
             { "indexerId": 6, "mostRecentFailure": "2026-09-30T11:59:00Z" },
         ]);
         assert_eq!(down_in_prowlarr(&status, &indexers, now), ["1337x"]);
+    }
+
+    /// Só vira suspeito de "limite de consultas" quem o Prowlarr não pôs de
+    /// castigo e que existe ligado nele (os demais seguem como fora).
+    #[test]
+    fn suspects_are_down_in_arr_but_fine_in_prowlarr() {
+        let list = json!([
+            { "id": 1, "name": "1337x", "enable": true },
+            { "id": 3, "name": "Comando Torrents (BR)", "enable": true },
+            { "id": 6, "name": "bitmagnet (DHT)", "enable": false },
+        ]);
+        let arr_down = ["1337x", "Comando Torrents (BR)", "bitmagnet (DHT)", "Só no Sonarr"].map(String::from);
+        let prowlarr_down = ["Comando Torrents (BR)".to_owned()];
+        assert_eq!(suspects(&arr_down, &prowlarr_down, &list), [("1337x".to_owned(), 1)]);
     }
 }

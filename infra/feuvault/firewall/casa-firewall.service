@@ -1,0 +1,20 @@
+# /etc/systemd/system/casa-firewall.service
+# Carrega a tabela "inet casa" (firewall de entrada IPv4+IPv6 do FeuVault)
+# antes da rede subir. Nao usa o nftables.service do Arch: ele faz
+# "flush ruleset" ao parar e apagaria as regras do Docker e do Tailscale.
+[Unit]
+Description=Firewall de entrada da casa (tabela inet casa)
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /etc/nftables-casa.nft
+ExecReload=/usr/bin/nft -f /etc/nftables-casa.nft
+ExecStop=/usr/bin/nft delete table inet casa
+
+[Install]
+WantedBy=multi-user.target

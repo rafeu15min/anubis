@@ -77,6 +77,13 @@ services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
+    # 2026-10-16: o Chromium dele chegou a ~230% de CPU e 4,4 GB de RAM
+    # tentando passar o desafio do 1337x, e o ffmpeg do Anubis travava.
+    # Limite de 1 núcleo e 1,5 GB; peso de CPU baixo (cpu.weight ~35)
+    # para perder a disputa quando a CPU enche.
+    cpus: "1.0"
+    mem_limit: 1536m
+    cpu_shares: 256
     # o Anubis (no host) usa para passar o anti-bot do Z-Library
     ports:
       - "127.0.0.1:8191:8191"

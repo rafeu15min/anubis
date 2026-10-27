@@ -1,0 +1,49 @@
+#!/usr/bin/nft -f
+# /etc/nftables-casa.nft - firewall de entrada do FeuVault (IPv4 e IPv6).
+# Tabela propria "inet casa": NAO usa "flush ruleset", entao nao mexe nas
+# regras do Docker, do Tailscale, do nvpn nem na tabela "ip6 feuvault"
+# (redirect 443->6882). Carregada por casa-firewall.service (2026-10-15).
+# Desligar na hora: sudo systemctl stop casa-firewall  (apaga so esta tabela)
+
+# Recarga atomica: cria a tabela se nao existir, apaga e recria abaixo.
+table inet casa
+delete table inet casa
+
+table inet casa {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		ct state established,related accept
+		iif "lo" accept
+		meta l4proto { icmp, ipv6-icmp } accept
+
+		# Malha nvpn (utun100): o oracle-hub (VM publica) nao abre conexao
+		# com o FeuVault; os aparelhos da casa na malha continuam liberados.
+		iifname "utun100" ip saddr 10.44.150.57 counter drop comment "hub nvpn"
+		iifname "utun100" ip saddr 10.44.0.0/16 accept
+
+		# Caminhos internos: Tailscale (o ACL do Tailscale filtra o hub),
+		# containers, LAN, cabo direto e link-local IPv6 (inclui DHCPv6).
+		iifname "tailscale0" accept
+		iifname "docker0" accept
+		iifname "br-*" accept
+		ip saddr { 192.168.1.0/24, 10.10.10.0/24 } accept
+		ip6 saddr fe80::/10 accept
+
+		# Publico: NPM (80/443), bitmagnet DHT (3334), torrent do Anubis (6882;
+		# o IPv6 :443 chega aqui ja redirecionado para 6882).
+		meta l4proto { tcp, udp } th dport { 80, 443, 3334, 6882 } counter accept comment "publico"
+		# Tailscale conexao direta (WireGuard), igual a tabela ip6 feuvault.
+		udp dport 41641 accept
+
+		counter comment "descartado pela policy"
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		# O hub tambem nao abre conexao para containers (portas publicadas
+		# pelo Docker passam por aqui, nao pelo input) nem para a LAN
+		# atravessando o FeuVault.
+		iifname "utun100" ip saddr 10.44.150.57 ct state new counter drop comment "hub nvpn"
+	}
+}

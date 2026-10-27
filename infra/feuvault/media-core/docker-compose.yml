@@ -20,6 +20,10 @@ services:
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
+    # 2026-10-16: peso de CPU alto (cpu.weight ~300; os outros containers
+    # ficam em 100). O ffmpeg que o Anubis roda aqui dentro (docker exec)
+    # leva vantagem quando a CPU enche; sem disputa, não muda nada.
+    cpu_shares: 4096
     # nos três caminhos, do mais rápido ao mais lento: cabo direto com o PC,
     # rede da casa e Tailscale (o Anubis leva o "Abrir no Jellyfin" pelo mesmo
     # caminho da página; ip_nonlocal_bind=1 deixa publicar o IP do Tailscale

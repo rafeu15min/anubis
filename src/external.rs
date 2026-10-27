@@ -193,17 +193,49 @@ pub(crate) struct AnimeIds {
     tvdb: Option<i64>,
 }
 
-/// Uma entrada da lista de ids: `themoviedb_id` é {"tv": N} ou {"movie": N}
+/// Uma entrada da lista de ids, só com os campos usados (os outros ~12 nem são
+/// lidos para a memória: a lista tem ~40 mil entradas e 7,5 MB, e passar tudo
+/// por `Value` custava dezenas de MB a cada carga). Cada campo fica como
+/// `Value` para um formato inesperado numa entrada não derrubar a lista toda.
+#[derive(Deserialize)]
+struct RawIds {
+    #[serde(rename = "type", default)]
+    kind: Value,
+    #[serde(default)]
+    anilist_id: Value,
+    #[serde(default)]
+    themoviedb_id: Value,
+    #[serde(default)]
+    tvdb_id: Value,
+    #[serde(default)]
+    thetvdb_id: Value,
+}
+
+/// Um id que pode vir como número ou como lista (`{"movie": [319145]}`, o
+/// formato atual da lista para filmes): vale o primeiro.
+fn first_id(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_array()?.first()?.as_i64())
+}
+
+/// Uma entrada da lista de ids: `themoviedb_id` é {"tv": N} ou {"movie": [N]}
 /// (em versões antigas, só o número).
-fn anime_ids(x: &Value) -> Option<(i64, AnimeIds)> {
-    let tmdb = &x["themoviedb_id"];
-    let movie_type = x["type"] == "MOVIE";
+fn anime_ids(x: &RawIds) -> Option<(i64, AnimeIds)> {
+    let tmdb = &x.themoviedb_id;
+    let movie_type = x.kind == "MOVIE";
     let (tmdb_tv, tmdb_movie) = match tmdb.as_i64() {
         Some(n) if movie_type => (None, Some(n)),
         Some(n) => (Some(n), None),
-        None => (tmdb["tv"].as_i64(), tmdb["movie"].as_i64()),
+        None => (first_id(&tmdb["tv"]), first_id(&tmdb["movie"])),
     };
-    Some((x["anilist_id"].as_i64()?, AnimeIds { tmdb_tv, tmdb_movie, tvdb: x["tvdb_id"].as_i64().or(x["thetvdb_id"].as_i64()) }))
+    Some((x.anilist_id.as_i64()?, AnimeIds { tmdb_tv, tmdb_movie, tvdb: x.tvdb_id.as_i64().or(x.thetvdb_id.as_i64()) }))
+}
+
+/// Lê a lista de ids do disco e monta o mapa. Fora do runtime: são 7,5 MB de
+/// leitura e parse, e o runtime tem uma thread só.
+fn load_anime_map(path: &std::path::Path) -> Result<AnimeMap> {
+    let bytes = std::fs::read(path).with_context(|| format!("lendo {}", path.display()))?;
+    let raw: Vec<RawIds> = serde_json::from_slice(&bytes).context("lista de ids de anime")?;
+    Ok(raw.iter().filter_map(anime_ids).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1052,8 +1084,8 @@ impl Orchestrator {
             return Ok(map);
         }
         self.refresh_anime_file().await?;
-        let raw: Vec<Value> = serde_json::from_slice(&std::fs::read(&self.external.map_path)?)?;
-        let map: Arc<AnimeMap> = Arc::new(raw.iter().filter_map(anime_ids).collect());
+        let path = self.external.map_path.clone();
+        let map: Arc<AnimeMap> = Arc::new(tokio::task::spawn_blocking(move || load_anime_map(&path)).await??);
         *self.external.anime_map.lock().await = Some((Instant::now(), map.clone()));
         Ok(map)
     }
@@ -1197,11 +1229,15 @@ mod tests {
 
     #[test]
     fn reads_both_id_list_formats() {
-        let (aid, ids) = anime_ids(&json!({ "anilist_id": 154587, "type": "TV", "themoviedb_id": { "tv": 209867 }, "tvdb_id": 424536 })).unwrap();
+        let ids_of = |v: Value| anime_ids(&serde_json::from_value(v).unwrap());
+        let (aid, ids) = ids_of(json!({ "anilist_id": 154587, "type": "TV", "themoviedb_id": { "tv": 209867 }, "tvdb_id": 424536 })).unwrap();
         assert_eq!((aid, ids.tmdb_tv, ids.tmdb_movie, ids.tvdb), (154587, Some(209867), None, Some(424536)));
-        let (_, ids) = anime_ids(&json!({ "anilist_id": 1, "type": "MOVIE", "themoviedb_id": 129 })).unwrap();
+        let (_, ids) = ids_of(json!({ "anilist_id": 1, "type": "MOVIE", "themoviedb_id": 129 })).unwrap();
         assert_eq!((ids.tmdb_tv, ids.tmdb_movie), (None, Some(129)));
-        assert!(anime_ids(&json!({ "type": "TV" })).is_none());
+        // formato atual dos filmes: lista de ids (1.393 filmes ficavam sem id)
+        let (_, ids) = ids_of(json!({ "anilist_id": 5661, "type": "MOVIE", "themoviedb_id": { "movie": [319145, 1] }, "imdb_id": ["tt0419229"] })).unwrap();
+        assert_eq!((ids.tmdb_tv, ids.tmdb_movie), (None, Some(319145)));
+        assert!(ids_of(json!({ "type": "TV" })).is_none());
     }
 
     #[test]

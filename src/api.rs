@@ -137,8 +137,10 @@ pub fn router(state: AppState) -> Router {
         .route("/storage/run", post(run))
         .route("/hooks/torrent-finished", post(torrent_finished))
         .route("/hooks/arr", post(arr_event))
-        // qualquer acesso ao site (fora os avisos do Radarr/Sonarr/qBittorrent)
-        // pausa a varredura da DHT
+        // a página avisa que alguém está mexendo nela (ver `counts_as_use`)
+        .route("/activity", post(|| async { StatusCode::NO_CONTENT }))
+        // as ações e as páginas (fora os avisos do Radarr/Sonarr/qBittorrent)
+        // pausam a varredura da DHT
         .layer(axum::middleware::from_fn_with_state(state.clone(), activity))
         .with_state(state);
     // fora do middleware acima: o Kindle sincronizando não é alguém no site
@@ -157,10 +159,28 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn activity(State(s): State<AppState>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    if !req.uri().path().starts_with("/hooks/") {
+    if counts_as_use(req.method(), req.uri().path()) {
         s.orch.dht_touch();
     }
     next.run(req).await
+}
+
+/// Pedido de alguém usando o site (pausa a varredura da DHT)? Contam as ações
+/// (todo método que não é GET: pedir, assistir, o progresso que o player manda
+/// a cada 15 s tocando e o `POST /activity` que a página manda quando alguém
+/// mexe nela), as páginas, a busca e o vídeo. Não contam as consultas que a
+/// página repete sozinha (SSE, status, info, disponibilidade…): uma aba
+/// aberta parada mantinha a varredura pausada para sempre. Os avisos do
+/// Radarr/Sonarr/qBittorrent (`/hooks/`) não são gente.
+fn counts_as_use(method: &axum::http::Method, path: &str) -> bool {
+    if path.starts_with("/hooks/") {
+        return false;
+    }
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return true;
+    }
+    let watch: Option<Vec<&str>> = path.strip_prefix("/watch/").map(|r| r.split('/').collect());
+    matches!(path, "/" | "/preferencias" | "/search" | "/jellyfin/open") || matches!(watch.as_deref(), Some([_, _] | [_, _, "video" | "stream.mp4"]))
 }
 
 fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -943,6 +963,22 @@ async fn torrent_finished(State(s): State<AppState>, headers: HeaderMap) -> Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Aba parada (SSE, status, info) não segura a varredura da DHT; ação,
+    /// página e vídeo seguram; aviso do Radarr/Sonarr nunca.
+    #[test]
+    fn only_people_count_as_use() {
+        use axum::http::Method;
+        for p in ["/events", "/status/movie/1", "/watch/movie/1/info", "/availability", "/requests", "/discover/filmes", "/watch/movie/1/subs/0", "/health"] {
+            assert!(!counts_as_use(&Method::GET, p), "{p}");
+        }
+        for p in ["/", "/preferencias", "/search", "/jellyfin/open", "/watch/movie/1", "/watch/episode/9/video", "/watch/movie/1/stream.mp4"] {
+            assert!(counts_as_use(&Method::GET, p), "{p}");
+        }
+        assert!(counts_as_use(&Method::POST, "/activity"));
+        assert!(counts_as_use(&Method::POST, "/watch/movie/1/progress"));
+        assert!(!counts_as_use(&Method::POST, "/hooks/arr"));
+    }
 
     fn with_encoding(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

@@ -24,6 +24,17 @@ router.afterEach((to) => {
 
 createApp(App).use(router).mount('#app');
 
+// alguém mexendo na página pausa a varredura da DHT no servidor (ela atrapalha
+// a internet de casa). A aba aberta parada não conta: o servidor ignora as
+// consultas que a página repete sozinha. No máximo um aviso por minuto.
+let usedAt = 0;
+const using = () => {
+  if (document.visibilityState !== 'visible' || Date.now() - usedAt < 60000) return;
+  usedAt = Date.now();
+  fetch('/activity', { method: 'POST', keepalive: true }).catch(() => {});
+};
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(ev, using, { passive: true, capture: true });
+
 // escala de caminhos: cabo direto » rede local » Tailscale. O /health lista os
 // endereços nessa ordem; os mais rápidos que o atual são testados juntos e a
 // página passa para o melhor que responder (uma vez por sessão).
